@@ -43,6 +43,8 @@ constexpr uint8_t kGetResult = 0x64;
 constexpr uint8_t kGetParam = 0x65;
 constexpr uint8_t kSetParam = 0x66;
 constexpr uint8_t kSetServoLimits = 0x67;
+constexpr uint8_t kReadRegister = 0x68;
+constexpr uint8_t kWriteRegister = 0x69;
 constexpr uint8_t kFirst = 0x60;
 constexpr uint8_t kLast = 0x6F;
 inline bool isDxlMsg(uint8_t id) { return id >= kFirst && id <= kLast; }
@@ -60,6 +62,8 @@ enum class Type : uint8_t {
   GetParam = 5,    // arg0=id, param=LogicalParam
   SetParam = 6,    // arg0=id, param=LogicalParam, val_a=value
   SetLimits = 7,   // arg0=id, val_a=min_tick, val_b=max_tick
+  ReadReg = 8,     // arg0=id, val_a=addr, param=len (raw, expert-gated)
+  WriteReg = 9,    // arg0=id, val_a=addr, param=len, val_b=value, arg1=flags
 };
 
 // Single-slot lifecycle, written only on a state transition (the SPSC fence).
@@ -91,9 +95,10 @@ struct DxlJobRequest {
   dxljob::Type type = dxljob::Type::None;
   uint8_t arg0 = 0;
   uint8_t arg1 = 0;
-  uint8_t param = 0;     // LogicalParam value for GetParam/SetParam
-  int32_t val_a = 0;     // SetParam value, or min_tick for SetLimits
-  int32_t val_b = 0;     // max_tick for SetLimits
+  uint8_t param = 0;     // LogicalParam value for GetParam/SetParam, or raw
+                         // register byte length (1/2/4) for ReadReg/WriteReg
+  int32_t val_a = 0;     // SetParam value, min_tick for SetLimits, or raw addr
+  int32_t val_b = 0;     // max_tick for SetLimits, or raw write value
 };
 
 // One serialized job result (consumer -> producer).
@@ -171,6 +176,13 @@ class DxlJobApi {
     lock_held_ = lock_held;
   }
 
+  // Enable/disable the expert-gated raw register commands (DXL_READ_REGISTER /
+  // DXL_WRITE_REGISTER). Disabled by default: raw access bypasses the logical
+  // parameter table and is for diagnostics only. Submits are Rejected unless
+  // this is enabled AND the normal maintenance gate is open.
+  void setRawRegisterEnabled(bool enabled) { raw_register_enabled_ = enabled; }
+  bool rawRegisterEnabled() const { return raw_register_enabled_; }
+
   // Access the underlying queue (used by the dxlTask executor and tests).
   DxlJobQueue& queue() { return queue_; }
   const DxlJobQueue& queue() const { return queue_; }
@@ -195,6 +207,7 @@ class DxlJobApi {
   DxlJobQueue queue_;
   uint8_t live_state_ = 0;
   bool lock_held_ = false;
+  bool raw_register_enabled_ = false;
 };
 
 }  // namespace protocol

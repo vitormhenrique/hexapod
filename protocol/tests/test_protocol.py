@@ -303,6 +303,10 @@ _DXL_BUILDERS = {
         5, api.DXL_PARAM_MOVING_SPEED, 1000, seq=7
     ),
     "dxl_set_servo_limits": lambda: api.build_dxl_set_servo_limits(7, 100, 3900, seq=8),
+    "dxl_read_register": lambda: api.build_dxl_read_register(3, 36, 2, seq=9),
+    "dxl_write_register": lambda: api.build_dxl_write_register(
+        5, 6, 2, 100, is_eeprom=True, seq=10
+    ),
 }
 
 
@@ -397,3 +401,37 @@ def test_parse_dxl_servo_limits_result():
     assert lim is not None
     assert lim.table_kind == 2 and lim.min_tick == 100
     assert lim.max_tick == 3900 and lim.verified
+
+
+def test_parse_dxl_read_register_result():
+    # [addr(u16), len, value(i32)].
+    data = struct.pack("<HBi", 36, 2, 2048)
+    res = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    rv = res.read_register()
+    assert rv is not None
+    assert rv.address == 36 and rv.length == 2 and rv.value == 2048
+    # Pending result yields no decode.
+    assert api.parse_dxl_result(
+        bytes([api.DXL_SLOT_PENDING, api.DXL_CODE_OK, 0])
+    ).read_register() is None
+
+
+def test_parse_dxl_write_register_result():
+    # [addr(u16), len, written(i32), readback(i32), verified].
+    data = struct.pack("<HBiiB", 6, 2, 100, 100, 1)
+    res = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    wr = res.write_register()
+    assert wr is not None
+    assert wr.address == 6 and wr.length == 2
+    assert wr.written == 100 and wr.readback == 100 and wr.verified
+    # A verify mismatch surfaces.
+    bad = struct.pack("<HBiiB", 6, 2, 100, 99, 0)
+    badres = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_VERIFY_FAILED, len(bad)]) + bad
+    )
+    assert badres.code == api.DXL_CODE_VERIFY_FAILED
+    assert not badres.write_register().verified

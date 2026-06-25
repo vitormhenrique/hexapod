@@ -89,6 +89,7 @@ void DxlJobApi::reset() {
   queue_.reset();
   live_state_ = 0;
   lock_held_ = false;
+  raw_register_enabled_ = false;
 }
 
 bool DxlJobApi::writeSubmit(DxlSubmit r, uint8_t job_id, dxljob::Slot slot,
@@ -242,6 +243,51 @@ bool DxlJobApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
       job.arg0 = req[0];
       job.val_a = lo;
       job.val_b = hi;
+      break;
+    }
+    case dxlmsg::kReadRegister: {
+      // [id, addr(u16), len]; raw read, expert-gated diagnostics only.
+      if (!raw_register_enabled_) {
+        return writeSubmit(DxlSubmit::Rejected, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      if (req_len < 4 || req[0] == 0) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      const uint8_t len = req[3];
+      if (len != 1 && len != 2 && len != 4) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      job.type = dxljob::Type::ReadReg;
+      job.arg0 = req[0];
+      job.val_a = static_cast<int32_t>(req[1] | (req[2] << 8));  // addr
+      job.param = len;
+      break;
+    }
+    case dxlmsg::kWriteRegister: {
+      // [id, addr(u16), len, value(i32), flags]; flags bit0 = EEPROM region
+      // (executor disables torque before writing). Expert-gated diagnostics.
+      if (!raw_register_enabled_) {
+        return writeSubmit(DxlSubmit::Rejected, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      if (req_len < 9 || req[0] == 0) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      const uint8_t len = req[3];
+      if (len != 1 && len != 2 && len != 4) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      job.type = dxljob::Type::WriteReg;
+      job.arg0 = req[0];
+      job.val_a = static_cast<int32_t>(req[1] | (req[2] << 8));  // addr
+      job.param = len;
+      job.val_b = readI32(&req[4]);                              // value
+      job.arg1 = req[8];                                         // flags
       break;
     }
     default:

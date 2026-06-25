@@ -635,6 +635,69 @@ void runQueuedDxlJob() {
       data[len++] = (v_min && v_max) ? 1 : 0;
       break;
     }
+    case protocol::dxljob::Type::ReadReg: {
+      // [addr(u16), len, value(i32)]. Raw read; protocol picked from profile.
+      const dxl::ServoProfile* p = g_dxlBus.profileById(job.arg0);
+      if (p == nullptr) {
+        code = protocol::dxljob::Code::NotFound;
+        break;
+      }
+      const uint16_t addr = static_cast<uint16_t>(job.val_a);
+      int32_t value = 0;
+      if (!g_dxlBus.readRegister(job.arg0, p->table_kind, addr, job.param,
+                                 false, value)) {
+        code = protocol::dxljob::Code::BusError;
+        break;
+      }
+      data[len++] = static_cast<uint8_t>(addr & 0xFF);
+      data[len++] = static_cast<uint8_t>((addr >> 8) & 0xFF);
+      data[len++] = job.param;
+      len = appendI32(data, len, value);
+      break;
+    }
+    case protocol::dxljob::Type::WriteReg: {
+      // [addr(u16), len, written(i32), readback(i32), verified]. flags bit0 =
+      // EEPROM region -> disable torque before writing.
+      const dxl::ServoProfile* p = g_dxlBus.profileById(job.arg0);
+      if (p == nullptr) {
+        code = protocol::dxljob::Code::NotFound;
+        break;
+      }
+      const uint16_t addr = static_cast<uint16_t>(job.val_a);
+      const bool is_eeprom = (job.arg1 & 0x01) != 0;
+      bool ok = true;
+      if (is_eeprom) {
+        bool torque_on = true;
+        if (!g_dxlBus.setTorqueOne(job.arg0, p->table_kind, false) ||
+            !g_dxlBus.torqueState(job.arg0, p->table_kind, torque_on) ||
+            torque_on) {
+          ok = false;
+        }
+      }
+      if (ok &&
+          !g_dxlBus.writeRegister(job.arg0, p->table_kind, addr, job.param,
+                                  job.val_b)) {
+        ok = false;
+      }
+      int32_t readback = 0;
+      if (ok && !g_dxlBus.readRegister(job.arg0, p->table_kind, addr, job.param,
+                                       false, readback)) {
+        ok = false;
+      }
+      const bool verified = ok && (readback == job.val_b);
+      if (!ok) {
+        code = protocol::dxljob::Code::BusError;
+      } else if (!verified) {
+        code = protocol::dxljob::Code::VerifyFailed;
+      }
+      data[len++] = static_cast<uint8_t>(addr & 0xFF);
+      data[len++] = static_cast<uint8_t>((addr >> 8) & 0xFF);
+      data[len++] = job.param;
+      len = appendI32(data, len, job.val_b);
+      len = appendI32(data, len, readback);
+      data[len++] = verified ? 1 : 0;
+      break;
+    }
     default:
       code = protocol::dxljob::Code::Unsupported;
       break;
@@ -722,6 +785,12 @@ void apiTask(void*) {
   // adopted; the shadow object is stable, so this pointer stays valid across
   // adopt/commit) so maintenance targets can run IK + the servo map.
   g_maintTargetApi.setConfig(&g_configApi.config());
+#ifdef HEXAPOD_ENABLE_DXL_RAW_REGISTER
+  // Expert-only: raw DXL register read/write (DXL_READ_REGISTER /
+  // DXL_WRITE_REGISTER). Off by default; build with this macro defined to
+  // expose it. Still maintenance-locked and torque-off gated at execution.
+  g_dxlJobApi.setRawRegisterEnabled(true);
+#endif
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Api);

@@ -423,6 +423,101 @@ void test_set_servo_limits_submit() {
   TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
 }
 
+void test_read_register_disabled_by_default() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  // Raw access is expert-gated: Rejected even with the maintenance gate open.
+  const uint8_t req[4] = {3, 36, 0, 2};  // id=3, addr=36, len=2
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kReadRegister, req, 4, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Rejected), out[0]);
+  TEST_ASSERT_EQUAL(kErrorFlag, out_flags);
+  TEST_ASSERT_FALSE(api_obj.rawRegisterEnabled());
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Slot::Empty),
+                    static_cast<int>(api_obj.queue().slotState()));
+}
+
+void test_read_register_submit_when_enabled() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  api_obj.setRawRegisterEnabled(true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  // id=3, addr=0x0024 (36), len=2.
+  const uint8_t req[4] = {3, 0x24, 0x00, 2};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kReadRegister, req, 4, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::ReadReg),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(3, job.arg0);
+  TEST_ASSERT_EQUAL_INT32(36, job.val_a);
+  TEST_ASSERT_EQUAL(2, job.param);
+  // Bad length is rejected.
+  const uint8_t bad[4] = {3, 0x24, 0x00, 3};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kReadRegister, bad, 4, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+  // Too-short request is rejected.
+  const uint8_t short_req[3] = {3, 0x24, 0x00};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kReadRegister, short_req, 3, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+}
+
+void test_write_register_submit_when_enabled() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  // id=5, addr=6 (legacy CW angle limit), len=2, value=100, flags=EEPROM.
+  const uint8_t full[9] = {5, 0x06, 0x00, 2, 0x64, 0x00, 0, 0, 0x01};
+  // Disabled by default: Rejected.
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kWriteRegister, full, 9, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Rejected), out[0]);
+
+  // Enable and submit.
+  api_obj.setRawRegisterEnabled(true);
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kWriteRegister, full, 9, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::WriteReg),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(5, job.arg0);
+  TEST_ASSERT_EQUAL_INT32(6, job.val_a);
+  TEST_ASSERT_EQUAL(2, job.param);
+  TEST_ASSERT_EQUAL_INT32(100, job.val_b);
+  TEST_ASSERT_EQUAL(0x01, job.arg1);  // EEPROM flag
+  // Too-short request is rejected.
+  const uint8_t short_req[8] = {5, 6, 0, 2, 0, 0, 0, 0};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kWriteRegister, short_req, 8, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+}
+
+void test_reset_clears_raw_register_flag() {
+  DxlJobApi api_obj;
+  api_obj.setRawRegisterEnabled(true);
+  TEST_ASSERT_TRUE(api_obj.rawRegisterEnabled());
+  api_obj.reset();
+  TEST_ASSERT_FALSE(api_obj.rawRegisterEnabled());
+}
+
 void test_handle_declines_out_of_range() {
   DxlJobApi api_obj;
   api_obj.reset();
@@ -457,6 +552,10 @@ int main(int, char**) {
   RUN_TEST(test_get_param_submit);
   RUN_TEST(test_set_param_submit);
   RUN_TEST(test_set_servo_limits_submit);
+  RUN_TEST(test_read_register_disabled_by_default);
+  RUN_TEST(test_read_register_submit_when_enabled);
+  RUN_TEST(test_write_register_submit_when_enabled);
+  RUN_TEST(test_reset_clears_raw_register_flag);
   RUN_TEST(test_handle_declines_out_of_range);
   return UNITY_END();
 }

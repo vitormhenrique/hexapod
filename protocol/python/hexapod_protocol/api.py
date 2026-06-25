@@ -115,6 +115,8 @@ MSG_DXL_GET_RESULT = 0x64
 MSG_DXL_GET_PARAM = 0x65
 MSG_DXL_SET_PARAM = 0x66
 MSG_DXL_SET_SERVO_LIMITS = 0x67
+MSG_DXL_READ_REGISTER = 0x68
+MSG_DXL_WRITE_REGISTER = 0x69
 
 # DXL submit response byte (mirrors DxlSubmit).
 DXL_SUBMIT_ACCEPTED = 0
@@ -732,6 +734,47 @@ def build_dxl_set_servo_limits(
     )
 
 
+def build_dxl_read_register(
+    servo_id: int, address: int, length: int, seq: int = 0
+) -> bytes:
+    """Build an expert DXL_READ_REGISTER command ([id, addr(u16), len]).
+
+    Raw register access bypasses the logical parameter table and is rejected by
+    firmware unless the expert raw-register gate is enabled.
+    """
+    return build_command(
+        MSG_DXL_READ_REGISTER,
+        seq=seq,
+        payload=struct.pack(
+            "<BHB", servo_id & 0xFF, address & 0xFFFF, length & 0xFF
+        ),
+    )
+
+
+def build_dxl_write_register(
+    servo_id: int,
+    address: int,
+    length: int,
+    value: int,
+    is_eeprom: bool = False,
+    seq: int = 0,
+) -> bytes:
+    """Build an expert DXL_WRITE_REGISTER command.
+
+    Payload [id, addr(u16), len, value(i32), flags]; flags bit0 marks an EEPROM
+    region so firmware disables torque before writing. Expert-gated.
+    """
+    flags = 0x01 if is_eeprom else 0x00
+    return build_command(
+        MSG_DXL_WRITE_REGISTER,
+        seq=seq,
+        payload=struct.pack(
+            "<BHBiB", servo_id & 0xFF, address & 0xFFFF, length & 0xFF,
+            value, flags,
+        ),
+    )
+
+
 @dataclass
 class DxlSubmitResult:
     result: int  # DXL_SUBMIT_*
@@ -814,6 +857,29 @@ class DxlJobResult:
         verified = self.data[9] != 0
         return DxlServoLimitsResult(table, min_tick, max_tick, verified)
 
+    def read_register(self) -> Optional["DxlRegisterValue"]:
+        """Decode a READ_REGISTER result ([addr(u16), len, value(i32)])."""
+        if not self.done or len(self.data) < 7:
+            return None
+        addr = struct.unpack_from("<H", self.data, 0)[0]
+        length = self.data[2]
+        value = struct.unpack_from("<i", self.data, 3)[0]
+        return DxlRegisterValue(addr, length, value)
+
+    def write_register(self) -> Optional["DxlWriteRegisterResult"]:
+        """Decode a WRITE_REGISTER result.
+
+        [addr(u16), len, written(i32), readback(i32), verified].
+        """
+        if len(self.data) < 12:
+            return None
+        addr = struct.unpack_from("<H", self.data, 0)[0]
+        length = self.data[2]
+        written = struct.unpack_from("<i", self.data, 3)[0]
+        readback = struct.unpack_from("<i", self.data, 7)[0]
+        verified = self.data[11] != 0
+        return DxlWriteRegisterResult(addr, length, written, readback, verified)
+
 
 @dataclass
 class DxlParamValue:
@@ -837,6 +903,22 @@ class DxlServoLimitsResult:
     table_kind: int
     min_tick: int
     max_tick: int
+    verified: bool
+
+
+@dataclass
+class DxlRegisterValue:
+    address: int
+    length: int      # 1, 2, or 4 bytes
+    value: int
+
+
+@dataclass
+class DxlWriteRegisterResult:
+    address: int
+    length: int
+    written: int
+    readback: int
     verified: bool
 
 

@@ -290,6 +290,16 @@ def build_dxl() -> dict:
             "name": "dxl_set_servo_limits",
             "request": api_mod.build_dxl_set_servo_limits(7, 100, 3900, seq=8).hex(),
         },
+        {
+            "name": "dxl_read_register",
+            "request": api_mod.build_dxl_read_register(3, 36, 2, seq=9).hex(),
+        },
+        {
+            "name": "dxl_write_register",
+            "request": api_mod.build_dxl_write_register(
+                5, 6, 2, 100, is_eeprom=True, seq=10
+            ).hex(),
+        },
     ]
     return {"cases": cases}
 
