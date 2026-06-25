@@ -65,7 +65,9 @@ class SmokeRunner:
         print(f"  [{mark}] {name}: {detail}")
         return passed
 
-    def _exchange(self, msg_id: int, payload: bytes = b"") -> tuple[object, bytes] | None:
+    def _exchange(
+        self, msg_id: int, payload: bytes = b""
+    ) -> tuple[object, bytes] | None:
         """Send a command and read one framed response. Returns (header, payload)."""
         self._seq = (self._seq + 1) & 0xFFFF
         frame = api.build_command(msg_id, seq=self._seq, payload=payload)
@@ -106,7 +108,10 @@ class SmokeRunner:
             self._record("USB HELLO", False, f"undecodable payload: {exc}")
             return
 
-        proto_ok = (info.proto_major, info.proto_minor) == (VERSION_MAJOR, VERSION_MINOR)
+        proto_ok = (info.proto_major, info.proto_minor) == (
+            VERSION_MAJOR,
+            VERSION_MINOR,
+        )
         self._record(
             "USB HELLO protocol",
             proto_ok,
@@ -226,16 +231,24 @@ def resolve_port(requested: str | None) -> str | None:
     if len(candidates) == 1:
         return candidates[0]
     if not candidates:
-        print("No USB serial ports auto-detected. Pass --port explicitly.", file=sys.stderr)
+        print(
+            "No USB serial ports auto-detected. Pass --port explicitly.",
+            file=sys.stderr,
+        )
     else:
-        print(f"Multiple ports found: {candidates}. Pass --port explicitly.", file=sys.stderr)
+        print(
+            f"Multiple ports found: {candidates}. Pass --port explicitly.",
+            file=sys.stderr,
+        )
     return None
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Phase 1 OpenRB-150 HIL smoke test")
     parser.add_argument("--port", help="USB CDC serial port (auto-detect if omitted)")
-    parser.add_argument("--baud", type=int, default=115200, help="baud (CDC ignores it)")
+    parser.add_argument(
+        "--baud", type=int, default=115200, help="baud (CDC ignores it)"
+    )
     parser.add_argument(
         "--list", action="store_true", help="list candidate serial ports and exit"
     )
