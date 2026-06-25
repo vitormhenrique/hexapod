@@ -40,8 +40,8 @@ def build() -> dict:
         bytes([0x00, 0x00]),
         bytes([0x11, 0x22, 0x00, 0x33]),
         bytes([0x01, 0x02, 0x03, 0x04]),
-        bytes(range(1, 255)),          # 254 non-zero bytes -> forces 0xFF block
-        bytes(range(1, 256)),          # 255 non-zero bytes
+        bytes(range(1, 255)),  # 254 non-zero bytes -> forces 0xFF block
+        bytes(range(1, 256)),  # 255 non-zero bytes
     ]
     cobs_cases = [
         {"decoded": _hex(d), "encoded": _hex(cobs_encode(d))} for d in cobs_inputs

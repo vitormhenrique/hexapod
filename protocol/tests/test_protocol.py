@@ -17,9 +17,7 @@ from hexapod_protocol import (
     encode_frame,
 )
 
-VECTORS = json.loads(
-    (Path(__file__).parent / "vectors" / "frames.json").read_text()
-)
+VECTORS = json.loads((Path(__file__).parent / "vectors" / "frames.json").read_text())
 
 
 # --------------------------------------------------------------------------- #
