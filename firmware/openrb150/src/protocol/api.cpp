@@ -1,6 +1,7 @@
 #include "api.h"
 
 #include "../config/config_api.h"
+#include "control_api.h"
 #include "framing.h"
 #include "telemetry.h"
 
@@ -50,7 +51,7 @@ Header makeResponse(const Header& req, uint16_t payload_len, uint8_t flags) {
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
-                     SubscriptionManager* tel) {
+                     SubscriptionManager* tel, ControlApi* ctrl) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -128,6 +129,20 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                         &tel_len, &tel_flags)) {
           payload_len = tel_len;
           flags = tel_flags;
+          break;
+        }
+      }
+      // Delegate the safety control group (ESTOP/CLEAR_FAULT/SET_ARMING/
+      // SET_MODE) to the ControlApi when present.
+      if (ctrl != nullptr && req.msg_id >= kControlMsgFirst &&
+          req.msg_id <= kControlMsgLast) {
+        uint16_t ctrl_len = 0;
+        uint8_t ctrl_flags = 0;
+        if (ctrl->handle(req.msg_id, req_payload,
+                         static_cast<uint16_t>(req_len), payload, kMaxPayload,
+                         &ctrl_len, &ctrl_flags)) {
+          payload_len = ctrl_len;
+          flags = ctrl_flags;
           break;
         }
       }

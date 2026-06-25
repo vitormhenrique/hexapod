@@ -145,7 +145,38 @@ def build() -> dict:
         "cobs": cobs_cases,
         "frames": frame_cases,
         "api": build_api(),
+        "control": build_control(),
     }
+
+
+def build_control() -> dict:
+    """Deterministic request frames for the safety control command group.
+
+    Responses echo the live [result, state, fault] the firmware publishes, which
+    is not a static fixture, so only the request encoding is pinned here. The
+    firmware native test (test_control_api) covers the response behavior.
+    """
+    cases = [
+        {"name": "estop", "request": api_mod.build_estop(seq=1).hex()},
+        {"name": "clear_fault", "request": api_mod.build_clear_fault(seq=2).hex()},
+        {
+            "name": "set_arming_disarm",
+            "request": api_mod.build_set_arming(False, seq=3).hex(),
+        },
+        {
+            "name": "set_arming_arm",
+            "request": api_mod.build_set_arming(True, seq=4).hex(),
+        },
+        {
+            "name": "set_mode_disarmed",
+            "request": api_mod.build_set_mode(2, seq=5).hex(),
+        },
+        {
+            "name": "set_mode_estop",
+            "request": api_mod.build_set_mode(12, seq=6).hex(),
+        },
+    ]
+    return {"cases": cases}
 
 
 def build_api() -> dict:

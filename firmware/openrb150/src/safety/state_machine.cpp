@@ -101,6 +101,26 @@ State StateMachine::update(const StateInputs& in, uint32_t /*now_ms*/) {
   }
 
   // --- 3. Normal progression. ----------------------------------------------
+  // Host force-disarm: a SET_ARMING(disarm) drops any operational/maintenance/
+  // passive state straight back to Disarmed. It only ever reduces authority, so
+  // it is honored unconditionally (RC still owns re-arming).
+  if (in.host_disarm) {
+    switch (state_) {
+      case State::ArmingChecks:
+      case State::StandReady:
+      case State::RcManual:
+      case State::ContactTerrain:
+      case State::JetsonAssisted:
+      case State::MacMaintenance:
+      case State::PassivePoseStream:
+        state_ = State::Disarmed;
+        reason_ = FaultReason::None;
+        return state_;
+      default:
+        break;
+    }
+  }
+
   switch (state_) {
     case State::Boot:
       state_ = State::ConfigLoad;

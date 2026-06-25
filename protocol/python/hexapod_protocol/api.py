@@ -31,6 +31,12 @@ MSG_CFG_VALIDATE = 0x23
 MSG_CFG_COMMIT = 0x24
 MSG_CFG_RESET_DEFAULTS = 0x25
 
+# Safety control command group (mirrors src/protocol/control_api.h, 0x30..0x33).
+MSG_ESTOP = 0x30
+MSG_CLEAR_FAULT = 0x31
+MSG_SET_ARMING = 0x32
+MSG_SET_MODE = 0x33
+
 # Telemetry frame msg-id base: a telemetry frame for stream s arrives with
 # header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
 MSG_TELEMETRY_BASE = 0x40
@@ -49,6 +55,15 @@ ERR_BAD_REQUEST = 2
 SUB_OK = 0
 SUB_BAD_STREAM = 1
 SUB_BAD_REQUEST = 2
+
+# Arming request byte (SET_ARMING payload; mirrors ArmingRequest).
+ARMING_DISARM = 0
+ARMING_ARM = 1
+
+# Control response result byte (mirrors CtrlResult).
+CTRL_OK = 0
+CTRL_REJECTED = 1
+CTRL_BAD_REQUEST = 2
 
 DEVICE_NAME_LEN = 16
 
@@ -232,3 +247,55 @@ def parse_stream_stats(payload: bytes) -> StreamStats:
 def is_error(header: Header) -> bool:
     """True if a response header has the ERROR flag set."""
     return bool(header.flags & FLAG_ERROR)
+
+
+# --- Safety control commands ----------------------------------------------
+
+
+def build_estop(seq: int = 0) -> bytes:
+    """Build an ESTOP command (latch a host emergency stop)."""
+    return build_command(MSG_ESTOP, seq=seq)
+
+
+def build_clear_fault(seq: int = 0) -> bytes:
+    """Build a CLEAR_FAULT command (release host E-stop + request clear)."""
+    return build_command(MSG_CLEAR_FAULT, seq=seq)
+
+
+def build_set_arming(arm: bool, seq: int = 0) -> bytes:
+    """Build a SET_ARMING command. ``arm=False`` force-disarms (always honored);
+    ``arm=True`` only releases the host disarm latch (RC still owns walking-arm).
+    """
+    value = ARMING_ARM if arm else ARMING_DISARM
+    return build_command(MSG_SET_ARMING, seq=seq, payload=bytes([value]))
+
+
+def build_set_mode(mode: int, seq: int = 0) -> bytes:
+    """Build a SET_MODE command. Only safety-reducing modes (2=Disarmed,
+    12=Estop) are honored by firmware; others return CTRL_REJECTED.
+    """
+    return build_command(MSG_SET_MODE, seq=seq, payload=bytes([mode & 0xFF]))
+
+
+@dataclass
+class ControlResult:
+    result: int
+    state: int
+    fault: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == CTRL_OK
+
+    @property
+    def rejected(self) -> bool:
+        return self.result == CTRL_REJECTED
+
+
+def parse_control_result(payload: bytes) -> ControlResult:
+    """Decode an ESTOP/CLEAR_FAULT/SET_ARMING/SET_MODE response payload
+    ([result, state, fault]). A 1-byte payload is a malformed-request error.
+    """
+    if len(payload) >= 3:
+        return ControlResult(payload[0], payload[1], payload[2])
+    return ControlResult(payload[0] if payload else CTRL_BAD_REQUEST, 0, 0)

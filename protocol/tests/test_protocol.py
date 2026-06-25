@@ -182,3 +182,29 @@ def test_api_unknown_is_error():
     header, payload = api.parse_response(bytes.fromhex(case["response"]))
     assert header.flags & api.FLAG_ERROR
     assert payload == bytes([api.ERR_UNKNOWN_MSG])
+
+
+_CONTROL_BUILDERS = {
+    "estop": lambda: api.build_estop(seq=1),
+    "clear_fault": lambda: api.build_clear_fault(seq=2),
+    "set_arming_disarm": lambda: api.build_set_arming(False, seq=3),
+    "set_arming_arm": lambda: api.build_set_arming(True, seq=4),
+    "set_mode_disarmed": lambda: api.build_set_mode(2, seq=5),
+    "set_mode_estop": lambda: api.build_set_mode(12, seq=6),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["control"]["cases"])
+def test_control_request_golden(case):
+    # The safety-control builders must reproduce the golden request bytes.
+    wire = _CONTROL_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_control_result():
+    cr = api.parse_control_result(bytes([api.CTRL_OK, 12, 2]))
+    assert cr.ok and cr.state == 12 and cr.fault == 2
+    rej = api.parse_control_result(bytes([api.CTRL_REJECTED, 4, 0]))
+    assert rej.rejected and not rej.ok
+    bad = api.parse_control_result(bytes([api.CTRL_BAD_REQUEST]))
+    assert bad.result == api.CTRL_BAD_REQUEST and bad.state == 0

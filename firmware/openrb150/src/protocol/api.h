@@ -44,6 +44,14 @@ namespace protocol {
 class SubscriptionManager;
 }
 
+// Forward declaration: the safety control command group (ESTOP / CLEAR_FAULT /
+// SET_ARMING / SET_MODE) is handled by a portable ControlApi in
+// protocol/control_api.h. handleRequest delegates that msg-id range to it when
+// a non-null instance is supplied.
+namespace protocol {
+class ControlApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -77,6 +85,10 @@ constexpr uint8_t kConfigMsgLast = 0x25;
 constexpr uint8_t kTelemetryMsgFirst = 0x10;
 constexpr uint8_t kTelemetryMsgLast = 0x13;
 
+// Safety control command msg-id range, mirrored from protocol::ctrlmsg.
+constexpr uint8_t kControlMsgFirst = 0x30;
+constexpr uint8_t kControlMsgLast = 0x33;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -109,7 +121,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap,
                      config::ConfigApi* cfg = nullptr,
-                     SubscriptionManager* tel = nullptr);
+                     SubscriptionManager* tel = nullptr,
+                     ControlApi* ctrl = nullptr);
 
 }  // namespace api
 }  // namespace protocol

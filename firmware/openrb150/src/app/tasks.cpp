@@ -9,6 +9,7 @@
 #include "../dxl/dxl_bus.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
+#include "../protocol/control_api.h"
 #include "../protocol/frame_reader.h"
 #include "../protocol/framing.h"
 #include "../protocol/telemetry.h"
@@ -72,6 +73,12 @@ volatile bool g_configReady = false;
 // Telemetry subscription manager. apiTask routes the telemetry command range to
 // it and walks the streams each loop, emitting due telemetry frames over USB.
 protocol::SubscriptionManager g_subs;
+
+// Host safety control intent (ESTOP/CLEAR_FAULT/SET_ARMING/SET_MODE). apiTask
+// records host intent into it; controlTask folds that intent into the safety
+// state machine each cycle and publishes the live state/fault back for command
+// responses to echo.
+protocol::ControlApi g_controlApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -318,12 +325,13 @@ void controlTask(void*) {
     si.battery_valid = batt_mv > 6000;  // below this = no pack sense (USB bench)
     si.watchdog_fault = watchdog::missedMask() != 0;
     si.dxl_hard_fault = false;  // TODO: derive from repeated bus / HW errors
-    si.host_estop = g_arbiter.hostEstop();
+    si.host_estop = g_arbiter.hostEstop() || g_controlApi.estopActive();
     si.rc_kill = g_rcStatus.kill;
     si.rc_failsafe = g_rcStatus.failsafe;
     si.rc_ever_seen = g_rcStatus.ever_seen;
     si.rc_armed = g_rcStatus.armed;
     si.arming_checks_pass = g_configReady;
+    si.host_disarm = g_controlApi.disarmRequested();
     si.command_source = g_commandSource;
     si.jetson_fresh = g_arbiter.jetsonFresh(now_ms);
     si.rc_autonomy = g_rcStatus.autonomy;
@@ -333,9 +341,15 @@ void controlTask(void*) {
     si.torque_off = false;
     si.contact_enabled = false;      // wired with the contact feature toggle
     si.contact_confident = false;
+    // Honor a host CLEAR_FAULT pulse before advancing the machine.
+    if (g_controlApi.consumeClearFault()) {
+      g_stateMachine.requestClearFault();
+    }
     const safety::State state = g_stateMachine.update(si, now_ms);
     g_safetyState = static_cast<uint8_t>(state);
     g_faultReason = static_cast<uint8_t>(g_stateMachine.faultReason());
+    // Publish the live state/fault so control-command responses can echo it.
+    g_controlApi.setLiveState(g_safetyState, g_faultReason);
 
     // The motion gate is the conjunction of "the state allows movement" and
     // "a command source owns authority". dxlTask uses it to keep torque off and
@@ -446,7 +460,7 @@ void apiTask(void*) {
 
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
-          &g_configApi, &g_subs);
+          &g_configApi, &g_subs, &g_controlApi);
       if (n > 0) {
         Serial.write(out, n);
       }

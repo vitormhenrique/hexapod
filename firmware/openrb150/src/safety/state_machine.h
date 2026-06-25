@@ -59,6 +59,7 @@ struct StateInputs {
   bool rc_ever_seen = false;
   bool rc_armed = false;          // RC arm switch asserted
   bool arming_checks_pass = false;  // battery + DXL scan + config + pose ok
+  bool host_disarm = false;       // host SET_ARMING(disarm): force Disarmed
 
   // Command authority (from CommandArbiter).
   uint8_t command_source = 0;  // safety::CommandSource value
