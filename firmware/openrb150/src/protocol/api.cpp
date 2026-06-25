@@ -3,6 +3,7 @@
 #include "../config/config_api.h"
 #include "control_api.h"
 #include "framing.h"
+#include "motion_api.h"
 #include "telemetry.h"
 
 namespace protocol {
@@ -51,7 +52,8 @@ Header makeResponse(const Header& req, uint16_t payload_len, uint8_t flags) {
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
-                     SubscriptionManager* tel, ControlApi* ctrl) {
+                     SubscriptionManager* tel, ControlApi* ctrl,
+                     MotionApi* motion) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -143,6 +145,20 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                          &ctrl_len, &ctrl_flags)) {
           payload_len = ctrl_len;
           flags = ctrl_flags;
+          break;
+        }
+      }
+      // Delegate the motion group (SET_GAIT/SET_GAIT_PARAMS/SET_BODY_TWIST/
+      // SET_BODY_POSE/STOP_MOTION) to the MotionApi when present.
+      if (motion != nullptr && req.msg_id >= kMotionMsgFirst &&
+          req.msg_id <= kMotionMsgLast) {
+        uint16_t mot_len = 0;
+        uint8_t mot_flags = 0;
+        if (motion->handle(req.msg_id, req_payload,
+                           static_cast<uint16_t>(req_len), payload, kMaxPayload,
+                           &mot_len, &mot_flags)) {
+          payload_len = mot_len;
+          flags = mot_flags;
           break;
         }
       }

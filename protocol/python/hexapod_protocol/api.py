@@ -37,6 +37,13 @@ MSG_CLEAR_FAULT = 0x31
 MSG_SET_ARMING = 0x32
 MSG_SET_MODE = 0x33
 
+# Motion command group (mirrors src/protocol/motion_api.h, 0x34..0x38).
+MSG_SET_GAIT = 0x34
+MSG_SET_GAIT_PARAMS = 0x35
+MSG_SET_BODY_TWIST = 0x36
+MSG_SET_BODY_POSE = 0x37
+MSG_STOP_MOTION = 0x38
+
 # Telemetry frame msg-id base: a telemetry frame for stream s arrives with
 # header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
 MSG_TELEMETRY_BASE = 0x40
@@ -64,6 +71,19 @@ ARMING_ARM = 1
 CTRL_OK = 0
 CTRL_REJECTED = 1
 CTRL_BAD_REQUEST = 2
+
+# Gait ids (mirror config::GaitId / motiongait).
+GAIT_STAND = 0
+GAIT_SIT = 1
+GAIT_TRIPOD = 2
+GAIT_RIPPLE = 3
+GAIT_WAVE = 4
+GAIT_CRAWL = 5
+
+# Motion response result byte (mirrors MotionResult).
+MOTION_OK = 0
+MOTION_REJECTED = 1
+MOTION_BAD_REQUEST = 2
 
 DEVICE_NAME_LEN = 16
 
@@ -299,3 +319,107 @@ def parse_control_result(payload: bytes) -> ControlResult:
     if len(payload) >= 3:
         return ControlResult(payload[0], payload[1], payload[2])
     return ControlResult(payload[0] if payload else CTRL_BAD_REQUEST, 0, 0)
+
+
+# --- Motion commands ------------------------------------------------------
+
+
+def build_set_gait(gait: int, seq: int = 0) -> bytes:
+    """Build a SET_GAIT command (0=stand,1=sit,2=tripod,3=ripple,4=wave,
+    5=crawl). Out-of-range ids return MOTION_REJECTED.
+    """
+    return build_command(MSG_SET_GAIT, seq=seq, payload=bytes([gait & 0xFF]))
+
+
+def build_set_gait_params(
+    body_height_mm: int,
+    stride_len_mm: int,
+    step_height_mm: int,
+    duty_x255: int,
+    speed_x255: int,
+    seq: int = 0,
+) -> bytes:
+    """Build a SET_GAIT_PARAMS command. Lengths in mm; duty/speed are 0..255.
+    Firmware clamps each to the safe gait-engine limits.
+    """
+    payload = struct.pack(
+        "<HHHBB",
+        body_height_mm & 0xFFFF,
+        stride_len_mm & 0xFFFF,
+        step_height_mm & 0xFFFF,
+        duty_x255 & 0xFF,
+        speed_x255 & 0xFF,
+    )
+    return build_command(MSG_SET_GAIT_PARAMS, seq=seq, payload=payload)
+
+
+def build_set_body_twist(vx: float, vy: float, wz: float, seq: int = 0) -> bytes:
+    """Build a SET_BODY_TWIST command. Components are normalised [-1,1]
+    (forward, left, yaw-CCW) and sent as signed milli-units.
+    """
+
+    def milli(v: float) -> int:
+        return max(-1000, min(1000, int(round(v * 1000.0))))
+
+    payload = struct.pack("<hhh", milli(vx), milli(vy), milli(wz))
+    return build_command(MSG_SET_BODY_TWIST, seq=seq, payload=payload)
+
+
+def build_set_body_pose(
+    x_mm: float,
+    y_mm: float,
+    z_mm: float,
+    roll_deg: float,
+    pitch_deg: float,
+    yaw_deg: float,
+    seq: int = 0,
+) -> bytes:
+    """Build a SET_BODY_POSE command. Translation in mm; rotation in degrees
+    (sent as signed milli-degrees). Firmware clamps to the safe pose window.
+    """
+
+    def mm(v: float) -> int:
+        return max(-32768, min(32767, int(round(v))))
+
+    def mdeg(v: float) -> int:
+        return max(-32768, min(32767, int(round(v * 1000.0))))
+
+    payload = struct.pack(
+        "<hhhhhh",
+        mm(x_mm),
+        mm(y_mm),
+        mm(z_mm),
+        mdeg(roll_deg),
+        mdeg(pitch_deg),
+        mdeg(yaw_deg),
+    )
+    return build_command(MSG_SET_BODY_POSE, seq=seq, payload=payload)
+
+
+def build_stop_motion(seq: int = 0) -> bytes:
+    """Build a STOP_MOTION command (zero twist + hold Stand). Always honored."""
+    return build_command(MSG_STOP_MOTION, seq=seq)
+
+
+@dataclass
+class MotionResultMsg:
+    result: int
+    state: int
+    motion_allowed: bool
+
+    @property
+    def ok(self) -> bool:
+        return self.result == MOTION_OK
+
+    @property
+    def rejected(self) -> bool:
+        return self.result == MOTION_REJECTED
+
+
+def parse_motion_result(payload: bytes) -> MotionResultMsg:
+    """Decode a motion-command response payload ([result, state,
+    motion_allowed]). A 1-byte payload is a malformed-request error.
+    """
+    if len(payload) >= 3:
+        return MotionResultMsg(payload[0], payload[1], bool(payload[2]))
+    return MotionResultMsg(payload[0] if payload else MOTION_BAD_REQUEST, 0, False)

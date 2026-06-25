@@ -146,6 +146,7 @@ def build() -> dict:
         "frames": frame_cases,
         "api": build_api(),
         "control": build_control(),
+        "motion": build_motion(),
     }
 
 
@@ -174,6 +175,38 @@ def build_control() -> dict:
         {
             "name": "set_mode_estop",
             "request": api_mod.build_set_mode(12, seq=6).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_motion() -> dict:
+    """Deterministic request frames for the motion command group.
+
+    Responses echo the live [result, state, motion_allowed] gate which is not a
+    static fixture, so only the request encoding is pinned here. The firmware
+    native test (test_motion_api) covers the response/clamping behavior.
+    """
+    cases = [
+        {
+            "name": "set_gait_tripod",
+            "request": api_mod.build_set_gait(api_mod.GAIT_TRIPOD, seq=1).hex(),
+        },
+        {
+            "name": "set_gait_params",
+            "request": api_mod.build_set_gait_params(40, 60, 30, 128, 160, seq=2).hex(),
+        },
+        {
+            "name": "set_body_twist",
+            "request": api_mod.build_set_body_twist(0.5, -0.25, 1.0, seq=3).hex(),
+        },
+        {
+            "name": "set_body_pose",
+            "request": api_mod.build_set_body_pose(10, -20, 15, 5, -5, 10, seq=4).hex(),
+        },
+        {
+            "name": "stop_motion",
+            "request": api_mod.build_stop_motion(seq=5).hex(),
         },
     ]
     return {"cases": cases}

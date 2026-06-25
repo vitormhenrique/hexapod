@@ -208,3 +208,28 @@ def test_parse_control_result():
     assert rej.rejected and not rej.ok
     bad = api.parse_control_result(bytes([api.CTRL_BAD_REQUEST]))
     assert bad.result == api.CTRL_BAD_REQUEST and bad.state == 0
+
+
+_MOTION_BUILDERS = {
+    "set_gait_tripod": lambda: api.build_set_gait(api.GAIT_TRIPOD, seq=1),
+    "set_gait_params": lambda: api.build_set_gait_params(40, 60, 30, 128, 160, seq=2),
+    "set_body_twist": lambda: api.build_set_body_twist(0.5, -0.25, 1.0, seq=3),
+    "set_body_pose": lambda: api.build_set_body_pose(10, -20, 15, 5, -5, 10, seq=4),
+    "stop_motion": lambda: api.build_stop_motion(seq=5),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["motion"]["cases"])
+def test_motion_request_golden(case):
+    # The motion builders must reproduce the golden request bytes.
+    wire = _MOTION_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_motion_result():
+    mr = api.parse_motion_result(bytes([api.MOTION_OK, 5, 1]))
+    assert mr.ok and mr.state == 5 and mr.motion_allowed
+    rej = api.parse_motion_result(bytes([api.MOTION_REJECTED, 5, 0]))
+    assert rej.rejected and not rej.motion_allowed
+    bad = api.parse_motion_result(bytes([api.MOTION_BAD_REQUEST]))
+    assert bad.result == api.MOTION_BAD_REQUEST and not bad.motion_allowed

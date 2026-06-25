@@ -52,6 +52,14 @@ namespace protocol {
 class ControlApi;
 }
 
+// Forward declaration: the motion command group (SET_GAIT / SET_GAIT_PARAMS /
+// SET_BODY_TWIST / SET_BODY_POSE / STOP_MOTION) is handled by a portable
+// MotionApi in protocol/motion_api.h. handleRequest delegates that msg-id range
+// to it when a non-null instance is supplied.
+namespace protocol {
+class MotionApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -89,6 +97,10 @@ constexpr uint8_t kTelemetryMsgLast = 0x13;
 constexpr uint8_t kControlMsgFirst = 0x30;
 constexpr uint8_t kControlMsgLast = 0x33;
 
+// Motion command msg-id range, mirrored from protocol::motionmsg.
+constexpr uint8_t kMotionMsgFirst = 0x34;
+constexpr uint8_t kMotionMsgLast = 0x38;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -122,7 +134,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      uint8_t* out, size_t out_cap,
                      config::ConfigApi* cfg = nullptr,
                      SubscriptionManager* tel = nullptr,
-                     ControlApi* ctrl = nullptr);
+                     ControlApi* ctrl = nullptr,
+                     MotionApi* motion = nullptr);
 
 }  // namespace api
 }  // namespace protocol

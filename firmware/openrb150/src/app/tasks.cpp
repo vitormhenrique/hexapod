@@ -12,6 +12,7 @@
 #include "../protocol/control_api.h"
 #include "../protocol/frame_reader.h"
 #include "../protocol/framing.h"
+#include "../protocol/motion_api.h"
 #include "../protocol/telemetry.h"
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
@@ -79,6 +80,13 @@ protocol::SubscriptionManager g_subs;
 // state machine each cycle and publishes the live state/fault back for command
 // responses to echo.
 protocol::ControlApi g_controlApi;
+
+// Host high-level motion intent (SET_GAIT/SET_GAIT_PARAMS/SET_BODY_TWIST/
+// SET_BODY_POSE/STOP_MOTION). apiTask validates+stores the latest clamped
+// MotionIntent here; controlTask echoes the live motion gate back so the host
+// knows whether the intent is being honored. The goal-generation (gait/IK)
+// path consumes g_motionApi.intent() and is gated by g_motionGate.
+protocol::MotionApi g_motionApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -350,12 +358,16 @@ void controlTask(void*) {
     g_faultReason = static_cast<uint8_t>(g_stateMachine.faultReason());
     // Publish the live state/fault so control-command responses can echo it.
     g_controlApi.setLiveState(g_safetyState, g_faultReason);
-
     // The motion gate is the conjunction of "the state allows movement" and
     // "a command source owns authority". dxlTask uses it to keep torque off and
     // suppress goal writes unless both hold. Goal generation (gait/IK) lands in
     // a later task; this enforces the safety contract for it up front.
     g_motionGate = safety::stateAllowsMotion(state) && arb.motion_authorized;
+
+    // Echo the live motion gate to the motion handler so SET_GAIT/twist/pose
+    // responses tell the host whether the stored intent is being honored now or
+    // parked until the robot is armed/authorised.
+    g_motionApi.setLiveState(g_safetyState, g_motionGate);
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
@@ -460,7 +472,7 @@ void apiTask(void*) {
 
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
-          &g_configApi, &g_subs, &g_controlApi);
+          &g_configApi, &g_subs, &g_controlApi, &g_motionApi);
       if (n > 0) {
         Serial.write(out, n);
       }
@@ -512,6 +524,12 @@ void i2cTask(void*) {
     config::defaultRobotConfig(boot_cfg);
     sensors::ContactParams params;  // conservative defaults
     g_contact.configure(boot_cfg.feet, params);
+    // Seed the motion intent with the compiled-default gait parameters so the
+    // first SET_BODY_TWIST has a sane baseline (host SET_GAIT_PARAMS overrides).
+    g_motionApi.setDefaults(boot_cfg.gait.gait, boot_cfg.gait.body_height_mm,
+                            boot_cfg.gait.stride_len_mm,
+                            boot_cfg.gait.step_height_mm, boot_cfg.gait.duty_x255,
+                            boot_cfg.gait.speed_x255);
   }
   // If the config EEPROM is present and holds a valid slot, load it and hand it
   // to apiTask to adopt as the active config. Otherwise stay volatile so the
