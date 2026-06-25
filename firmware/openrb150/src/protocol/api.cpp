@@ -1,5 +1,6 @@
 #include "api.h"
 
+#include "../config/config_api.h"
 #include "framing.h"
 
 namespace protocol {
@@ -47,7 +48,7 @@ Header makeResponse(const Header& req, uint16_t payload_len, uint8_t flags) {
 
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
-                     uint8_t* out, size_t out_cap) {
+                     uint8_t* out, size_t out_cap, config::ConfigApi* cfg) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -102,6 +103,19 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       break;
     }
     default: {
+      // Delegate the config command group (CFG_*) to ConfigApi when present.
+      if (cfg != nullptr && req.msg_id >= kConfigMsgFirst &&
+          req.msg_id <= kConfigMsgLast) {
+        uint16_t cfg_len = 0;
+        uint8_t cfg_flags = 0;
+        if (cfg->handle(req.msg_id, req_payload,
+                        static_cast<uint16_t>(req_len), payload, kMaxPayload,
+                        &cfg_len, &cfg_flags)) {
+          payload_len = cfg_len;
+          flags = cfg_flags;
+          break;
+        }
+      }
       payload[0] = static_cast<uint8_t>(Error::UnknownMsg);
       payload_len = 1;
       flags = flag::kError;

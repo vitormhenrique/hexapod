@@ -99,13 +99,14 @@ void defaultRobotConfig(RobotConfig& cfg) {
     cfg.legs[leg].mount_yaw_cdeg = kLegSeeds[leg].yaw_cdeg;
   }
 
-  // Servo map: ids 1..18 in (leg, joint) order. Conservative +/-90deg travel
-  // about the 2048 center.
+  // Servo map. The array is indexed in (leg, joint) order, but the DXL bus ids
+  // follow the robot wiring: coxa = 1..6, femur = 7..12, tibia = 13..18, i.e.
+  // id = joint*kNumLegs + leg + 1. Conservative +/-90deg travel about 2048.
   for (uint8_t i = 0; i < kNumServos; ++i) {
     const uint8_t leg = i / kJointsPerLeg;
     const uint8_t joint = i % kJointsPerLeg;
     ServoConfig& s = cfg.servos[i];
-    s.id = static_cast<uint8_t>(i + 1);
+    s.id = static_cast<uint8_t>(joint * kNumLegs + leg + 1);
     s.leg = leg;
     s.joint = joint;
     s.sign = isLeftLeg(leg) ? 1 : -1;

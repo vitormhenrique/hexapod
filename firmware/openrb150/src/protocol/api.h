@@ -27,6 +27,15 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Forward declaration: the config command group (CFG_*) is handled by a
+// portable ConfigApi defined in config/config_api.h. handleRequest delegates
+// that msg-id range to it when a non-null instance is supplied. Kept a forward
+// decl so the protocol layer does not pull the config schema into builds (e.g.
+// the protocol-only native tests) that do not exercise config.
+namespace config {
+class ConfigApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -50,6 +59,11 @@ enum class Error : uint8_t {
   UnknownMsg = 1,
   BadRequest = 2,
 };
+
+// Config command msg-id range (CFG_*), mirrored from config::cfgmsg so the
+// dispatcher can recognize it without including the config header here.
+constexpr uint8_t kConfigMsgFirst = 0x20;
+constexpr uint8_t kConfigMsgLast = 0x25;
 
 constexpr size_t kDeviceNameLen = 16;
 
@@ -76,9 +90,13 @@ struct StatusSnapshot {
 // dispatch it, and write a full wire response (including delimiters) to `out`.
 // Returns the response length, or 0 if no response should be sent (the request
 // could not be decoded, or was not a Command).
+//
+// `cfg` (optional) handles the CFG_* command group; when null those messages
+// are answered with an UnknownMsg error.
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
-                     uint8_t* out, size_t out_cap);
+                     uint8_t* out, size_t out_cap,
+                     config::ConfigApi* cfg = nullptr);
 
 }  // namespace api
 }  // namespace protocol

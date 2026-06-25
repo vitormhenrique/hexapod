@@ -22,13 +22,24 @@ void test_default_servo_map() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
 
-  // 18 servos, ids 1..18, in (leg, joint) order.
+  // 18 servos in (leg, joint) array order. DXL ids follow the wiring:
+  // coxa = 1..6, femur = 7..12, tibia = 13..18 (id = joint*6 + leg + 1).
   for (uint8_t i = 0; i < kNumServos; ++i) {
-    TEST_ASSERT_EQUAL_UINT8(i + 1, cfg.servos[i].id);
-    TEST_ASSERT_EQUAL_UINT8(i / kJointsPerLeg, cfg.servos[i].leg);
-    TEST_ASSERT_EQUAL_UINT8(i % kJointsPerLeg, cfg.servos[i].joint);
+    const uint8_t leg = i / kJointsPerLeg;
+    const uint8_t joint = i % kJointsPerLeg;
+    TEST_ASSERT_EQUAL_UINT8(joint * kNumLegs + leg + 1, cfg.servos[i].id);
+    TEST_ASSERT_EQUAL_UINT8(leg, cfg.servos[i].leg);
+    TEST_ASSERT_EQUAL_UINT8(joint, cfg.servos[i].joint);
     TEST_ASSERT_TRUE(cfg.servos[i].min_tick < cfg.servos[i].max_tick);
   }
+
+  // Spot-check the published map (leg 1 -> index 0..2, leg 6 -> index 15..17).
+  TEST_ASSERT_EQUAL_UINT8(1, cfg.servos[0].id);    // leg1 coxa
+  TEST_ASSERT_EQUAL_UINT8(7, cfg.servos[1].id);    // leg1 femur
+  TEST_ASSERT_EQUAL_UINT8(13, cfg.servos[2].id);   // leg1 tibia
+  TEST_ASSERT_EQUAL_UINT8(6, cfg.servos[15].id);   // leg6 coxa
+  TEST_ASSERT_EQUAL_UINT8(12, cfg.servos[16].id);  // leg6 femur
+  TEST_ASSERT_EQUAL_UINT8(18, cfg.servos[17].id);  // leg6 tibia
 
   // Left legs (0,4,5) sign +1; right legs (1,2,3) sign -1.
   TEST_ASSERT_EQUAL_INT8(1, cfg.servos[0].sign);    // leg 0 (left)

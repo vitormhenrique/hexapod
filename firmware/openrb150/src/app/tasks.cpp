@@ -4,6 +4,7 @@
 #include <FreeRTOS_SAMD21.h>
 
 #include "../board/board.h"
+#include "../config/config_api.h"
 #include "../config/eeprom_24lc32.h"
 #include "../dxl/dxl_bus.h"
 #include "../input/crsf_parser.h"
@@ -46,12 +47,67 @@ i2c::I2cTopology g_i2cTopology;
 
 // Persistent robot config in the 24LC32 EEPROM (root bus). When the EEPROM is
 // missing or holds no valid slot the config is marked volatile and the firmware
-// must run on compiled defaults and reject commits (AGENTS.md 4.3). The full
-// config payload schema lands in Phase 2; Phase 1 only proves the store links
-// and reports validity on-target.
+// must run on compiled defaults and reject commits (AGENTS.md 4.3). At boot the
+// i2cTask loads any valid slot and hands it to apiTask; thereafter the config
+// API (apiTask) edits a RAM shadow and routes CFG_COMMIT back to i2cTask.
 config::Eeprom24LC32 g_eeprom(Wire);
 config::ConfigStore g_configStore(g_eeprom);
 bool g_configVolatile = true;
+
+// --- Cross-task config plumbing (AGENTS.md 5.1: only i2cTask touches Wire) ---
+//
+// The config API runs in apiTask (it parses USB frames), but the EEPROM commit
+// is a Wire transaction that only i2cTask is allowed to perform. So apiTask
+// edits/validates a RAM shadow locally, and a CFG_COMMIT hands the validated
+// serialized payload to i2cTask through this mailbox and blocks (bounded) for
+// the result. A separate one-shot boot-load buffer lets i2cTask pass a valid
+// persisted config to apiTask so the ConfigApi shadow is still touched by only
+// one task.
+struct CommitMailbox {
+  bool requested = false;
+  bool ok = false;
+  uint16_t len = 0;
+  uint8_t payload[config::kConfigPayloadSize] = {0};
+};
+CommitMailbox g_commit;
+SemaphoreHandle_t g_commitMutex = nullptr;  // guards g_commit
+SemaphoreHandle_t g_commitDone = nullptr;   // i2cTask -> apiTask completion
+
+struct BootLoad {
+  bool ready = false;     // a valid persisted payload was loaded at boot
+  bool consumed = false;  // apiTask has adopted it
+  uint16_t len = 0;
+  uint8_t payload[config::kConfigPayloadSize] = {0};
+};
+BootLoad g_bootLoad;
+
+// Persistence sink used by the config API. commitPayload() is called from
+// apiTask; it forwards the bytes to i2cTask and waits for the transaction.
+class TaskConfigPersistence : public config::ConfigPersistence {
+ public:
+  bool commitPayload(const uint8_t* payload, uint16_t len) override {
+    if (g_commitMutex == nullptr || g_commitDone == nullptr) return false;
+    if (len > sizeof(g_commit.payload)) return false;
+    xSemaphoreTake(g_commitMutex, portMAX_DELAY);
+    memcpy(g_commit.payload, payload, len);
+    g_commit.len = len;
+    g_commit.ok = false;
+    g_commit.requested = true;
+    xSemaphoreGive(g_commitMutex);
+    // Wait for i2cTask to run the EEPROM transaction (normally < 200 ms).
+    if (xSemaphoreTake(g_commitDone, pdMS_TO_TICKS(1500)) != pdTRUE) {
+      return false;  // timed out
+    }
+    xSemaphoreTake(g_commitMutex, portMAX_DELAY);
+    const bool ok = g_commit.ok;
+    xSemaphoreGive(g_commitMutex);
+    return ok;
+  }
+  bool persistent() const override { return !g_configVolatile; }
+};
+
+TaskConfigPersistence g_configPersist;
+config::ConfigApi g_configApi(g_configPersist);
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -134,6 +190,14 @@ void apiTask(void*) {
   for (;;) {
     tick(watchdog::TaskId::Api);
 
+    // Adopt a persisted config once i2cTask has loaded one at boot. Done here
+    // (not at task start) because i2cTask's scan may finish after this task
+    // begins; the ConfigApi shadow is thus only ever touched by apiTask.
+    if (g_bootLoad.ready && !g_bootLoad.consumed) {
+      g_configApi.adoptPayload(g_bootLoad.payload, g_bootLoad.len);
+      g_bootLoad.consumed = true;
+    }
+
     // Drain any received bytes, framing them into complete request bodies.
     while (Serial.available() > 0) {
       const uint8_t b = static_cast<uint8_t>(Serial.read());
@@ -152,7 +216,8 @@ void apiTask(void*) {
       st.watchdog_missed = watchdog::missedMask();
 
       const size_t n = protocol::api::handleRequest(
-          reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out));
+          reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
+          &g_configApi);
       if (n > 0) {
         Serial.write(out, n);
       }
@@ -168,20 +233,53 @@ void i2cTask(void*) {
   // here keeps the blocking probe work off the control loop.
   g_i2cBus.begin();
   g_i2cBus.scanAll(g_i2cTopology);
-  // If the config EEPROM is present, check for a valid persisted slot. A valid
-  // slot means config can be loaded persistently; otherwise stay volatile.
+  // If the config EEPROM is present and holds a valid slot, load it and hand it
+  // to apiTask to adopt as the active config. Otherwise stay volatile so the
+  // firmware runs on compiled defaults and CFG_COMMIT is rejected (AGENTS.md
+  // 4.3).
   if (g_i2cTopology.eeprom_present) {
     config::SlotStatus slots[config::kSlotCount];
     g_configStore.inspect(slots);
-    g_configVolatile = !(slots[0].valid || slots[1].valid);
+    if (slots[0].valid || slots[1].valid) {
+      uint16_t n = 0;
+      if (g_configStore.load(g_bootLoad.payload, sizeof(g_bootLoad.payload),
+                             n)) {
+        g_bootLoad.len = n;
+        g_bootLoad.ready = true;
+        g_configVolatile = false;
+      } else {
+        g_configVolatile = true;
+      }
+    } else {
+      g_configVolatile = true;
+    }
   } else {
     g_configVolatile = true;
   }
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::I2c);
-    // TODO (Phase 2): staggered sensor reads + EEPROM config jobs. This task
-    // owns Wire exclusively; mux channels are selected one-hot per access.
+
+    // Service a config commit handed over by apiTask. i2cTask is the sole owner
+    // of Wire/EEPROM, so the transactional store write happens here.
+    bool do_commit = false;
+    if (g_commitMutex != nullptr) {
+      xSemaphoreTake(g_commitMutex, portMAX_DELAY);
+      do_commit = g_commit.requested;
+      xSemaphoreGive(g_commitMutex);
+    }
+    if (do_commit) {
+      const bool ok = g_configStore.commit(g_commit.payload, g_commit.len);
+      xSemaphoreTake(g_commitMutex, portMAX_DELAY);
+      g_commit.ok = ok;
+      g_commit.requested = false;
+      xSemaphoreGive(g_commitMutex);
+      if (ok) g_configVolatile = false;  // a valid slot now exists
+      xSemaphoreGive(g_commitDone);
+    }
+
+    // TODO (Phase 2): staggered sensor reads. This task owns Wire exclusively;
+    // mux channels are selected one-hot per access.
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kI2c));
   }
 }
@@ -217,6 +315,11 @@ void healthTask(void*) {
 void start() {
   watchdog::init();
   initDeviceInfo();
+
+  // Sync primitives for the apiTask <-> i2cTask config commit hand-off. Created
+  // here at boot (before the scheduler), not at runtime.
+  g_commitMutex = xSemaphoreCreateMutex();
+  g_commitDone = xSemaphoreCreateBinary();
 
   // Route FreeRTOS fault reporting to the USER LED and USB CDC.
   vSetErrorLed(board::pinUserLed(), HIGH);
