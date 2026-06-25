@@ -8,6 +8,7 @@
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/frame_reader.h"
+#include "../sensors/i2c_bus.h"
 #include "../safety/system_state.h"
 #include "../safety/watchdog.h"
 #include "task_config.h"
@@ -35,6 +36,12 @@ crsf::RcStatus g_rcStatus;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
+
+// Single owner of the root I2C bus (Wire): TCA9548A mux, 24LC32 EEPROM, and the
+// muxed foot sensors. Only i2cTask touches this. Topology is the boot-scan
+// result describing which optional devices were found.
+i2c::I2cBus g_i2cBus(Wire);
+i2c::I2cTopology g_i2cTopology;
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -146,10 +153,16 @@ void apiTask(void*) {
 }
 
 void i2cTask(void*) {
+  // Bring up the root I2C bus and run a one-time discovery scan so capabilities
+  // (mux/EEPROM presence, per-channel foot sensors) are known early. Running it
+  // here keeps the blocking probe work off the control loop.
+  g_i2cBus.begin();
+  g_i2cBus.scanAll(g_i2cTopology);
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::I2c);
-    // TODO: TCA9548A mux select, sensor reads, EEPROM config jobs.
+    // TODO (Phase 2): staggered sensor reads + EEPROM config jobs. This task
+    // owns Wire exclusively; mux channels are selected one-hot per access.
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kI2c));
   }
 }
