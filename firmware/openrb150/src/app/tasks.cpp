@@ -4,6 +4,7 @@
 #include <FreeRTOS_SAMD21.h>
 
 #include "../board/board.h"
+#include "../dxl/dxl_bus.h"
 #include "../protocol/api.h"
 #include "../protocol/frame_reader.h"
 #include "../safety/system_state.h"
@@ -22,6 +23,10 @@ volatile uint32_t g_loops[watchdog::kTaskCount] = {0};
 
 // Static description of this firmware build, reported by HELLO/GET_CAPABILITIES.
 protocol::api::DeviceInfo g_deviceInfo;
+
+// Single owner of the DYNAMIXEL TTL bus (Serial1). Only dxlTask touches this,
+// satisfying the AGENTS.md rule that one task owns Dynamixel2Arduino/Serial1.
+dxl::DxlBus g_dxlBus(Serial1);
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -58,10 +63,15 @@ void controlTask(void*) {
 }
 
 void dxlTask(void*) {
+  // Bring up the DXL UART once. This only initializes Serial1; it does NOT
+  // enable DXL power (board HAL owns that) or servo torque, so it is safe at
+  // boot. Scanning is deferred to a maintenance command once power is on.
+  g_dxlBus.begin();
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Dxl);
-    // TODO: DYNAMIXEL sync write/read; bus owns Serial1 exclusively.
+    // TODO (Phase 2): sync write goals / status reads driven by control + API.
+    // The bus is owned exclusively here; no other task may touch Serial1/DXL.
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kDxl));
   }
 }
