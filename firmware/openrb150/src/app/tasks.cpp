@@ -4,6 +4,7 @@
 #include <FreeRTOS_SAMD21.h>
 
 #include "../board/board.h"
+#include "../config/eeprom_24lc32.h"
 #include "../dxl/dxl_bus.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
@@ -42,6 +43,15 @@ constexpr uint32_t kCrsfBaud = 420000;
 // result describing which optional devices were found.
 i2c::I2cBus g_i2cBus(Wire);
 i2c::I2cTopology g_i2cTopology;
+
+// Persistent robot config in the 24LC32 EEPROM (root bus). When the EEPROM is
+// missing or holds no valid slot the config is marked volatile and the firmware
+// must run on compiled defaults and reject commits (AGENTS.md 4.3). The full
+// config payload schema lands in Phase 2; Phase 1 only proves the store links
+// and reports validity on-target.
+config::Eeprom24LC32 g_eeprom(Wire);
+config::ConfigStore g_configStore(g_eeprom);
+bool g_configVolatile = true;
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -158,6 +168,15 @@ void i2cTask(void*) {
   // here keeps the blocking probe work off the control loop.
   g_i2cBus.begin();
   g_i2cBus.scanAll(g_i2cTopology);
+  // If the config EEPROM is present, check for a valid persisted slot. A valid
+  // slot means config can be loaded persistently; otherwise stay volatile.
+  if (g_i2cTopology.eeprom_present) {
+    config::SlotStatus slots[config::kSlotCount];
+    g_configStore.inspect(slots);
+    g_configVolatile = !(slots[0].valid || slots[1].valid);
+  } else {
+    g_configVolatile = true;
+  }
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::I2c);
