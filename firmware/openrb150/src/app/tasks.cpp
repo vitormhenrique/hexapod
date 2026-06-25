@@ -32,6 +32,11 @@ protocol::api::DeviceInfo g_deviceInfo;
 // satisfying the AGENTS.md rule that one task owns Dynamixel2Arduino/Serial1.
 dxl::DxlBus g_dxlBus(Serial1);
 
+// Latest per-servo status snapshot, published by dxlTask via Sync Read and read
+// by telemetry/safety consumers. Single writer (dxlTask); readers take a copy.
+dxl::ServoStatus g_servoStatus[dxl::DxlBus::kMaxServos];
+volatile uint8_t g_servoStatusCount = 0;
+
 // CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial2).
 crsf::Parser g_crsfParser;
 crsf::RcStatus g_rcStatus;
@@ -151,8 +156,17 @@ void dxlTask(void*) {
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Dxl);
-    // TODO (Phase 2): sync write goals / status reads driven by control + API.
-    // The bus is owned exclusively here; no other task may touch Serial1/DXL.
+    // Publish a fresh present-position snapshot for all discovered servos in a
+    // single Sync Read per control table. This is a no-op until a maintenance
+    // scan populates the servo table (DXL power is OFF at boot), and never
+    // enables torque or writes goals. The goal Sync-Write path (writeGoal-
+    // Positions) is implemented and unit-tested at the driver level; its task-
+    // level activation is gated by arming/arbitration (22l.8/22l.10).
+    if (g_dxlBus.servoCount() > 0) {
+      const uint8_t n =
+          g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
+      g_servoStatusCount = n;
+    }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kDxl));
   }
 }
