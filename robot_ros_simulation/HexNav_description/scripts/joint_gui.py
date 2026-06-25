@@ -3,7 +3,7 @@
 
 A small Tkinter control panel with one slider per actuated joint. Sliders are
 expressed in real Dynamixel MX-28 servo angles (degrees, mechanically centered
-at 90 deg) and each joint has an "inv" checkbox to invert its direction when
+at 180 deg) and each joint has an "inv" checkbox to invert its direction when
 the servo is mounted mirrored. Slider values are converted to radians and
 published as a std_msgs/Float64MultiArray to the ros2_control
 forward_command_controller, which drives the mock hardware and is reflected in
@@ -40,15 +40,16 @@ JOINT_ORDER = [name for _, joints in LEGS for name in joints]
 # Dynamixel MX-28 servo convention. The MX-28 uses a 12-bit contactless
 # absolute encoder (4096 pulses/rev, 0.088 deg/pulse). In Joint Mode the Goal
 # Position spans the full 0-360 deg range; the robot's home/start pose keeps
-# every servo at 90 deg, which maps to the URDF joint's neutral (0 rad) pose.
+# every servo at 180 deg (the mechanical center of travel), which maps to the
+# URDF joint's neutral (0 rad) pose.
 SERVO_MIN_DEG = 0.0
 SERVO_MAX_DEG = 360.0
-SERVO_CENTER_DEG = 90.0
+SERVO_CENTER_DEG = 180.0
 SERVO_RESOLUTION_DEG = 0.088
 
 
 def servo_deg_to_joint_rad(servo_deg, inverted):
-    """Convert a real MX-28 servo angle (deg, centered at 90) to a joint
+    """Convert a real MX-28 servo angle (deg, centered at 180) to a joint
     command in radians, honoring the per-servo inversion flag."""
     delta = math.radians(servo_deg - SERVO_CENTER_DEG)
     return -delta if inverted else delta
@@ -68,7 +69,7 @@ class JointGui(Node):
         topic = self.get_parameter("command_topic").get_parameter_value().string_value
 
         self._pub = self.create_publisher(Float64MultiArray, topic, 10)
-        # Real servo angles in degrees (MX-28), centered at 90 deg, plus a
+        # Real servo angles in degrees (MX-28), centered at 180 deg, plus a
         # per-servo inversion flag.
         self._servo_deg = {name: SERVO_CENTER_DEG for name in JOINT_ORDER}
         self._inverted = {name: False for name in JOINT_ORDER}
@@ -166,10 +167,10 @@ def build_ui(node):
 
     button_bar = tk.Frame(root, padx=8, pady=6)
     button_bar.pack(fill="x")
-    tk.Button(button_bar, text="Center (90°)", command=reset_all).pack(side="left")
+    tk.Button(button_bar, text="Center (180°)", command=reset_all).pack(side="left")
     tk.Label(
         button_bar,
-        text="MX-28 Joint Mode 0–360°, start 90°  •  'inv' flips direction",
+        text="MX-28 Joint Mode 0–360°, start 180°  •  'inv' flips direction",
     ).pack(side="right")
 
     return root

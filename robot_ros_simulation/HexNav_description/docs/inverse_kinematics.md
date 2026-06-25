@@ -19,7 +19,7 @@ reachable workspace, and the standard hexapod gaits.
 |---|---|
 | Legs | 6, each **3‑DOF** (coxa / femur / tibia) |
 | Actuators | 18 × Dynamixel **MX‑28** (Joint Mode, 0–360°, 4096 pulse/rev, 0.088°/pulse) |
-| Servo home / center | **90°** ⇒ URDF joint zero (0 rad) |
+| Servo home / center | **180°** ⇒ URDF joint zero (0 rad) |
 | Total mass | 4.663 kg |
 | Root frame | `base_link` |
 | Body centre (CoM, in `base_link`) | (76.463, 126.463, −0.093) mm |
@@ -76,7 +76,7 @@ the hip; `azimuth` is measured from +X (forward), CCW positive (toward +Y/left).
 | 6 | (−69.78,   0.00 ) |  69.78 | 180.00° | −16.5 | mid‑left   |
 
 The hip‑yaw home azimuth of each leg (the `leg_n_coxa_mount` yaw, i.e. the
-direction the coxa points at servo 90°):
+direction the coxa points at servo 180°):
 
 | Leg | 1 | 2 | 3 | 4 | 5 | 6 |
 |----:|:--:|:--:|:--:|:--:|:--:|:--:|
@@ -162,7 +162,7 @@ True 3‑D link lengths are **identical for all six legs** (verified, §11):
 
 ## 5. Home pose & default stance
 
-At **all joints = 0 rad (all servos = 90°)** the feet rest at (in centred body
+At **all joints = 0 rad (all servos = 180°)** the feet rest at (in centred body
 frame `B`):
 
 | Leg | Foot in B (mm) | Horiz. radius (mm) | Azimuth | Foot height (mm) |
@@ -214,12 +214,12 @@ Positive joint angle (URDF, right‑hand rule about the listed axis):
 Each URDF joint angle `q` (rad) maps to an MX‑28 goal angle `S` (deg):
 
 ```
-S = 90 + sign · degrees(q)              # command (rad → servo deg)
-q = sign · radians(S − 90)              # feedback (servo deg → rad)
+S = 180 + sign · degrees(q)             # command (rad → servo deg)
+q = sign · radians(S − 180)             # feedback (servo deg → rad)
 ```
 
-- **Center:** servo **90°** = URDF zero. Joint Mode range 0–360°, so usable
-  travel about home is roughly ±90° before the servo dead‑band/limits.
+- **Center:** servo **180°** = URDF zero. Joint Mode range 0–360°, so usable
+  travel about home is roughly ±180° before the servo dead‑band/limits.
 - **`sign` (inversion):** `+1` or `−1` per servo, set so that a positive URDF
   angle and the physical motion agree. Because the chassis is sagittally
   mirror‑symmetric, **left and right legs of a pair turn opposite directions for
@@ -236,16 +236,16 @@ toggles in `scripts/joint_gui.py`):
 | tibia | `+1` | `−1` |
 
 > The GUI (`joint_gui.py`) already exposes a per‑joint **`inv`** checkbox and a
-> **Center (90°)** button; use it to confirm each servo's `sign` before burning
+> **Center (180°)** button; use it to confirm each servo's `sign` before burning
 > the map into firmware. Store the 18 signs and 18 home offsets (trim) in EEPROM
 > or config.
 
 ### Calibration procedure (per servo)
-1. Power the leg, set servo to **90°**, confirm the segment is at its URDF‑zero
+1. Power the leg, set servo to **180°**, confirm the segment is at its URDF‑zero
    pose (use RViz with `/joint_states` as the reference picture).
-2. Command **+10° in URDF terms** (`S = 90 + sign·10`). If the segment moves the
+2. Command **+10° in URDF terms** (`S = 180 + sign·10`). If the segment moves the
    wrong way, flip `sign`.
-3. Record any mechanical offset between the servo's mechanical 90° and the true
+3. Record any mechanical offset between the servo's mechanical 180° and the true
    zero pose as a **trim** added to `S`.
 
 ---
@@ -293,9 +293,9 @@ q_femur = a − b
 (femur/tibia have non‑zero baked rest angles, notably the tibia's **140.0°**),
 then convert with §7:
 ```
-S_coxa  = 90 + sign_c · degrees(q_coxa)
-S_femur = 90 + sign_f · degrees(q_femur  − FEMUR_REST)
-S_tibia = 90 + sign_t · degrees(q_tibia  − TIBIA_REST)   # TIBIA_REST = 2.443461 rad
+S_coxa  = 180 + sign_c · degrees(q_coxa)
+S_femur = 180 + sign_f · degrees(q_femur  − FEMUR_REST)
+S_tibia = 180 + sign_t · degrees(q_tibia  − TIBIA_REST)   # TIBIA_REST = 2.443461 rad
 ```
 
 > **Reachability test:** the target is valid only if
@@ -327,7 +327,7 @@ translation of `T_foot`. Use this to validate IK output before driving hardware.
 - **Foot height envelope:** about **±60 mm** around the −40 mm home height before
   the 2‑link arm saturates.
 - **Servo travel:** MX‑28 Joint Mode 0–360°; keep each joint within **±90° of the
-  90° home** to stay clear of the dead‑band and self‑collision.
+  180° home** to stay clear of the dead‑band and self‑collision.
 - **Recommended per‑joint soft limits** (tune on hardware):
   - coxa: ±35° about home (avoid adjacent‑leg collision; corner legs are 60.43°
     apart in azimuth).
@@ -441,7 +441,7 @@ and (b) the servo `sign`/trim from §7. Nothing else changes between legs.
 #define TIBIA_REST_DEG 140.0f  // baked knee rest (2.443461 rad)
 
 // ---- Servo (MX-28) ----
-#define SERVO_CENTER_DEG  90.0f
+#define SERVO_CENTER_DEG 180.0f
 #define SERVO_MIN_DEG      0.0f
 #define SERVO_MAX_DEG    360.0f
 #define SERVO_DEG_PER_PULSE 0.087890625f   // 360 / 4096
