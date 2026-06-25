@@ -36,6 +36,14 @@ namespace config {
 class ConfigApi;
 }
 
+// Forward declaration: the telemetry subscription command group (SUBSCRIBE /
+// UNSUBSCRIBE / SET_STREAM_RATE / GET_STREAM_STATS) is handled by a portable
+// SubscriptionManager in protocol/telemetry.h. handleRequest delegates that
+// msg-id range to it when a non-null instance is supplied.
+namespace protocol {
+class SubscriptionManager;
+}
+
 namespace protocol {
 namespace api {
 
@@ -64,6 +72,10 @@ enum class Error : uint8_t {
 // dispatcher can recognize it without including the config header here.
 constexpr uint8_t kConfigMsgFirst = 0x20;
 constexpr uint8_t kConfigMsgLast = 0x25;
+
+// Telemetry subscription command msg-id range, mirrored from protocol::telemsg.
+constexpr uint8_t kTelemetryMsgFirst = 0x10;
+constexpr uint8_t kTelemetryMsgLast = 0x13;
 
 constexpr size_t kDeviceNameLen = 16;
 
@@ -96,7 +108,8 @@ struct StatusSnapshot {
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap,
-                     config::ConfigApi* cfg = nullptr);
+                     config::ConfigApi* cfg = nullptr,
+                     SubscriptionManager* tel = nullptr);
 
 }  // namespace api
 }  // namespace protocol

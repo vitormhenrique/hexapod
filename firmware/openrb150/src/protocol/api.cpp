@@ -2,6 +2,7 @@
 
 #include "../config/config_api.h"
 #include "framing.h"
+#include "telemetry.h"
 
 namespace protocol {
 namespace api {
@@ -48,7 +49,8 @@ Header makeResponse(const Header& req, uint16_t payload_len, uint8_t flags) {
 
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
-                     uint8_t* out, size_t out_cap, config::ConfigApi* cfg) {
+                     uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
+                     SubscriptionManager* tel) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -113,6 +115,19 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                         &cfg_len, &cfg_flags)) {
           payload_len = cfg_len;
           flags = cfg_flags;
+          break;
+        }
+      }
+      // Delegate the telemetry subscription group to the manager when present.
+      if (tel != nullptr && req.msg_id >= kTelemetryMsgFirst &&
+          req.msg_id <= kTelemetryMsgLast) {
+        uint16_t tel_len = 0;
+        uint8_t tel_flags = 0;
+        if (tel->handle(req.msg_id, req_payload,
+                        static_cast<uint16_t>(req_len), payload, kMaxPayload,
+                        &tel_len, &tel_flags)) {
+          payload_len = tel_len;
+          flags = tel_flags;
           break;
         }
       }

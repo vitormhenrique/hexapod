@@ -10,10 +10,13 @@
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/frame_reader.h"
+#include "../protocol/framing.h"
+#include "../protocol/telemetry.h"
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
 #include "../safety/command_arbiter.h"
+#include "../safety/state_machine.h"
 #include "../safety/system_state.h"
 #include "../safety/watchdog.h"
 #include "task_config.h"
@@ -52,6 +55,23 @@ safety::CommandArbiter g_arbiter;
 volatile uint8_t g_commandSource = 0;       // safety::CommandSource value
 volatile bool g_motionAuthorized = false;   // a source may drive servos
 volatile bool g_killActive = true;          // RC kill / host estop asserted
+
+// Authoritative safety state machine (AGENTS.md 5.3). controlTask advances it
+// each cycle from health/RC/arbiter inputs; the result is the single source of
+// truth for which states permit torque and goal writes. dxlTask enforces the
+// gate at the bus level.
+safety::StateMachine g_stateMachine;
+volatile uint8_t g_safetyState = static_cast<uint8_t>(safety::State::Boot);
+volatile uint8_t g_faultReason = 0;  // safety::FaultReason value
+// True only when the current state permits motion AND a source owns authority.
+volatile bool g_motionGate = false;
+// True once i2cTask has finished its boot scan and seeded a (persisted or
+// default) config; gates the ConfigLoad -> Disarmed transition.
+volatile bool g_configReady = false;
+
+// Telemetry subscription manager. apiTask routes the telemetry command range to
+// it and walks the streams each loop, emitting due telemetry frames over USB.
+protocol::SubscriptionManager g_subs;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -159,12 +179,115 @@ inline void tick(watchdog::TaskId id) {
   watchdog::checkIn(id);
 }
 
+// --- Telemetry payload encoding -------------------------------------------
+// Little-endian writers for building telemetry frame payloads in place.
+inline uint16_t put16(uint8_t* p, uint16_t v) {
+  p[0] = static_cast<uint8_t>(v & 0xFF);
+  p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+  return 2;
+}
+inline uint16_t put32(uint8_t* p, uint32_t v) {
+  p[0] = static_cast<uint8_t>(v & 0xFF);
+  p[1] = static_cast<uint8_t>((v >> 8) & 0xFF);
+  p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
+  p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
+  return 4;
+}
+
+// Build the payload for telemetry `stream` into `p` (capacity kMaxPayload).
+// Returns the payload length. Reads only the published cross-task snapshots, so
+// it never touches a peripheral or blocks. Payloads stay within 256 bytes.
+uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
+                        uint32_t now_ms) {
+  using protocol::StreamId;
+  uint16_t o = 0;
+  switch (stream) {
+    case StreamId::Health: {
+      o += put32(&p[o], now_ms);
+      p[o++] = g_safetyState;
+      p[o++] = g_faultReason;
+      o += put32(&p[o], watchdog::missedMask());
+      o += put16(&p[o], board::readBatteryMilliVolts());
+      break;
+    }
+    case StreamId::ControlState: {
+      p[o++] = g_commandSource;
+      p[o++] = g_motionAuthorized ? 1 : 0;
+      p[o++] = g_killActive ? 1 : 0;
+      p[o++] = g_safetyState;
+      p[o++] = g_faultReason;
+      p[o++] = g_motionGate ? 1 : 0;
+      break;
+    }
+    case StreamId::ServoStatus: {
+      // count(1) then 13 bytes/servo: id, pos(4), vel(2), load(2), volt_mv(2),
+      // temp(1), err(1). 18 servos -> 235 bytes, within the 256 payload cap.
+      const uint8_t n = g_servoStatusCount;
+      p[o++] = n;
+      for (uint8_t i = 0; i < n; ++i) {
+        const dxl::ServoStatus& s = g_servoStatus[i];
+        p[o++] = s.id;
+        o += put32(&p[o], static_cast<uint32_t>(s.present_position));
+        o += put16(&p[o], static_cast<uint16_t>(s.present_velocity));
+        o += put16(&p[o], static_cast<uint16_t>(s.present_load));
+        o += put16(&p[o], s.present_voltage_mv);
+        p[o++] = static_cast<uint8_t>(s.present_temperature_c);
+        p[o++] = s.hardware_error;
+      }
+      break;
+    }
+    case StreamId::ContactState: {
+      // 6 feet x 4 bytes: state(1), confidence(1), pressure_delta(2).
+      for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+        const sensors::LegContactState& f = g_footState[i];
+        p[o++] = static_cast<uint8_t>(f.state);
+        p[o++] = f.confidence;
+        o += put16(&p[o], static_cast<uint16_t>(f.pressure_delta));
+      }
+      break;
+    }
+    case StreamId::I2cSensorsRaw: {
+      // 6 feet x 6 bytes: proximity(2), pressure_raw(4).
+      for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+        const sensors::LegContactState& f = g_footState[i];
+        o += put16(&p[o], f.proximity_raw);
+        o += put32(&p[o], static_cast<uint32_t>(f.pressure_raw));
+      }
+      break;
+    }
+    case StreamId::RcInput: {
+      // flags(1): bit0 armed, bit1 kill, bit2 failsafe, bit3 autonomy.
+      uint8_t flags = 0;
+      if (g_rcStatus.armed) flags |= 0x01;
+      if (g_rcStatus.kill) flags |= 0x02;
+      if (g_rcStatus.failsafe) flags |= 0x04;
+      if (g_rcStatus.autonomy) flags |= 0x08;
+      p[o++] = flags;
+      p[o++] = g_rcStatus.gait_index;
+      for (uint8_t i = 0; i < crsf::kNumChannels; ++i) {
+        o += put16(&p[o], g_rcStatus.channels_us[i]);
+      }
+      break;
+    }
+    case StreamId::ApiStats: {
+      // tx_backlog(4) then per-stream dropped(4) for the 7 streams.
+      o += put32(&p[o], g_subs.txBacklog());
+      for (uint8_t i = 0; i < protocol::kNumStreams; ++i) {
+        o += put32(&p[o], g_subs.dropped(static_cast<StreamId>(i)));
+      }
+      break;
+    }
+  }
+  return o;
+}
+
 // --- Task bodies ----------------------------------------------------------
 // Each task runs a fixed-period loop with vTaskDelayUntil so timing does not
 // drift with body execution time. Bodies are stubs for the skeleton.
 
 void controlTask(void*) {
   TickType_t next = xTaskGetTickCount();
+  g_stateMachine.reset();
   for (;;) {
     tick(watchdog::TaskId::Control);
 
@@ -184,8 +307,42 @@ void controlTask(void*) {
     g_motionAuthorized = arb.motion_authorized;
     g_killActive = arb.kill_active;
 
-    // TODO (22l.10): full safety state machine + gait phase / IK / servo target
-    // generation. Goal sync-writes remain gated by g_motionAuthorized.
+    // Advance the safety state machine. It owns the boot/arm/walk/maintenance/
+    // fault/estop transitions and decides whether torque and goal writes are
+    // permitted this cycle. Inputs are sampled from the published snapshots so
+    // the machine never blocks on a peripheral.
+    const uint16_t batt_mv = board::readBatteryMilliVolts();
+    safety::StateInputs si;
+    si.config_loaded = g_configReady;
+    si.battery_mv = batt_mv;
+    si.battery_valid = batt_mv > 6000;  // below this = no pack sense (USB bench)
+    si.watchdog_fault = watchdog::missedMask() != 0;
+    si.dxl_hard_fault = false;  // TODO: derive from repeated bus / HW errors
+    si.host_estop = g_arbiter.hostEstop();
+    si.rc_kill = g_rcStatus.kill;
+    si.rc_failsafe = g_rcStatus.failsafe;
+    si.rc_ever_seen = g_rcStatus.ever_seen;
+    si.rc_armed = g_rcStatus.armed;
+    si.arming_checks_pass = g_configReady;
+    si.command_source = g_commandSource;
+    si.jetson_fresh = g_arbiter.jetsonFresh(now_ms);
+    si.rc_autonomy = g_rcStatus.autonomy;
+    si.mac_lock_held = g_arbiter.macLockHeld(now_ms);
+    si.maintenance_request = false;  // wired when ENTER_MAINTENANCE lands
+    si.passive_request = false;      // wired when PASSIVE_ENTER lands
+    si.torque_off = false;
+    si.contact_enabled = false;      // wired with the contact feature toggle
+    si.contact_confident = false;
+    const safety::State state = g_stateMachine.update(si, now_ms);
+    g_safetyState = static_cast<uint8_t>(state);
+    g_faultReason = static_cast<uint8_t>(g_stateMachine.faultReason());
+
+    // The motion gate is the conjunction of "the state allows movement" and
+    // "a command source owns authority". dxlTask uses it to keep torque off and
+    // suppress goal writes unless both hold. Goal generation (gait/IK) lands in
+    // a later task; this enforces the safety contract for it up front.
+    g_motionGate = safety::stateAllowsMotion(state) && arb.motion_authorized;
+
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
 }
@@ -200,12 +357,13 @@ void dxlTask(void*) {
   for (;;) {
     tick(watchdog::TaskId::Dxl);
 
-    // Enforce the arbiter's authority at the bus level: the instant motion
-    // authority is lost (RC kill, host estop, disarm), disable torque on all
-    // discovered servos so the robot stops. Edge-triggered so we do not spam
-    // the bus every cycle. No-op until a maintenance scan populates servos and
-    // DXL power is on (both OFF at boot), keeping this safe by default.
-    const bool authorized = g_motionAuthorized;
+    // Enforce the safety gate at the bus level: the instant motion is no longer
+    // permitted (RC kill, host estop, disarm, fault, or a non-motion state),
+    // disable torque on all discovered servos so the robot stops. Edge-
+    // triggered so we do not spam the bus every cycle. No-op until a maintenance
+    // scan populates servos and DXL power is on (both OFF at boot), keeping this
+    // safe by default. g_motionGate already folds in the safety state machine.
+    const bool authorized = g_motionGate;
     if (!authorized && prev_authorized && g_dxlBus.servoCount() > 0) {
       g_dxlBus.setTorqueAll(false);
     }
@@ -256,6 +414,7 @@ void rcTask(void*) {
 void apiTask(void*) {
   static protocol::FrameReader reader;
   static uint8_t out[protocol::kMaxWireFrame];
+  static uint16_t g_telemetrySeq = 0;
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Api);
@@ -279,7 +438,7 @@ void apiTask(void*) {
       protocol::api::StatusSnapshot st;
       st.uptime_ms =
           static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
-      st.state = static_cast<uint8_t>(safety::State::Disarmed);
+      st.state = g_safetyState;
       st.dxl_power = board::dxlPowerEnabled();
       st.dxl_power_control = board::hasDxlPowerControl();
       st.battery_mv = board::readBatteryMilliVolts();
@@ -287,9 +446,35 @@ void apiTask(void*) {
 
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
-          &g_configApi);
+          &g_configApi, &g_subs);
       if (n > 0) {
         Serial.write(out, n);
+      }
+    }
+
+    // Emit any due telemetry frames for subscribed streams. The subscription
+    // manager enforces each stream's rate and counts missed slots as dropped;
+    // when the USB CDC TX buffer cannot accept a frame we count a backlog drop
+    // instead of blocking the task (AGENTS.md 6.3 rate-limited subscriptions).
+    const uint32_t now_ms =
+        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    for (uint8_t i = 0; i < protocol::kNumStreams; ++i) {
+      const protocol::StreamId s = static_cast<protocol::StreamId>(i);
+      if (!g_subs.shouldEmit(s, now_ms)) continue;
+      uint8_t payload[protocol::kMaxPayload];
+      const uint16_t plen = buildTelemetry(s, payload, now_ms);
+      protocol::Header h;
+      h.msg_type = static_cast<uint8_t>(protocol::MsgType::Telemetry);
+      h.msg_id = static_cast<uint8_t>(protocol::kTelemetryFrameMsgBase + i);
+      h.seq = g_telemetrySeq++;
+      h.timestamp_ms = now_ms;
+      h.payload_len = plen;
+      const size_t fn = protocol::encodeFrame(h, payload, out, sizeof(out));
+      if (fn == 0) continue;
+      if (Serial.availableForWrite() >= static_cast<int>(fn)) {
+        Serial.write(out, fn);
+      } else {
+        g_subs.noteTxBacklog();  // TX full: drop this frame, do not block
       }
     }
 
@@ -337,6 +522,10 @@ void i2cTask(void*) {
   } else {
     g_configVolatile = true;
   }
+  // Boot discovery and config seeding are complete: a config (persisted or
+  // compiled default) is now available, so the safety machine may leave
+  // ConfigLoad. apiTask adopts any persisted payload independently.
+  g_configReady = true;
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::I2c);
