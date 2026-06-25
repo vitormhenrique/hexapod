@@ -233,6 +233,14 @@ def build_maintenance() -> dict:
             "name": "maint_heartbeat",
             "request": api_mod.build_maint_heartbeat(0x01020304, seq=3).hex(),
         },
+        {
+            "name": "set_leg_target",
+            "request": api_mod.build_set_leg_target(0, 120, -30, -45, seq=4).hex(),
+        },
+        {
+            "name": "set_joint_target",
+            "request": api_mod.build_set_joint_target(2, 1, 3000, seq=5).hex(),
+        },
     ]
     return {"cases": cases}
 

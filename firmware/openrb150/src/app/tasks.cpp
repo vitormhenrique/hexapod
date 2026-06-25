@@ -13,6 +13,7 @@
 #include "../protocol/frame_reader.h"
 #include "../protocol/framing.h"
 #include "../protocol/maintenance_api.h"
+#include "../protocol/maintenance_target_api.h"
 #include "../protocol/motion_api.h"
 #include "../protocol/telemetry.h"
 #include "../sensors/contact_estimator.h"
@@ -93,6 +94,12 @@ protocol::MotionApi g_motionApi;
 // TTL here; controlTask reads lockHeld() to feed the safety FSM's maintenance
 // inputs and force-revokes the lock on E-stop / fault.
 protocol::MaintenanceApi g_maintApi;
+
+// Host maintenance leg/joint targets (SET_LEG_TARGET/SET_JOINT_TARGET). Runs the
+// foot/joint request through body+leg IK and the servo map, storing clamped
+// goal ticks. Only honored while in MacMaintenance with the lock held; the goal
+// write path consumes the stored targets under MacMaintenance authority.
+protocol::MaintTargetApi g_maintTargetApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -385,6 +392,10 @@ void controlTask(void*) {
     // parked until the robot is armed/authorised.
     g_motionApi.setLiveState(g_safetyState, g_motionGate);
 
+    // Gate maintenance leg/joint targets on the live MacMaintenance state +
+    // held lock so a foot/joint nudge is only accepted on the bench.
+    g_maintTargetApi.setLiveState(g_safetyState, g_maintApi.lockHeld(now_ms));
+
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
 }
@@ -457,6 +468,10 @@ void apiTask(void*) {
   static protocol::FrameReader reader;
   static uint8_t out[protocol::kMaxWireFrame];
   static uint16_t g_telemetrySeq = 0;
+  // Bind the active config shadow (defaults until a persisted config is
+  // adopted; the shadow object is stable, so this pointer stays valid across
+  // adopt/commit) so maintenance targets can run IK + the servo map.
+  g_maintTargetApi.setConfig(&g_configApi.config());
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Api);
@@ -494,7 +509,8 @@ void apiTask(void*) {
 
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
-          &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi);
+          &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
+          &g_maintTargetApi);
       if (n > 0) {
         Serial.write(out, n);
       }

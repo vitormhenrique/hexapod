@@ -4,6 +4,7 @@
 #include "control_api.h"
 #include "framing.h"
 #include "maintenance_api.h"
+#include "maintenance_target_api.h"
 #include "motion_api.h"
 #include "telemetry.h"
 
@@ -54,7 +55,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
                      SubscriptionManager* tel, ControlApi* ctrl,
-                     MotionApi* motion, MaintenanceApi* maint) {
+                     MotionApi* motion, MaintenanceApi* maint,
+                     MaintTargetApi* maint_target) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -174,6 +176,22 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                           &mnt_len, &mnt_flags)) {
           payload_len = mnt_len;
           flags = mnt_flags;
+          break;
+        }
+      }
+      // Delegate the maintenance leg/joint targets (SET_LEG_TARGET/
+      // SET_JOINT_TARGET) to the MaintTargetApi when present. Its ids sit inside
+      // the maintenance block, so this is tried after the lock handler (which
+      // declines them).
+      if (maint_target != nullptr && req.msg_id >= kMaintTargetMsgFirst &&
+          req.msg_id <= kMaintTargetMsgLast) {
+        uint16_t mt_len = 0;
+        uint8_t mt_flags = 0;
+        if (maint_target->handle(req.msg_id, req_payload,
+                                 static_cast<uint16_t>(req_len), payload,
+                                 kMaxPayload, &mt_len, &mt_flags)) {
+          payload_len = mt_len;
+          flags = mt_flags;
           break;
         }
       }

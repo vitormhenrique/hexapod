@@ -68,6 +68,14 @@ namespace protocol {
 class MaintenanceApi;
 }
 
+// Forward declaration: the maintenance leg/joint target command group
+// (SET_LEG_TARGET / SET_JOINT_TARGET) is handled by a portable MaintTargetApi
+// in protocol/maintenance_target_api.h. handleRequest delegates its msg-ids
+// (within the maintenance block) to it when a non-null instance is supplied.
+namespace protocol {
+class MaintTargetApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -113,6 +121,11 @@ constexpr uint8_t kMotionMsgLast = 0x38;
 constexpr uint8_t kMaintenanceMsgFirst = 0x50;
 constexpr uint8_t kMaintenanceMsgLast = 0x5F;
 
+// Maintenance leg/joint target msg-id range (within the 0x50-0x5F block), from
+// protocol::mainttargetmsg.
+constexpr uint8_t kMaintTargetMsgFirst = 0x53;
+constexpr uint8_t kMaintTargetMsgLast = 0x54;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -148,7 +161,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      SubscriptionManager* tel = nullptr,
                      ControlApi* ctrl = nullptr,
                      MotionApi* motion = nullptr,
-                     MaintenanceApi* maint = nullptr);
+                     MaintenanceApi* maint = nullptr,
+                     MaintTargetApi* maint_target = nullptr);
 
 }  // namespace api
 }  // namespace protocol

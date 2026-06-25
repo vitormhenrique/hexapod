@@ -204,6 +204,14 @@
       {
         "name": "maint_heartbeat",
         "request": "0002a502010252020301010101020407040302018f0200"
+      },
+      {
+        "name": "set_leg_target",
+        "request": "0002a502010253020401010101020701027807e2ffd3ff5dad00"
+      },
+      {
+        "name": "set_joint_target",
+        "request": "0002a5020102540205010101010204070201b80ba31b00"
       }
     ]
   }

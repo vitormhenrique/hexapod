@@ -48,6 +48,8 @@ MSG_STOP_MOTION = 0x38
 MSG_ENTER_MAINTENANCE = 0x50
 MSG_EXIT_MAINTENANCE = 0x51
 MSG_MAINT_HEARTBEAT = 0x52
+MSG_SET_LEG_TARGET = 0x53
+MSG_SET_JOINT_TARGET = 0x54
 
 # Telemetry frame msg-id base: a telemetry frame for stream s arrives with
 # header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
@@ -96,6 +98,12 @@ MAINT_REJECTED = 1
 MAINT_BAD_REQUEST = 2
 MAINT_BUSY = 3
 MAINT_BAD_TOKEN = 4
+
+# Maintenance leg/joint target result byte (mirrors MaintTargetResult).
+MAINT_TARGET_OK = 0
+MAINT_TARGET_REJECTED = 1
+MAINT_TARGET_BAD_REQUEST = 2
+MAINT_TARGET_UNREACHABLE = 3
 
 DEVICE_NAME_LEN = 16
 
@@ -491,3 +499,94 @@ def parse_maint_result(payload: bytes) -> MaintResultMsg:
     if len(payload) >= 2:
         return MaintResultMsg(payload[0], payload[1], 0)
     return MaintResultMsg(payload[0] if payload else MAINT_BAD_REQUEST, 0, 0)
+
+
+# --- Maintenance leg/joint targets ----------------------------------------
+
+
+def build_set_leg_target(
+    leg: int, x_mm: int, y_mm: int, z_mm: int, seq: int = 0
+) -> bytes:
+    """Build a SET_LEG_TARGET command: move leg ``leg``'s foot to (x, y, z) mm
+    in the body frame. Only honored in MacMaintenance with the lock held.
+    """
+    return build_command(
+        MSG_SET_LEG_TARGET,
+        seq=seq,
+        payload=struct.pack("<Bhhh", leg & 0xFF, x_mm, y_mm, z_mm),
+    )
+
+
+def build_set_joint_target(
+    leg: int, joint: int, angle_cdeg: int, seq: int = 0
+) -> bytes:
+    """Build a SET_JOINT_TARGET command: set one joint (leg, joint) to
+    ``angle_cdeg`` centidegrees (URDF-zero-relative). Maintenance-gated.
+    """
+    return build_command(
+        MSG_SET_JOINT_TARGET,
+        seq=seq,
+        payload=struct.pack("<BBh", leg & 0xFF, joint & 0xFF, angle_cdeg),
+    )
+
+
+@dataclass
+class LegTargetResult:
+    result: int
+    state: int
+    reachable: bool
+    clamp_low: int   # bitmask over (coxa, femur, tibia)
+    clamp_high: int
+    ticks: tuple[int, int, int]
+
+    @property
+    def ok(self) -> bool:
+        return self.result == MAINT_TARGET_OK
+
+
+@dataclass
+class JointTargetResult:
+    result: int
+    state: int
+    clamped_low: bool
+    clamped_high: bool
+    tick: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == MAINT_TARGET_OK
+
+
+def parse_leg_target_result(payload: bytes) -> LegTargetResult:
+    """Decode a SET_LEG_TARGET response
+    ([result, state, reachable, clamp_low, clamp_high, 3 x tick(u16)]).
+    A short payload is a rejected/error status with no ticks.
+    """
+    if len(payload) >= 11:
+        c, f, t = struct.unpack("<HHH", payload[5:11])
+        return LegTargetResult(
+            payload[0], payload[1], bool(payload[2]), payload[3], payload[4],
+            (c, f, t),
+        )
+    state = payload[1] if len(payload) >= 2 else 0
+    return LegTargetResult(
+        payload[0] if payload else MAINT_TARGET_BAD_REQUEST, state, False, 0, 0,
+        (0, 0, 0),
+    )
+
+
+def parse_joint_target_result(payload: bytes) -> JointTargetResult:
+    """Decode a SET_JOINT_TARGET response
+    ([result, state, clamp_low, clamp_high, tick(u16)]). A short payload is a
+    rejected/error status with no tick.
+    """
+    if len(payload) >= 6:
+        (tick,) = struct.unpack("<H", payload[4:6])
+        return JointTargetResult(
+            payload[0], payload[1], bool(payload[2]), bool(payload[3]), tick
+        )
+    state = payload[1] if len(payload) >= 2 else 0
+    return JointTargetResult(
+        payload[0] if payload else MAINT_TARGET_BAD_REQUEST, state, False,
+        False, 0,
+    )

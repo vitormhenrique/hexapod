@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from pathlib import Path
 
 import pytest
@@ -239,6 +240,8 @@ _MAINT_BUILDERS = {
     "enter_maintenance": lambda: api.build_enter_maintenance(seq=1),
     "exit_maintenance": lambda: api.build_exit_maintenance(0x01020304, seq=2),
     "maint_heartbeat": lambda: api.build_maint_heartbeat(0x01020304, seq=3),
+    "set_leg_target": lambda: api.build_set_leg_target(0, 120, -30, -45, seq=4),
+    "set_joint_target": lambda: api.build_set_joint_target(2, 1, 3000, seq=5),
 }
 
 
@@ -258,3 +261,29 @@ def test_parse_maint_result():
     assert bad.bad_token
     err = api.parse_maint_result(bytes([api.MAINT_BAD_REQUEST]))
     assert err.result == api.MAINT_BAD_REQUEST and err.state == 0
+
+
+def test_parse_leg_target_result():
+    ok = api.parse_leg_target_result(
+        bytes([api.MAINT_TARGET_OK, 8, 1, 0, 0]) + struct.pack("<HHH", 2048, 2100, 1990)
+    )
+    assert ok.ok and ok.reachable and ok.ticks == (2048, 2100, 1990)
+    unreach = api.parse_leg_target_result(
+        bytes([api.MAINT_TARGET_UNREACHABLE, 8, 0, 0, 0]) + struct.pack("<HHH", 1024, 1024, 3072)
+    )
+    assert not unreach.reachable and unreach.result == api.MAINT_TARGET_UNREACHABLE
+    rej = api.parse_leg_target_result(bytes([api.MAINT_TARGET_REJECTED, 2]))
+    assert rej.result == api.MAINT_TARGET_REJECTED and rej.ticks == (0, 0, 0)
+
+
+def test_parse_joint_target_result():
+    ok = api.parse_joint_target_result(
+        bytes([api.MAINT_TARGET_OK, 8, 0, 0]) + struct.pack("<H", 2389)
+    )
+    assert ok.ok and ok.tick == 2389 and not ok.clamped_high
+    clamp = api.parse_joint_target_result(
+        bytes([api.MAINT_TARGET_OK, 8, 0, 1]) + struct.pack("<H", 3072)
+    )
+    assert clamp.clamped_high and clamp.tick == 3072
+    rej = api.parse_joint_target_result(bytes([api.MAINT_TARGET_REJECTED, 2]))
+    assert rej.result == api.MAINT_TARGET_REJECTED and rej.tick == 0
