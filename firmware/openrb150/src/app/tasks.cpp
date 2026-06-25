@@ -4,6 +4,9 @@
 #include <FreeRTOS_SAMD21.h>
 
 #include "../board/board.h"
+#include "../protocol/api.h"
+#include "../protocol/frame_reader.h"
+#include "../safety/system_state.h"
 #include "../safety/watchdog.h"
 #include "task_config.h"
 
@@ -16,6 +19,24 @@ TaskHandle_t g_handles[watchdog::kTaskCount] = {nullptr};
 
 // Per-task loop counters (single producer each), reported by the health task.
 volatile uint32_t g_loops[watchdog::kTaskCount] = {0};
+
+// Static description of this firmware build, reported by HELLO/GET_CAPABILITIES.
+protocol::api::DeviceInfo g_deviceInfo;
+
+void initDeviceInfo() {
+  g_deviceInfo.fw_major = 0;
+  g_deviceInfo.fw_minor = 1;
+  g_deviceInfo.fw_patch = 0;
+  g_deviceInfo.feature_bits = 0;  // populated as features land in Phase 2
+  const char name[] = "OpenRB150-Hex";
+  size_t i = 0;
+  for (; name[i] != '\0' && i < protocol::api::kDeviceNameLen; ++i) {
+    g_deviceInfo.device_name[i] = name[i];
+  }
+  for (; i < protocol::api::kDeviceNameLen; ++i) {
+    g_deviceInfo.device_name[i] = 0;
+  }
+}
 
 inline void tick(watchdog::TaskId id) {
   const uint8_t i = static_cast<uint8_t>(id);
@@ -55,10 +76,36 @@ void rcTask(void*) {
 }
 
 void apiTask(void*) {
+  static protocol::FrameReader reader;
+  static uint8_t out[protocol::kMaxWireFrame];
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Api);
-    // TODO: host protocol framing over USB CDC; commands/telemetry.
+
+    // Drain any received bytes, framing them into complete request bodies.
+    while (Serial.available() > 0) {
+      const uint8_t b = static_cast<uint8_t>(Serial.read());
+      if (!reader.push(b)) {
+        continue;
+      }
+
+      // Refresh the live status snapshot for this request.
+      protocol::api::StatusSnapshot st;
+      st.uptime_ms =
+          static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+      st.state = static_cast<uint8_t>(safety::State::Disarmed);
+      st.dxl_power = board::dxlPowerEnabled();
+      st.dxl_power_control = board::hasDxlPowerControl();
+      st.battery_mv = board::readBatteryMilliVolts();
+      st.watchdog_missed = watchdog::missedMask();
+
+      const size_t n = protocol::api::handleRequest(
+          reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out));
+      if (n > 0) {
+        Serial.write(out, n);
+      }
+    }
+
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kApi));
   }
 }
@@ -89,38 +136,10 @@ void healthTask(void*) {
     tick(watchdog::TaskId::Health);
 
     // Evaluate the software watchdog over the elapsed window. (The USER LED is
-    // driven by blinkTask as the FreeRTOS liveness indicator.)
+    // driven by blinkTask as the FreeRTOS liveness indicator. USB CDC is owned
+    // by the api task per AGENTS.md 5.1, so the host reads health via the
+    // GET_STATUS command rather than text printed here.)
     watchdog::evaluate();
-
-    if (Serial) {
-      const uint32_t up_ms =
-          static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
-      Serial.print("[health] up_ms=");
-      Serial.print(up_ms);
-      Serial.print(" missed=0x");
-      Serial.print(watchdog::missedMask(), HEX);
-      Serial.print(" dxl_power=");
-      Serial.print(board::dxlPowerEnabled() ? "ON" : "OFF");
-      Serial.print(" vbatt_mv=");
-      Serial.print(board::readBatteryMilliVolts());
-
-      // Stack high-water marks (words still free; lower = tighter).
-      Serial.print(" stack_free[ctrl,dxl,rc,api,i2c,hlth]=");
-      for (uint8_t i = 0; i < watchdog::kTaskCount; ++i) {
-        if (g_handles[i] != nullptr) {
-          Serial.print(uxTaskGetStackHighWaterMark(g_handles[i]));
-        } else {
-          Serial.print('?');
-        }
-        Serial.print(i + 1 < watchdog::kTaskCount ? ',' : ' ');
-      }
-
-      Serial.print("loops[ctrl,dxl,rc,api,i2c,hlth]=");
-      for (uint8_t i = 0; i < watchdog::kTaskCount; ++i) {
-        Serial.print(g_loops[i]);
-        Serial.print(i + 1 < watchdog::kTaskCount ? ',' : '\n');
-      }
-    }
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }
@@ -130,6 +149,7 @@ void healthTask(void*) {
 
 void start() {
   watchdog::init();
+  initDeviceInfo();
 
   // Route FreeRTOS fault reporting to the USER LED and USB CDC.
   vSetErrorLed(board::pinUserLed(), HIGH);

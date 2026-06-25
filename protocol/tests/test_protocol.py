@@ -16,6 +16,7 @@ from hexapod_protocol import (
     decode_frame_body,
     encode_frame,
 )
+from hexapod_protocol import api
 
 VECTORS = json.loads((Path(__file__).parent / "vectors" / "frames.json").read_text())
 
@@ -130,3 +131,54 @@ def test_decode_rejects_truncation():
     body = wire[1:-1]
     with pytest.raises(DecodeError):
         decode_frame_body(body[:5])  # chop the body short
+
+
+# --------------------------------------------------------------------------- #
+# USB API v0
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize("case", VECTORS["api"]["cases"])
+def test_api_request_golden(case):
+    # build_command must reproduce the golden request bytes.
+    wire = api.build_command(case["msg_id"], seq=case["seq"])
+    assert wire.hex() == case["request"]
+
+
+def test_api_parse_hello():
+    case = next(c for c in VECTORS["api"]["cases"] if c["name"] == "hello")
+    header, payload = api.parse_response(bytes.fromhex(case["response"]))
+    info = api.parse_hello(payload)
+    dev = VECTORS["api"]["device"]
+    assert header.seq == case["seq"]
+    assert info.fw_major == dev["fw_major"]
+    assert info.fw_minor == dev["fw_minor"]
+    assert info.fw_patch == dev["fw_patch"]
+    assert info.device_name == dev["device_name"]
+
+
+def test_api_parse_status():
+    case = next(c for c in VECTORS["api"]["cases"] if c["name"] == "get_status")
+    header, payload = api.parse_response(bytes.fromhex(case["response"]))
+    st = api.parse_status(payload)
+    want = VECTORS["api"]["status"]
+    assert st.uptime_ms == want["uptime_ms"]
+    assert st.state == want["state"]
+    assert st.dxl_power == want["dxl_power"]
+    assert st.dxl_power_control == want["dxl_power_control"]
+    assert st.battery_mv == want["battery_mv"]
+    assert st.watchdog_missed == want["watchdog_missed"]
+
+
+def test_api_parse_capabilities():
+    case = next(c for c in VECTORS["api"]["cases"] if c["name"] == "get_capabilities")
+    header, payload = api.parse_response(bytes.fromhex(case["response"]))
+    caps = api.parse_capabilities(payload)
+    dev = VECTORS["api"]["device"]
+    assert caps.feature_bits == dev["feature_bits"]
+    assert caps.device_name == dev["device_name"]
+
+
+def test_api_unknown_is_error():
+    case = next(c for c in VECTORS["api"]["cases"] if c["name"] == "unknown")
+    header, payload = api.parse_response(bytes.fromhex(case["response"]))
+    assert header.flags & api.FLAG_ERROR
+    assert payload == bytes([api.ERR_UNKNOWN_MSG])

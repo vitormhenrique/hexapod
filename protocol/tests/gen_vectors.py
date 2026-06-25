@@ -9,6 +9,7 @@ implementations agree byte-for-byte.
 from __future__ import annotations
 
 import json
+import struct
 import sys
 from pathlib import Path
 
@@ -16,8 +17,70 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "protocol" / "python"))
 
 from hexapod_protocol import crc16, cobs_encode, Header, encode_frame  # noqa: E402
+from hexapod_protocol.framing import MsgType  # noqa: E402
+from hexapod_protocol import api as api_mod  # noqa: E402
 
 VECTORS_PATH = Path(__file__).parent / "vectors" / "frames.json"
+
+# Fixed inputs shared by the firmware native test and the host test so both
+# sides assert identical API wire bytes.
+API_DEVICE = {
+    "fw_major": 0,
+    "fw_minor": 1,
+    "fw_patch": 0,
+    "feature_bits": 0,
+    "device_name": "OpenRB150-Hex",
+}
+API_STATUS = {
+    "uptime_ms": 123456,
+    "state": 2,  # Disarmed
+    "dxl_power": False,
+    "dxl_power_control": True,
+    "battery_mv": 11800,
+    "watchdog_missed": 0,
+}
+
+
+def _name_bytes(name: str) -> bytes:
+    raw = name.encode("ascii")[: api_mod.DEVICE_NAME_LEN]
+    return raw + b"\x00" * (api_mod.DEVICE_NAME_LEN - len(raw))
+
+
+def _api_response(msg_id: int, seq: int) -> bytes:
+    """Reference implementation of the firmware response builder."""
+    dev, st = API_DEVICE, API_STATUS
+    flags = 0
+    if msg_id == api_mod.MSG_HELLO:
+        # proto_major=0, proto_minor=1 (kVersionMajor/Minor)
+        payload = bytes([0, 1, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]])
+        payload += _name_bytes(dev["device_name"])
+    elif msg_id == api_mod.MSG_HEARTBEAT:
+        payload = struct.pack("<I", st["uptime_ms"]) + bytes([st["state"]])
+    elif msg_id == api_mod.MSG_GET_STATUS:
+        sflags = (0x01 if st["dxl_power"] else 0) | (
+            0x02 if st["dxl_power_control"] else 0
+        )
+        payload = (
+            struct.pack("<I", st["uptime_ms"])
+            + bytes([st["state"], sflags])
+            + struct.pack("<H", st["battery_mv"])
+            + struct.pack("<I", st["watchdog_missed"])
+        )
+    elif msg_id == api_mod.MSG_GET_CAPABILITIES:
+        payload = bytes([0, 1, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]])
+        payload += struct.pack("<I", dev["feature_bits"])
+        payload += _name_bytes(dev["device_name"])
+    else:
+        raise ValueError(msg_id)
+
+    h = Header(
+        msg_type=int(MsgType.RESPONSE),
+        msg_id=msg_id,
+        flags=flags,
+        seq=seq,
+        timestamp_ms=st["uptime_ms"],
+    )
+    return encode_frame(h, payload)
 
 
 def _hex(b: bytes) -> str:
@@ -81,6 +144,56 @@ def build() -> dict:
         "crc16_ccitt_false": crc_cases,
         "cobs": cobs_cases,
         "frames": frame_cases,
+        "api": build_api(),
+    }
+
+
+def build_api() -> dict:
+    cases = []
+    specs = [
+        ("hello", api_mod.MSG_HELLO, 1),
+        ("heartbeat", api_mod.MSG_HEARTBEAT, 2),
+        ("get_status", api_mod.MSG_GET_STATUS, 3),
+        ("get_capabilities", api_mod.MSG_GET_CAPABILITIES, 4),
+    ]
+    for name, msg_id, seq in specs:
+        request = api_mod.build_command(msg_id, seq=seq)
+        response = _api_response(msg_id, seq)
+        cases.append(
+            {
+                "name": name,
+                "msg_id": msg_id,
+                "seq": seq,
+                "request": request.hex(),
+                "response": response.hex(),
+            }
+        )
+
+    # Unknown msg_id -> error response (flags has FLAG_ERROR).
+    unknown_id = 0x7E
+    err_req = api_mod.build_command(unknown_id, seq=9)
+    err_h = Header(
+        msg_type=int(MsgType.RESPONSE),
+        msg_id=unknown_id,
+        flags=api_mod.FLAG_ERROR,
+        seq=9,
+        timestamp_ms=API_STATUS["uptime_ms"],
+    )
+    err_resp = encode_frame(err_h, bytes([api_mod.ERR_UNKNOWN_MSG]))
+    cases.append(
+        {
+            "name": "unknown",
+            "msg_id": unknown_id,
+            "seq": 9,
+            "request": err_req.hex(),
+            "response": err_resp.hex(),
+        }
+    )
+
+    return {
+        "device": API_DEVICE,
+        "status": API_STATUS,
+        "cases": cases,
     }
 
 

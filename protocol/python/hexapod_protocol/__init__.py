@@ -8,6 +8,7 @@ COBS, and the 14-byte little-endian frame header). Shared golden vectors in
 from .crc16 import crc16
 from .cobs import cobs_encode, cobs_decode
 from .framing import Header, MsgType, encode_frame, decode_frame_body, DecodeError
+from . import api
 
 __all__ = [
     "crc16",
@@ -18,4 +19,5 @@ __all__ = [
     "encode_frame",
     "decode_frame_body",
     "DecodeError",
+    "api",
 ]
