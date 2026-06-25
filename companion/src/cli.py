@@ -16,9 +16,9 @@ import typer
 
 from hexapod_protocol import telemetry as tlm
 
-from .transport import list_serial_ports, open_serial
-from .transport.protocol_client import ProtocolClient
-from .data import SessionLogger
+from transport import list_serial_ports, open_serial
+from transport.protocol_client import ProtocolClient
+from data import SessionLogger
 
 app = typer.Typer(add_completion=False, help="Hexapod companion CLI.")
 
@@ -31,7 +31,7 @@ def _connect(port: Optional[str], baud: int) -> ProtocolClient:
     if port is None:
         ports = list_serial_ports()
         usb = [p for p in ports if "usbmodem" in p.device or "ACM" in p.device]
-        chosen = (usb or ports)
+        chosen = usb or ports
         if not chosen:
             _err("No serial ports found. Pass --port explicitly.")
             raise typer.Exit(code=2)
@@ -218,7 +218,7 @@ def stream_stats(
 @app.command()
 def gui() -> None:
     """Launch the PySide6 companion app (same as ``hexapod-companion``)."""
-    from .app import main as gui_main
+    from app import main as gui_main
 
     gui_main()
 

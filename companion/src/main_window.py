@@ -10,14 +10,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .services import ConnectionService
-from .ui.pages import (
+from services import ConnectionService
+from ui.pages import (
     ConnectPage,
     DiagnosticsPage,
     ModeSafetyPage,
     OverviewPage,
 )
-from .ui.widgets import EventStrip, NavRail, SafetyBar
+from ui.widgets import EventStrip, NavRail, SafetyBar
 
 from hexapod_protocol import telemetry as tlm
 
@@ -78,8 +78,9 @@ class MainWindow(QMainWindow):
         # Wire global chrome to the service.
         self.service.connected.connect(self.safety_bar.set_connection)
         self.service.connected.connect(
-            lambda c: self.event_strip.add("connect" if c else "disconnect",
-                                           "link up" if c else "link down")
+            lambda c: self.event_strip.add(
+                "connect" if c else "disconnect", "link up" if c else "link down"
+            )
         )
         self.service.event.connect(self.event_strip.add)
         self.service.status_received.connect(self._on_status)
@@ -101,13 +102,15 @@ class MainWindow(QMainWindow):
             f"{st.battery_mv / 1000:.1f} V",
             "ok" if st.battery_mv > 10000 else "warn",
         )
-        self.safety_bar.torque.set("OFF" if not st.dxl_power else "ON",
-                                   "idle" if not st.dxl_power else "warn")
+        self.safety_bar.torque.set(
+            "OFF" if not st.dxl_power else "ON", "idle" if not st.dxl_power else "warn"
+        )
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id == int(tlm.StreamId.CONTROL_STATE):
-            self.safety_bar.source.set(record.source_name,
-                                       "active" if record.command_source else "idle")
+            self.safety_bar.source.set(
+                record.source_name, "active" if record.command_source else "idle"
+            )
             self.safety_bar.arming.set(
                 "ARMED" if record.motion_gate else "SAFE",
                 "warn" if record.motion_gate else "ok",

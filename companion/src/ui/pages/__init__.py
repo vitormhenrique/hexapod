@@ -12,31 +12,56 @@ from PySide6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from hexapod_protocol import telemetry as tlm
 
-from ...services import ConnectionService
-from ...theme import DRACULA
-from ..widgets import StatusBadge
+from services import ConnectionService
+from theme import DRACULA
+from ui.widgets import StatusBadge
 
 
 class BasePage(QWidget):
-    """Common page chrome: title + subtitle + content area."""
+    """Common page chrome: scrollable, centered, padded title + content area."""
 
     title = "Page"
     subtitle = ""
+    max_width = 1040
 
     def __init__(self, service: ConnectionService, parent=None) -> None:
         super().__init__(parent)
         self.service = service
-        root = QVBoxLayout(self)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(14)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        outer.addWidget(scroll)
+
+        canvas = QWidget()
+        scroll.setWidget(canvas)
+        center = QHBoxLayout(canvas)
+        center.setContentsMargins(36, 30, 36, 30)
+        center.addStretch(1)
+
+        column = QWidget()
+        column.setMaximumWidth(self.max_width)
+        center.addWidget(column, 1)
+        center.addStretch(1)
+
+        col = QVBoxLayout(column)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(20)
+
         header = QVBoxLayout()
-        header.setSpacing(2)
+        header.setSpacing(4)
         t = QLabel(self.title)
         t.setObjectName("PageTitle")
         header.addWidget(t)
@@ -44,11 +69,12 @@ class BasePage(QWidget):
             s = QLabel(self.subtitle)
             s.setObjectName("PageSubtitle")
             header.addWidget(s)
-        root.addLayout(header)
+        col.addLayout(header)
+
         self.content = QVBoxLayout()
-        self.content.setSpacing(14)
-        root.addLayout(self.content)
-        root.addStretch(1)
+        self.content.setSpacing(18)
+        col.addLayout(self.content)
+        col.addStretch(1)
         self.build()
 
     def build(self) -> None:  # override
@@ -62,11 +88,15 @@ class ConnectPage(BasePage):
     def build(self) -> None:
         box = QGroupBox("Serial connection")
         form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(14)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.port_combo = QComboBox()
-        self.port_combo.setMinimumWidth(280)
+        self.port_combo.setMinimumWidth(320)
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh_ports)
         row = QHBoxLayout()
+        row.setSpacing(10)
         row.addWidget(self.port_combo, 1)
         row.addWidget(self.refresh_btn)
         form.addRow("Port", self._wrap(row))
@@ -78,6 +108,7 @@ class ConnectPage(BasePage):
         self.disconnect_btn.clicked.connect(self.service.disconnect)
         self.disconnect_btn.setEnabled(False)
         btnrow = QHBoxLayout()
+        btnrow.setSpacing(10)
         btnrow.addWidget(self.connect_btn)
         btnrow.addWidget(self.disconnect_btn)
         btnrow.addStretch(1)
@@ -86,6 +117,9 @@ class ConnectPage(BasePage):
 
         info = QGroupBox("Firmware")
         ilay = QFormLayout(info)
+        ilay.setHorizontalSpacing(18)
+        ilay.setVerticalSpacing(12)
+        ilay.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.device_lbl = QLabel("--")
         self.fw_lbl = QLabel("--")
         self.proto_lbl = QLabel("--")
@@ -143,6 +177,8 @@ class OverviewPage(BasePage):
     def build(self) -> None:
         grid_box = QGroupBox("Robot state")
         grid = QGridLayout(grid_box)
+        grid.setHorizontalSpacing(28)
+        grid.setVerticalSpacing(18)
         self.badges = {
             "state": StatusBadge("SAFETY STATE"),
             "fault": StatusBadge("FAULT"),
@@ -153,9 +189,13 @@ class OverviewPage(BasePage):
         }
         for i, b in enumerate(self.badges.values()):
             grid.addWidget(b, i // 3, i % 3)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
         self.content.addWidget(grid_box)
 
-        self.hint = QLabel("Subscribe on the Mode & Safety page or connect to see live data.")
+        self.hint = QLabel(
+            "Subscribe on the Mode & Safety page or connect to see live data."
+        )
         self.hint.setStyleSheet(f"color: {DRACULA.comment};")
         self.content.addWidget(self.hint)
 
@@ -167,8 +207,9 @@ class OverviewPage(BasePage):
             tlm.SAFETY_STATE_NAMES.get(st.state, str(st.state)),
             "ok" if st.state in (2, 4, 5) else "warn",
         )
-        self.badges["battery"].set(f"{st.battery_mv} mV",
-                                   "ok" if st.battery_mv > 10000 else "warn")
+        self.badges["battery"].set(
+            f"{st.battery_mv} mV", "ok" if st.battery_mv > 10000 else "warn"
+        )
         self.badges["uptime"].set(f"{st.uptime_ms // 1000} s", "info")
 
     def _on_telemetry(self, stream_id: int, record) -> None:
@@ -183,12 +224,15 @@ class OverviewPage(BasePage):
                 "ok" if record.state in (2, 4, 5) else "warn",
             )
             self.badges["fault"].set(
-                tlm.FAULT_REASON_NAMES.get(record.fault_reason, str(record.fault_reason)),
+                tlm.FAULT_REASON_NAMES.get(
+                    record.fault_reason, str(record.fault_reason)
+                ),
                 "error" if record.fault_reason else "ok",
             )
         elif stream_id == int(tlm.StreamId.HEALTH):
-            self.badges["battery"].set(f"{record.battery_mv} mV",
-                                       "ok" if record.battery_mv > 10000 else "warn")
+            self.badges["battery"].set(
+                f"{record.battery_mv} mV", "ok" if record.battery_mv > 10000 else "warn"
+            )
 
 
 class ModeSafetyPage(BasePage):
@@ -208,13 +252,20 @@ class ModeSafetyPage(BasePage):
     def build(self) -> None:
         box = QGroupBox("Telemetry subscriptions")
         lay = QGridLayout(box)
+        lay.setHorizontalSpacing(12)
+        lay.setVerticalSpacing(12)
         self._buttons = {}
         for i, (name, rate) in enumerate(self.STREAMS):
             btn = QPushButton(f"Subscribe {name} @ {rate} Hz")
             btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, n=name, r=rate: self._toggle(n, r, checked))
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(
+                lambda checked, n=name, r=rate: self._toggle(n, r, checked)
+            )
             lay.addWidget(btn, i // 2, i % 2)
             self._buttons[name] = btn
+        for c in range(2):
+            lay.setColumnStretch(c, 1)
         self.content.addWidget(box)
 
         safety = QGroupBox("Safety")
@@ -242,6 +293,7 @@ class DiagnosticsPage(BasePage):
         self.feed = QPlainTextEdit()
         self.feed.setReadOnly(True)
         self.feed.setMaximumBlockCount(500)
+        self.feed.setMinimumHeight(420)
         self.feed.setObjectName("MonoLabel")
         self.content.addWidget(self.feed)
         self.service.telemetry.connect(self._on_telemetry)

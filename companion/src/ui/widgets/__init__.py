@@ -16,38 +16,45 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ..theme import DRACULA, status_color
+from theme import DRACULA, status_color
 
 
 class StatusBadge(QWidget):
-    """A small colored dot + label used across the safety bar and overview."""
+    """A small colored dot + caption/value stack used across the safety bar."""
 
     def __init__(self, caption: str, parent=None) -> None:
         super().__init__(parent)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(8, 2, 8, 2)
-        lay.setSpacing(6)
+        lay.setContentsMargins(4, 0, 4, 0)
+        lay.setSpacing(8)
         self._dot = QLabel("\u25cf")
-        self._dot.setStyleSheet(f"color: {DRACULA.comment}; font-size: 14px;")
+        self._dot.setStyleSheet(f"color: {DRACULA.comment}; font-size: 11px;")
+        self._dot.setFixedWidth(12)
+        self._dot.setAlignment(Qt.AlignVCenter | Qt.AlignHCenter)
         self._caption = QLabel(caption)
-        self._caption.setStyleSheet(f"color: {DRACULA.comment}; font-size: 11px;")
+        self._caption.setObjectName("BadgeCaption")
         self._value = QLabel("--")
-        self._value.setStyleSheet(f"color: {DRACULA.foreground}; font-weight: 600;")
+        self._value.setObjectName("BadgeValue")
         col = QVBoxLayout()
-        col.setSpacing(0)
+        col.setSpacing(1)
         col.setContentsMargins(0, 0, 0, 0)
         col.addWidget(self._caption)
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(self._dot)
-        row.addWidget(self._value)
-        col.addLayout(row)
+        col.addWidget(self._value)
+        lay.addWidget(self._dot)
         lay.addLayout(col)
 
     def set(self, value: str, level: str = "idle") -> None:
         self._value.setText(value)
-        self._dot.setStyleSheet(f"color: {status_color(level)}; font-size: 14px;")
+        self._dot.setStyleSheet(f"color: {status_color(level)}; font-size: 11px;")
+
+
+def _badge_separator() -> QFrame:
+    sep = QFrame()
+    sep.setObjectName("BadgeSep")
+    sep.setFrameShape(QFrame.VLine)
+    sep.setFixedHeight(30)
+    sep.setStyleSheet(f"color: {DRACULA.border_soft};")
+    return sep
 
 
 class EmergencyStopButton(QPushButton):
@@ -66,10 +73,10 @@ class SafetyBar(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("SafetyBar")
-        self.setFixedHeight(64)
+        self.setFixedHeight(72)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 8, 14, 8)
-        lay.setSpacing(6)
+        lay.setContentsMargins(20, 10, 20, 10)
+        lay.setSpacing(14)
 
         self.conn = StatusBadge("CONNECTION")
         self.mode = StatusBadge("MODE")
@@ -78,8 +85,18 @@ class SafetyBar(QFrame):
         self.source = StatusBadge("CMD SOURCE")
         self.rc = StatusBadge("RC LINK")
         self.battery = StatusBadge("BATTERY")
-        for b in (self.conn, self.mode, self.arming, self.torque,
-                  self.source, self.rc, self.battery):
+        badges = (
+            self.conn,
+            self.mode,
+            self.arming,
+            self.torque,
+            self.source,
+            self.rc,
+            self.battery,
+        )
+        for i, b in enumerate(badges):
+            if i:
+                lay.addWidget(_badge_separator())
             lay.addWidget(b)
         lay.addStretch(1)
         self.estop = EmergencyStopButton()
@@ -90,8 +107,9 @@ class SafetyBar(QFrame):
 
     # Convenience setters used by MainWindow.
     def set_connection(self, connected: bool) -> None:
-        self.conn.set("Connected" if connected else "Disconnected",
-                      "ok" if connected else "idle")
+        self.conn.set(
+            "Connected" if connected else "Disconnected", "ok" if connected else "idle"
+        )
 
 
 class NavRail(QFrame):
@@ -102,7 +120,7 @@ class NavRail(QFrame):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("NavRail")
-        self.setFixedWidth(210)
+        self.setFixedWidth(220)
         self._lay = QVBoxLayout(self)
         self._lay.setContentsMargins(0, 0, 0, 12)
         self._lay.setSpacing(0)
@@ -115,10 +133,7 @@ class NavRail(QFrame):
 
     def add_section(self, label: str) -> None:
         sec = QLabel(label.upper())
-        sec.setStyleSheet(
-            f"color: {DRACULA.comment}; font-size: 10px; font-weight: 700;"
-            "padding: 12px 16px 4px 16px; letter-spacing: 1px;"
-        )
+        sec.setObjectName("NavSection")
         self._lay.addWidget(sec)
 
     def add_item(self, key: str, label: str) -> None:
@@ -146,11 +161,10 @@ class EventStrip(QFrame):
     def __init__(self, parent=None, capacity: int = 8) -> None:
         super().__init__(parent)
         self.setObjectName("EventStrip")
-        self.setFixedHeight(28)
+        self.setFixedHeight(30)
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(14, 2, 14, 2)
+        lay.setContentsMargins(20, 2, 20, 2)
         self._label = QLabel("Ready.")
-        self._label.setStyleSheet(f"color: {DRACULA.comment};")
         lay.addWidget(self._label)
         lay.addStretch(1)
         self._events: deque = deque(maxlen=capacity)

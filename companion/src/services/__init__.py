@@ -15,8 +15,8 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from hexapod_protocol import api, telemetry as tlm
 
-from ..transport import list_serial_ports, open_serial
-from ..transport.protocol_client import ProtocolClient
+from transport import list_serial_ports, open_serial
+from transport.protocol_client import ProtocolClient
 
 
 class ConnectionService(QObject):
@@ -66,8 +66,11 @@ class ConnectionService(QObject):
             hello = client.hello()
             if hello is not None:
                 self.hello_received.emit(hello)
-                self.event.emit("connect", f"{hello.device_name} fw "
-                                f"{hello.fw_major}.{hello.fw_minor}.{hello.fw_patch}")
+                self.event.emit(
+                    "connect",
+                    f"{hello.device_name} fw "
+                    f"{hello.fw_major}.{hello.fw_minor}.{hello.fw_patch}",
+                )
             caps = client.get_capabilities()
             if caps is not None:
                 self.capabilities_received.emit(caps)
@@ -90,7 +93,8 @@ class ConnectionService(QObject):
     def subscribe(self, stream_id: int, rate_hz: int) -> None:
         if self._client:
             threading.Thread(
-                target=lambda: self._client and self._client.subscribe(stream_id, rate_hz),
+                target=lambda: self._client
+                and self._client.subscribe(stream_id, rate_hz),
                 daemon=True,
             ).start()
 

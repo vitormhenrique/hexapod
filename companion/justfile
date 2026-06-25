@@ -1,0 +1,37 @@
+# Hexapod Companion — task runner
+# Usage: `just <recipe>`  (run from the companion/ directory)
+
+# Default: list recipes
+default:
+    @just --list
+
+# Sync the environment (companion + hexapod-protocol path dep, with dev extras)
+sync:
+    uv sync --extra dev
+
+# Launch the PySide6 companion app
+launch:
+    uv run hexapod-companion
+
+# Alias for launch
+run: launch
+
+# Run the CLI (pass args after `--`, e.g. `just cli -- status --port /dev/...`)
+cli *ARGS:
+    uv run hexapod-cli {{ARGS}}
+
+# List available serial ports
+ports:
+    uv run hexapod-cli ports
+
+# Run the test suite (headless Qt)
+test:
+    QT_QPA_PLATFORM=offscreen uv run pytest
+
+# Lint (ruff if available)
+lint:
+    uvx ruff check src tests
+
+# Format (ruff if available)
+fmt:
+    uvx ruff format src tests

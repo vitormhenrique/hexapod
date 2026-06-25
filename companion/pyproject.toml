@@ -21,15 +21,17 @@ dependencies = [
 dev = ["pytest>=8", "pytest-qt>=4.4"]
 
 [project.scripts]
-hexapod-cli = "hexapod_companion.cli:main"
-hexapod-companion = "hexapod_companion.app:main"
+hexapod-cli = "cli:main"
+hexapod-companion = "app:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/hexapod_companion"]
+only-include = ["src"]
+sources = ["src"]
 
 [tool.uv.sources]
 hexapod-protocol = { path = "../protocol/python", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-q"

@@ -8,8 +8,8 @@ import sys
 def main() -> int:
     from PySide6.QtWidgets import QApplication
 
-    from .main_window import MainWindow
-    from .theme import apply_theme
+    from main_window import MainWindow
+    from theme import apply_theme
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("Hexapod Companion")

@@ -31,24 +31,33 @@ class FrameExtractor:
     def __init__(self, max_frame: int = 4096) -> None:
         self._buf = bytearray()
         self._max_frame = max_frame
+        self._discarding = False
 
     def push(self, data: bytes) -> Iterator[bytes]:
         for b in data:
             if b == 0x00:
-                if self._buf:
+                if self._discarding:
+                    # Overflowed frame ended; resync starts at the next byte.
+                    self._discarding = False
+                    self._buf.clear()
+                elif self._buf:
                     # Closing delimiter: emit the frame with both 0x00 bounds.
                     frame = b"\x00" + bytes(self._buf) + b"\x00"
                     self._buf.clear()
                     yield frame
                 # else: opening delimiter or run of delimiters; ignore.
+            elif self._discarding:
+                continue
             else:
                 self._buf.append(b)
                 if len(self._buf) > self._max_frame:
-                    # Runaway frame (noise / desync): drop and resync.
+                    # Runaway frame (noise / desync): drop until next delimiter.
                     self._buf.clear()
+                    self._discarding = True
 
     def reset(self) -> None:
         self._buf.clear()
+        self._discarding = False
 
 
 @dataclass
