@@ -10,6 +10,8 @@
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/frame_reader.h"
+#include "../sensors/contact_estimator.h"
+#include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
 #include "../safety/system_state.h"
 #include "../safety/watchdog.h"
@@ -49,6 +51,18 @@ constexpr uint32_t kCrsfBaud = 420000;
 // result describing which optional devices were found.
 i2c::I2cBus g_i2cBus(Wire);
 i2c::I2cTopology g_i2cTopology;
+
+// Foot contact pipeline. The reader does the Wire/mux register I/O (Arduino),
+// the estimator runs the portable contact state machine, and the published
+// snapshot is read by telemetry/safety consumers. All owned by i2cTask.
+sensors::FingerSensorReader g_finger(Wire);
+sensors::ContactEstimator g_contact;
+sensors::LegContactState g_footState[sensors::kNumFeet];
+volatile uint8_t g_footPresentMask = 0;
+// Runtime sensor-polling toggle (feature.foot_sensor polling). Defaults on so
+// present boards stream raw proximity/pressure; contact classification stays
+// disabled per-foot until calibrated (FootSensorCal.enabled).
+volatile bool g_sensorPollingEnabled = true;
 
 // Persistent robot config in the 24LC32 EEPROM (root bus). When the EEPROM is
 // missing or holds no valid slot the config is marked volatile and the firmware
@@ -247,6 +261,17 @@ void i2cTask(void*) {
   // here keeps the blocking probe work off the control loop.
   g_i2cBus.begin();
   g_i2cBus.scanAll(g_i2cTopology);
+  g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
+
+  // Seed the contact estimator with the compiled-default foot calibration so it
+  // is usable immediately (per-foot classification stays disabled until a
+  // calibration enables it; raw values still stream as telemetry).
+  {
+    config::RobotConfig boot_cfg;
+    config::defaultRobotConfig(boot_cfg);
+    sensors::ContactParams params;  // conservative defaults
+    g_contact.configure(boot_cfg.feet, params);
+  }
   // If the config EEPROM is present and holds a valid slot, load it and hand it
   // to apiTask to adopt as the active config. Otherwise stay volatile so the
   // firmware runs on compiled defaults and CFG_COMMIT is rejected (AGENTS.md
@@ -292,8 +317,40 @@ void i2cTask(void*) {
       xSemaphoreGive(g_commitDone);
     }
 
-    // TODO (Phase 2): staggered sensor reads. This task owns Wire exclusively;
-    // mux channels are selected one-hot per access.
+    // Poll one foot sensor per iteration (round-robin) so each pass does bounded
+    // Wire work and the control loop is never stalled by a slow/missing board
+    // (AGENTS.md 1.1 / 5.4). The mux requires exclusive one-hot channel select;
+    // we select, read, then deselect so the root bus (EEPROM) stays addressable.
+    static uint8_t poll_ch = 0;
+    static uint8_t configured_mask = 0;
+    if (g_sensorPollingEnabled && g_i2cTopology.mux_present) {
+      const uint8_t ch = poll_ch;
+      poll_ch = static_cast<uint8_t>((poll_ch + 1) % i2c::kNumFootChannels);
+      const bool present =
+          (g_footPresentMask & static_cast<uint8_t>(1u << ch)) != 0;
+      if (present && g_i2cBus.selectChannel(ch)) {
+        const uint8_t bit = static_cast<uint8_t>(1u << ch);
+        if ((configured_mask & bit) == 0) {
+          // First time we touch this board: power up its sensors.
+          if (g_finger.configureChannel()) {
+            configured_mask = static_cast<uint8_t>(configured_mask | bit);
+          }
+        }
+        const sensors::FootSample sample = g_finger.readFoot();
+        if (!sample.ok) {
+          // Force reconfigure on next visit in case the board was reseated.
+          configured_mask = static_cast<uint8_t>(configured_mask & ~bit);
+        }
+        g_contact.update(ch, sample, millis());
+        g_i2cBus.selectNone();
+      }
+    }
+    // Decay any silent foot to STALE and republish the snapshot every pass.
+    g_contact.tickStaleness(millis());
+    for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+      g_footState[i] = g_contact.foot(i);
+    }
+
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kI2c));
   }
 }
