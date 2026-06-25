@@ -81,7 +81,7 @@ constexpr uint8_t kChYaw = 3;       // yaw
 constexpr uint8_t kChArm = 4;       // AUX1
 constexpr uint8_t kChKill = 5;      // AUX2
 constexpr uint8_t kChGait = 6;      // AUX3
-
+constexpr uint8_t kChAutonomy = 7;  // AUX4: grants Jetson autonomy authority
 // Default time without a valid RC frame before failsafe is declared.
 constexpr uint32_t kDefaultFailsafeMs = 250;
 
@@ -91,6 +91,7 @@ struct RcStatus {
   bool armed;                          // arm switch high AND not failsafe
   bool kill;                           // kill switch high OR failsafe
   uint8_t gait_index;                  // 0,1,2 from the 3-position gait switch
+  bool autonomy;                       // AUX4 high: RC grants Jetson autonomy
   bool failsafe;                       // no fresh frame within the timeout
   uint32_t last_frame_ms;              // timestamp of last valid frame
   bool ever_seen;                      // any valid frame seen since boot

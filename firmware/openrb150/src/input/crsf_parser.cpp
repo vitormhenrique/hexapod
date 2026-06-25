@@ -119,6 +119,7 @@ void initRcStatus(RcStatus& rc) {
   rc.armed = false;
   rc.kill = true;
   rc.gait_index = 0;
+  rc.autonomy = false;
   rc.failsafe = true;
   rc.last_frame_ms = 0;
   rc.ever_seen = false;
@@ -142,6 +143,7 @@ void applyFrame(RcStatus& rc, const ChannelData& frame, uint32_t now_ms) {
   const bool arm_sw = rc.channels_us[kChArm] > kSwitchHigh;
   rc.kill = kill_sw;
   rc.armed = arm_sw && !kill_sw;
+  rc.autonomy = rc.channels_us[kChAutonomy] > kSwitchHigh;
 
   rc.failsafe = false;
   rc.last_frame_ms = now_ms;
@@ -154,6 +156,7 @@ void evaluateFailsafe(RcStatus& rc, uint32_t now_ms, uint32_t timeout_ms) {
     rc.failsafe = true;
     rc.armed = false;
     rc.kill = true;
+    rc.autonomy = false;
   }
 }
 

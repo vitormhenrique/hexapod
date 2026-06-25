@@ -13,6 +13,7 @@
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
+#include "../safety/command_arbiter.h"
 #include "../safety/system_state.h"
 #include "../safety/watchdog.h"
 #include "task_config.h"
@@ -42,6 +43,15 @@ volatile uint8_t g_servoStatusCount = 0;
 // CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial2).
 crsf::Parser g_crsfParser;
 crsf::RcStatus g_rcStatus;
+
+// Command-source arbiter (RC / Jetson / Mac). controlTask evaluates it each
+// cycle from the RC snapshot; apiTask feeds Jetson heartbeats, the Mac
+// maintenance lock, and host estop into it. The published authority gates the
+// DXL goal-write path (motion is denied unless a source owns it).
+safety::CommandArbiter g_arbiter;
+volatile uint8_t g_commandSource = 0;       // safety::CommandSource value
+volatile bool g_motionAuthorized = false;   // a source may drive servos
+volatile bool g_killActive = true;          // RC kill / host estop asserted
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -157,7 +167,25 @@ void controlTask(void*) {
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Control);
-    // TODO: mode arbitration, gait phase, IK, servo target generation.
+
+    // Arbitrate command authority from the latest RC snapshot. rcTask owns the
+    // RC state; we only read a copy of the few fields the arbiter needs. The
+    // arbiter is the single source of truth for who (if anyone) may move the
+    // robot this cycle; the result gates the DXL goal-write path in dxlTask.
+    const uint32_t now_ms =
+        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    safety::RcInputs rc_in;
+    rc_in.ever_seen = g_rcStatus.ever_seen;
+    rc_in.kill = g_rcStatus.kill;
+    rc_in.armed = g_rcStatus.armed;
+    rc_in.autonomy_enabled = g_rcStatus.autonomy;
+    const safety::ArbiterOutput& arb = g_arbiter.update(rc_in, now_ms);
+    g_commandSource = static_cast<uint8_t>(arb.source);
+    g_motionAuthorized = arb.motion_authorized;
+    g_killActive = arb.kill_active;
+
+    // TODO (22l.10): full safety state machine + gait phase / IK / servo target
+    // generation. Goal sync-writes remain gated by g_motionAuthorized.
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
 }
@@ -168,14 +196,28 @@ void dxlTask(void*) {
   // boot. Scanning is deferred to a maintenance command once power is on.
   g_dxlBus.begin();
   TickType_t next = xTaskGetTickCount();
+  bool prev_authorized = false;
   for (;;) {
     tick(watchdog::TaskId::Dxl);
+
+    // Enforce the arbiter's authority at the bus level: the instant motion
+    // authority is lost (RC kill, host estop, disarm), disable torque on all
+    // discovered servos so the robot stops. Edge-triggered so we do not spam
+    // the bus every cycle. No-op until a maintenance scan populates servos and
+    // DXL power is on (both OFF at boot), keeping this safe by default.
+    const bool authorized = g_motionAuthorized;
+    if (!authorized && prev_authorized && g_dxlBus.servoCount() > 0) {
+      g_dxlBus.setTorqueAll(false);
+    }
+    prev_authorized = authorized;
+
     // Publish a fresh present-position snapshot for all discovered servos in a
     // single Sync Read per control table. This is a no-op until a maintenance
     // scan populates the servo table (DXL power is OFF at boot), and never
     // enables torque or writes goals. The goal Sync-Write path (writeGoal-
     // Positions) is implemented and unit-tested at the driver level; its task-
-    // level activation is gated by arming/arbitration (22l.8/22l.10).
+    // level activation is gated by g_motionAuthorized (22l.8) and the safety
+    // state machine (22l.10).
     if (g_dxlBus.servoCount() > 0) {
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
