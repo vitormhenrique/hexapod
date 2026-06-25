@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="HexNav">
+
+  <!-- Materials (shared across all assemblies) -->
+  <material name="Steel">
+    <color rgba="0.627 0.627 0.627 1.0"/>
+  </material>
+  <material name="custom_materials_MX_28">
+    <color rgba="1.000 1.000 1.000 1.0"/>
+  </material>
+
+  <!-- Assembly includes -->
+  <xacro:include filename="$(find HexNav_description)/urdf/assemblies/HexNav.urdf.xacro"/>
+
+  <!-- Instantiate assemblies -->
+  <xacro:HexNav prefix=""/>
+
+</robot>

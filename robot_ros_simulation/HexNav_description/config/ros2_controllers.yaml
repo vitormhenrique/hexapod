@@ -1,0 +1,29 @@
+# Generated ros2_control controllers
+# Publishes joint states on: /joint_states
+# Command topics use: /<controller_name>/commands
+/**:
+  controller_manager:
+    ros__parameters:
+      update_rate: 100
+
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+      position_controller:
+        type: forward_command_controller/ForwardCommandController
+      velocity_controller:
+        type: forward_command_controller/ForwardCommandController
+
+  joint_state_broadcaster:
+    ros__parameters: {}
+
+  # Command topic: /position_controller/commands
+  position_controller:
+    ros__parameters:
+      joints: [leg_1_coxa_joint, leg_1_femur_joint, leg_1_tibia_joint, leg_2_coxa_joint, leg_2_femur_joint, leg_2_tibia_joint, leg_3_coxa_joint, leg_3_femur_joint, leg_3_tibia_joint, leg_4_coxa_joint, leg_4_femur_joint, leg_4_tibia_joint, leg_5_coxa_joint, leg_5_femur_joint, leg_5_tibia_joint, leg_6_coxa_joint, leg_6_femur_joint, leg_6_tibia_joint]
+      interface_name: position
+
+  # Command topic: /velocity_controller/commands
+  velocity_controller:
+    ros__parameters:
+      joints: [leg_1_coxa_joint, leg_1_femur_joint, leg_1_tibia_joint, leg_2_coxa_joint, leg_2_femur_joint, leg_2_tibia_joint, leg_3_coxa_joint, leg_3_femur_joint, leg_3_tibia_joint, leg_4_coxa_joint, leg_4_femur_joint, leg_4_tibia_joint, leg_5_coxa_joint, leg_5_femur_joint, leg_5_tibia_joint, leg_6_coxa_joint, leg_6_femur_joint, leg_6_tibia_joint]
+      interface_name: velocity

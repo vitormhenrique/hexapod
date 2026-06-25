@@ -1,0 +1,45 @@
+# Joint configuration for joint_state_publisher_gui
+
+joint_state_publisher:
+  ros__parameters:
+    # Joint names and default positions
+    zeros:
+      leg_1_coxa_joint: 0.0
+      leg_1_femur_joint: 0.0
+      leg_1_tibia_joint: 0.0
+      leg_2_coxa_joint: 0.0
+      leg_2_femur_joint: 0.0
+      leg_2_tibia_joint: 0.0
+      leg_3_coxa_joint: 0.0
+      leg_3_femur_joint: 0.0
+      leg_3_tibia_joint: 0.0
+      leg_4_coxa_joint: 0.0
+      leg_4_femur_joint: 0.0
+      leg_4_tibia_joint: 0.0
+      leg_5_coxa_joint: 0.0
+      leg_5_femur_joint: 0.0
+      leg_5_tibia_joint: 0.0
+      leg_6_coxa_joint: 0.0
+      leg_6_femur_joint: 0.0
+      leg_6_tibia_joint: 0.0
+
+    # Joints to publish
+    source_list:
+      - leg_1_coxa_joint
+      - leg_1_femur_joint
+      - leg_1_tibia_joint
+      - leg_2_coxa_joint
+      - leg_2_femur_joint
+      - leg_2_tibia_joint
+      - leg_3_coxa_joint
+      - leg_3_femur_joint
+      - leg_3_tibia_joint
+      - leg_4_coxa_joint
+      - leg_4_femur_joint
+      - leg_4_tibia_joint
+      - leg_5_coxa_joint
+      - leg_5_femur_joint
+      - leg_5_tibia_joint
+      - leg_6_coxa_joint
+      - leg_6_femur_joint
+      - leg_6_tibia_joint

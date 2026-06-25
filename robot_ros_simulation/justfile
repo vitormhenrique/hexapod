@@ -1,0 +1,125 @@
+# justfile — HexNav robot_ws helper commands
+# Run `just` or `just --list` to see all recipes.
+# Everything runs inside the local pixi env (RoboStack ROS 2 Jazzy by default).
+#
+# Prereqs: pixi (https://pixi.sh) installed and on PATH.
+# Notes:
+#   * Recipes use `pixi run -e {{ros_env}} ...` which auto-activates the env AND
+#     sources the colcon overlay (install/setup.sh). See AGENTS.md.
+#   * PIXI_PROJECT_MANIFEST is unset so the LOCAL pixi.toml is always used.
+
+set shell := ["zsh", "-cu"]
+
+package := "HexNav_description"
+ros_env := env_var_or_default("ROS_ENV", env_var_or_default("PIXI_ENVIRONMENT_NAME", "jazzy"))
+manifest := justfile_directory() / "pixi.toml"
+share_dir := "install/" + package + "/share/" + package
+
+# Always target THIS workspace's manifest, even if PIXI_PROJECT_MANIFEST is
+# inherited pointing somewhere else.
+pixi := "pixi run -e " + ros_env + " --manifest-path " + manifest
+
+# Default: list available recipes.
+default:
+    @just --list
+
+# --- Environment -----------------------------------------------------------
+
+# Install / re-solve the selected env (run after editing pixi.toml deps).
+install:
+    pixi install -e {{ros_env}} --manifest-path {{manifest}}
+
+# Open an interactive shell with ROS + the workspace overlay sourced.
+shell:
+    pixi shell -e {{ros_env}} --manifest-path {{manifest}}
+
+# Print key environment info (ROS distro, ros2/colcon locations).
+info:
+    {{pixi}} bash -lc 'echo "PIXI_ENVIRONMENT_NAME=$PIXI_ENVIRONMENT_NAME"; echo "ROS_DISTRO=$ROS_DISTRO"; which ros2; which colcon; ros2 pkg prefix {{package}} || true'
+
+# --- Build -----------------------------------------------------------------
+
+# Build the workspace (colcon symlink-install).
+build:
+    {{pixi}} build
+
+# Remove build/ install/ log/ then rebuild from scratch.
+rebuild: clean build
+
+# Delete colcon build artifacts (build/ install/ log/).
+clean:
+    rm -rf build install log
+
+# --- Launch / simulate -----------------------------------------------------
+
+# Launch HexNav robot_state_publisher + ros2_control + RViz.
+launch:
+    {{pixi}} ros2 launch {{package}} display.launch.py
+
+# Launch HexNav under a ROS namespace.
+launch-ns namespace:
+    {{pixi}} ros2 launch {{package}} display.launch.py namespace:={{namespace}}
+
+# Launch HexNav with a URDF link/joint prefix.
+launch-prefix prefix:
+    {{pixi}} ros2 launch {{package}} display.launch.py prefix:={{prefix}}
+
+# --- Introspection ---------------------------------------------------------
+
+# Show the install prefix for HexNav_description.
+prefix:
+    {{pixi}} ros2 pkg prefix {{package}}
+
+# List active ROS topics.
+topics:
+    {{pixi}} ros2 topic list
+
+# List ros2_control controllers and their states.
+controllers:
+    {{pixi}} ros2 control list_controllers
+
+# Echo the published URDF once.
+echo-description:
+    {{pixi}} ros2 topic echo /robot_description --once
+
+# Echo current joint states once.
+echo-joints:
+    {{pixi}} ros2 topic echo /joint_states --once
+
+# Echo ros2_control dynamic joint states once.
+echo-dynamic-joints:
+    {{pixi}} ros2 topic echo /dynamic_joint_states --once
+
+# Continuously watch published joint states.
+watch-joints:
+    {{pixi}} ros2 topic echo /joint_states
+
+# Send a sample position command to leg 5: coxa_yaw, femur_pitch, tibia_pitch.
+test-joints:
+    just move-leg 5 0.5 -0.35 0.25
+
+# Send a custom command to one leg: just move-leg 3 0.5 -0.35 0.25
+move-leg leg coxa femur tibia:
+    {{pixi}} bash -lc 'values=(0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0); case "{{leg}}" in 1|leg_1) i=0 ;; 2|leg_2) i=3 ;; 3|leg_3) i=6 ;; 4|leg_4) i=9 ;; 5|leg_5) i=12 ;; 6|leg_6) i=15 ;; *) echo "leg must be 1..6" >&2; exit 2 ;; esac; values[$i]={{coxa}}; values[$((i+1))]={{femur}}; values[$((i+2))]={{tibia}}; IFS=,; ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray "{data: [${values[*]}]}"'
+
+# Send all 18 joint positions explicitly, in controller order.
+move-all-joints values:
+    {{pixi}} ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray '{data: [{{values}}]}'
+
+# Reset the commanded joint positions to zero.
+zero-joints:
+    {{pixi}} ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray '{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}'
+
+# Echo static transforms once.
+echo-tf:
+    {{pixi}} ros2 topic echo /tf_static --once
+
+# Verify installed share files (launch, urdf, meshes).
+verify:
+    @echo "launch:"; ls {{share_dir}}/launch
+    @echo "urdf:"; ls {{share_dir}}/urdf
+    @echo "meshes:"; ls {{share_dir}}/meshes
+
+# Quick URDF sanity check against the launch xacro (parse + link/joint tree).
+check-urdf:
+    {{pixi}} bash -lc 'xacro {{share_dir}}/urdf/HexNav.urdf.xacro > /tmp/HexNav.urdf && check_urdf /tmp/HexNav.urdf'

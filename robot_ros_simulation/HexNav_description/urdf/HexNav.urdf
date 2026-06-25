@@ -1,0 +1,1278 @@
+<?xml version="1.0"?>
+<robot name="HexNav">
+
+  <!-- Materials -->
+  <material name="Steel">
+    <color rgba="0.627 0.627 0.627 1.0"/>
+  </material>
+  <material name="custom_materials_MX_28">
+    <color rgba="1.000 1.000 1.000 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <inertial>
+      <origin xyz="0.076463 0.126463 -0.000093" rpy="0 0 0"/>
+      <mass value="0.241313"/>
+      <inertia ixx="1.257749e-03" ixy="-1.134942e-10" ixz="4.004551e-12"
+               iyy="3.921782e-04" iyz="6.945432e-12" izz="1.649569e-03"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/base_link.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/base_link_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_1_mx28_coxa">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 0.000488" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_mx28_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_mx28_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_2_mx28_coxa">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 0.000488" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_mx28_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_mx28_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_3_mx28_coxa">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 0.000488" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_mx28_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_mx28_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_4_mx28_coxa">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 0.000488" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_mx28_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_mx28_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_5_mx28_coxa">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 0.000488" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_mx28_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_mx28_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_6_mx28_coxa">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 0.000488" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_mx28_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_mx28_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_1_coxa">
+    <inertial>
+      <origin xyz="0.025992 0.000000 -0.021000" rpy="0 0 0"/>
+      <mass value="0.192963"/>
+      <inertia ixx="8.738242e-05" ixy="2.125340e-10" ixz="2.256209e-11"
+               iyy="8.740078e-05" iyz="-1.147543e-12" izz="8.977308e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_2_coxa">
+    <inertial>
+      <origin xyz="0.025992 0.000000 -0.021000" rpy="0 0 0"/>
+      <mass value="0.192963"/>
+      <inertia ixx="8.738242e-05" ixy="2.125340e-10" ixz="2.256209e-11"
+               iyy="8.740078e-05" iyz="-1.147543e-12" izz="8.977308e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_3_coxa">
+    <inertial>
+      <origin xyz="0.025992 0.000000 -0.021000" rpy="0 0 0"/>
+      <mass value="0.192963"/>
+      <inertia ixx="8.738242e-05" ixy="2.125340e-10" ixz="2.256209e-11"
+               iyy="8.740078e-05" iyz="-1.147543e-12" izz="8.977308e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_4_coxa">
+    <inertial>
+      <origin xyz="0.025992 0.000000 -0.021000" rpy="0 0 0"/>
+      <mass value="0.192963"/>
+      <inertia ixx="8.738242e-05" ixy="2.125340e-10" ixz="2.256209e-11"
+               iyy="8.740078e-05" iyz="-1.147543e-12" izz="8.977308e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_5_coxa">
+    <inertial>
+      <origin xyz="0.025992 0.000000 -0.021000" rpy="0 0 0"/>
+      <mass value="0.192963"/>
+      <inertia ixx="8.738242e-05" ixy="2.125340e-10" ixz="2.256209e-11"
+               iyy="8.740078e-05" iyz="-1.147543e-12" izz="8.977308e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="bot">
+    <inertial>
+      <origin xyz="0.076463 0.126463 0.001407" rpy="0 0 0"/>
+      <mass value="0.241313"/>
+      <inertia ixx="1.257749e-03" ixy="-1.134942e-10" ixz="4.004551e-12"
+               iyy="3.921782e-04" iyz="6.945432e-12" izz="1.649569e-03"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/bot.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/bot_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_6_coxa">
+    <inertial>
+      <origin xyz="0.025992 0.000000 -0.021000" rpy="0 0 0"/>
+      <mass value="0.192963"/>
+      <inertia ixx="8.738242e-05" ixy="2.125340e-10" ixz="2.256209e-11"
+               iyy="8.740078e-05" iyz="-1.147543e-12" izz="8.977308e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_coxa.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.052000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_coxa_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_1_mx28_femur">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_mx28_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 -0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_mx28_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_2_mx28_femur">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_mx28_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_mx28_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_3_mx28_femur">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_mx28_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_mx28_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_4_mx28_femur">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_mx28_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_mx28_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_5_mx28_femur">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_mx28_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_mx28_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_6_mx28_femur">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_mx28_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_mx28_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_1_femur">
+    <inertial>
+      <origin xyz="0.002213 0.011329 -0.000000" rpy="0 0 0"/>
+      <mass value="0.127034"/>
+      <inertia ixx="4.921432e-05" ixy="-5.067981e-06" ixz="4.932326e-14"
+               iyy="5.134553e-05" iyz="-1.886637e-12" izz="2.756122e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_2_femur">
+    <inertial>
+      <origin xyz="0.002213 0.011329 -0.000000" rpy="0 0 0"/>
+      <mass value="0.127034"/>
+      <inertia ixx="4.921432e-05" ixy="-5.067981e-06" ixz="4.932326e-14"
+               iyy="5.134553e-05" iyz="-1.886637e-12" izz="2.756122e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_3_femur">
+    <inertial>
+      <origin xyz="0.002213 0.011329 -0.000000" rpy="0 0 0"/>
+      <mass value="0.127034"/>
+      <inertia ixx="4.921432e-05" ixy="-5.067981e-06" ixz="4.932326e-14"
+               iyy="5.134553e-05" iyz="-1.886637e-12" izz="2.756122e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_4_femur">
+    <inertial>
+      <origin xyz="0.002213 0.011329 -0.000000" rpy="0 0 0"/>
+      <mass value="0.127034"/>
+      <inertia ixx="4.921432e-05" ixy="-5.067981e-06" ixz="4.932326e-14"
+               iyy="5.134553e-05" iyz="-1.886637e-12" izz="2.756122e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_5_femur">
+    <inertial>
+      <origin xyz="0.002213 0.011329 -0.000000" rpy="0 0 0"/>
+      <mass value="0.127034"/>
+      <inertia ixx="4.921432e-05" ixy="-5.067981e-06" ixz="4.932326e-14"
+               iyy="5.134553e-05" iyz="-1.886637e-12" izz="2.756122e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_6_femur">
+    <inertial>
+      <origin xyz="0.002213 0.011329 -0.000000" rpy="0 0 0"/>
+      <mass value="0.127034"/>
+      <inertia ixx="4.921432e-05" ixy="-5.067981e-06" ixz="4.932326e-14"
+               iyy="5.134553e-05" iyz="-1.886637e-12" izz="2.756122e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_femur.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_femur_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_1_mx28_tibia">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="-0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_mx28_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="-0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_mx28_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_2_mx28_tibia">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_mx28_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_mx28_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_3_mx28_tibia">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_mx28_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_mx28_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_4_mx28_tibia">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_mx28_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_mx28_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_5_mx28_tibia">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_mx28_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_mx28_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_6_mx28_tibia">
+    <inertial>
+      <origin xyz="-0.000000 -0.011211 -0.020512" rpy="0 0 0"/>
+      <mass value="0.073939"/>
+      <inertia ixx="2.133718e-05" ixy="4.105011e-11" ixz="8.804791e-12"
+               iyy="1.325329e-05" iyz="-7.349997e-07" izz="1.755926e-05"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_mx28_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="custom_materials_MX_28"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 -0.021000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_mx28_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_1_tibia">
+    <inertial>
+      <origin xyz="-0.049791 -0.043459 0.000001" rpy="0 0 0"/>
+      <mass value="0.154960"/>
+      <inertia ixx="2.043246e-04" ixy="-7.967356e-05" ixz="-5.657857e-09"
+               iyy="8.623365e-05" iyz="-8.197066e-09" izz="2.302703e-04"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_1_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_2_tibia">
+    <inertial>
+      <origin xyz="-0.049791 -0.043459 0.000001" rpy="0 0 0"/>
+      <mass value="0.154960"/>
+      <inertia ixx="2.043246e-04" ixy="-7.967356e-05" ixz="-5.657857e-09"
+               iyy="8.623365e-05" iyz="-8.197066e-09" izz="2.302703e-04"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_2_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_3_tibia">
+    <inertial>
+      <origin xyz="-0.049791 -0.043459 0.000001" rpy="0 0 0"/>
+      <mass value="0.154960"/>
+      <inertia ixx="2.043246e-04" ixy="-7.967356e-05" ixz="-5.657857e-09"
+               iyy="8.623365e-05" iyz="-8.197066e-09" izz="2.302703e-04"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_3_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_4_tibia">
+    <inertial>
+      <origin xyz="-0.049791 -0.043459 0.000001" rpy="0 0 0"/>
+      <mass value="0.154960"/>
+      <inertia ixx="2.043246e-04" ixy="-7.967356e-05" ixz="-5.657857e-09"
+               iyy="8.623365e-05" iyz="-8.197066e-09" izz="2.302703e-04"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_4_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_5_tibia">
+    <inertial>
+      <origin xyz="-0.049791 -0.043459 0.000001" rpy="0 0 0"/>
+      <mass value="0.154960"/>
+      <inertia ixx="2.043246e-04" ixy="-7.967356e-05" ixz="-5.657857e-09"
+               iyy="8.623365e-05" iyz="-8.197066e-09" izz="2.302703e-04"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_5_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <link name="leg_6_tibia">
+    <inertial>
+      <origin xyz="-0.049791 -0.043459 0.000001" rpy="0 0 0"/>
+      <mass value="0.154960"/>
+      <inertia ixx="2.043246e-04" ixy="-7.967356e-05" ixz="-5.657857e-09"
+               iyy="8.623365e-05" iyz="-8.197066e-09" izz="2.302703e-04"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_tibia.dae" scale="1 1 1"/>
+      </geometry>
+      <material name="Steel"/>
+    </visual>
+    <collision>
+      <origin xyz="0.000000 0.000000 0.000000" rpy="0 0 0"/>
+      <geometry>
+        <mesh filename="package://HexNav_description/meshes/HexNav/leg_6_tibia_collision.stl" scale="0.01 0.01 0.01"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="leg_1_coxa_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="leg_1_mx28_coxa"/>
+    <origin xyz="0.010886 0.010886 -0.016500" rpy="-0.000000 0.000000 2.356194"/>
+  </joint>
+
+  <joint name="leg_2_coxa_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="leg_2_mx28_coxa"/>
+    <origin xyz="0.142040 0.010886 -0.016500" rpy="-0.000000 0.000000 -2.356194"/>
+  </joint>
+
+  <joint name="leg_3_coxa_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="leg_3_mx28_coxa"/>
+    <origin xyz="0.146243 0.126463 -0.016500" rpy="-0.000000 0.000000 -1.570796"/>
+  </joint>
+
+  <joint name="leg_4_coxa_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="leg_4_mx28_coxa"/>
+    <origin xyz="0.142040 0.242040 -0.016500" rpy="-0.000000 0.000000 -0.785398"/>
+  </joint>
+
+  <joint name="leg_5_coxa_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="leg_5_mx28_coxa"/>
+    <origin xyz="0.010886 0.242040 -0.016500" rpy="-0.000000 0.000000 0.785398"/>
+  </joint>
+
+  <joint name="leg_6_coxa_mount" type="fixed">
+    <parent link="base_link"/>
+    <child link="leg_6_mx28_coxa"/>
+    <origin xyz="0.006683 0.126463 -0.016500" rpy="-0.000000 0.000000 1.570796"/>
+  </joint>
+
+  <joint name="leg_1_coxa_joint" type="continuous">
+    <parent link="leg_1_mx28_coxa"/>
+    <child link="leg_1_coxa"/>
+    <origin xyz="0.000000 -0.000000 0.021000" rpy="-0.000000 -0.000000 1.570796"/>
+    <axis xyz="0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_2_coxa_joint" type="continuous">
+    <parent link="leg_2_mx28_coxa"/>
+    <child link="leg_2_coxa"/>
+    <origin xyz="-0.000000 0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_3_coxa_joint" type="continuous">
+    <parent link="leg_3_mx28_coxa"/>
+    <child link="leg_3_coxa"/>
+    <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_4_coxa_joint" type="continuous">
+    <parent link="leg_4_mx28_coxa"/>
+    <child link="leg_4_coxa"/>
+    <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_5_coxa_joint" type="continuous">
+    <parent link="leg_5_mx28_coxa"/>
+    <child link="leg_5_coxa"/>
+    <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="bot_mount" type="fixed">
+    <parent link="leg_5_mx28_coxa"/>
+    <child link="bot"/>
+    <origin xyz="-0.070711 -0.271586 -0.015000" rpy="3.141593 -0.000000 2.356194"/>
+  </joint>
+
+  <joint name="leg_6_coxa_joint" type="continuous">
+    <parent link="leg_6_mx28_coxa"/>
+    <child link="leg_6_coxa"/>
+    <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_1_femur_joint" type="continuous">
+    <parent link="leg_1_coxa"/>
+    <child link="leg_1_mx28_femur"/>
+    <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_2_femur_joint" type="continuous">
+    <parent link="leg_2_coxa"/>
+    <child link="leg_2_mx28_femur"/>
+    <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_3_femur_joint" type="continuous">
+    <parent link="leg_3_coxa"/>
+    <child link="leg_3_mx28_femur"/>
+    <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_4_femur_joint" type="continuous">
+    <parent link="leg_4_coxa"/>
+    <child link="leg_4_mx28_femur"/>
+    <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_5_femur_joint" type="continuous">
+    <parent link="leg_5_coxa"/>
+    <child link="leg_5_mx28_femur"/>
+    <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
+    <axis xyz="-0.000000 0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_6_femur_joint" type="continuous">
+    <parent link="leg_6_coxa"/>
+    <child link="leg_6_mx28_femur"/>
+    <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_1_femur_mount" type="fixed">
+    <parent link="leg_1_mx28_femur"/>
+    <child link="leg_1_femur"/>
+    <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
+  </joint>
+
+  <joint name="leg_2_femur_mount" type="fixed">
+    <parent link="leg_2_mx28_femur"/>
+    <child link="leg_2_femur"/>
+    <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
+  </joint>
+
+  <joint name="leg_3_femur_mount" type="fixed">
+    <parent link="leg_3_mx28_femur"/>
+    <child link="leg_3_femur"/>
+    <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
+  </joint>
+
+  <joint name="leg_4_femur_mount" type="fixed">
+    <parent link="leg_4_mx28_femur"/>
+    <child link="leg_4_femur"/>
+    <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
+  </joint>
+
+  <joint name="leg_5_femur_mount" type="fixed">
+    <parent link="leg_5_mx28_femur"/>
+    <child link="leg_5_femur"/>
+    <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
+  </joint>
+
+  <joint name="leg_6_femur_mount" type="fixed">
+    <parent link="leg_6_mx28_femur"/>
+    <child link="leg_6_femur"/>
+    <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
+  </joint>
+
+  <joint name="leg_1_tibia_joint" type="continuous">
+    <parent link="leg_1_femur"/>
+    <child link="leg_1_mx28_tibia"/>
+    <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_2_tibia_joint" type="continuous">
+    <parent link="leg_2_femur"/>
+    <child link="leg_2_mx28_tibia"/>
+    <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_3_tibia_joint" type="continuous">
+    <parent link="leg_3_femur"/>
+    <child link="leg_3_mx28_tibia"/>
+    <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_4_tibia_joint" type="continuous">
+    <parent link="leg_4_femur"/>
+    <child link="leg_4_mx28_tibia"/>
+    <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_5_tibia_joint" type="continuous">
+    <parent link="leg_5_femur"/>
+    <child link="leg_5_mx28_tibia"/>
+    <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_6_tibia_joint" type="continuous">
+    <parent link="leg_6_femur"/>
+    <child link="leg_6_mx28_tibia"/>
+    <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
+    <axis xyz="-0.000000 -0.000000 1.000000"/>
+    <limit effort="100.0" velocity="1.00"/>
+  </joint>
+
+  <joint name="leg_1_tibia_mount" type="fixed">
+    <parent link="leg_1_mx28_tibia"/>
+    <child link="leg_1_tibia"/>
+    <origin xyz="-0.000000 -0.013300 -0.021000" rpy="3.141593 0.000000 1.570796"/>
+  </joint>
+
+  <joint name="leg_2_tibia_mount" type="fixed">
+    <parent link="leg_2_mx28_tibia"/>
+    <child link="leg_2_tibia"/>
+    <origin xyz="0.000000 -0.013300 -0.021000" rpy="-3.141593 0.000000 1.570796"/>
+  </joint>
+
+  <joint name="leg_3_tibia_mount" type="fixed">
+    <parent link="leg_3_mx28_tibia"/>
+    <child link="leg_3_tibia"/>
+    <origin xyz="0.000000 -0.013300 -0.021000" rpy="-3.141593 0.000000 1.570796"/>
+  </joint>
+
+  <joint name="leg_4_tibia_mount" type="fixed">
+    <parent link="leg_4_mx28_tibia"/>
+    <child link="leg_4_tibia"/>
+    <origin xyz="0.000000 -0.013300 -0.021000" rpy="-3.141593 0.000000 1.570796"/>
+  </joint>
+
+  <joint name="leg_5_tibia_mount" type="fixed">
+    <parent link="leg_5_mx28_tibia"/>
+    <child link="leg_5_tibia"/>
+    <origin xyz="0.000000 -0.013300 -0.021000" rpy="-3.141593 0.000000 1.570796"/>
+  </joint>
+
+  <joint name="leg_6_tibia_mount" type="fixed">
+    <parent link="leg_6_mx28_tibia"/>
+    <child link="leg_6_tibia"/>
+    <origin xyz="0.000000 -0.013300 -0.021000" rpy="-3.141593 0.000000 1.570796"/>
+  </joint>
+
+  <!-- ROS 2 control: generated generic system -->
+  <ros2_control name="HexNav_system" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+      <param name="cmd_topic">sim/HexNav_system/cmd</param>
+      <param name="state_topic">sim/HexNav_system/state</param>
+    </hardware>
+
+    <joint name="leg_2_coxa_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_2_femur_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_2_tibia_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_3_coxa_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_3_femur_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_3_tibia_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_4_coxa_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_4_femur_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_4_tibia_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_5_coxa_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_5_femur_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_5_tibia_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_6_coxa_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_6_femur_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_6_tibia_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_1_coxa_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_1_tibia_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+    <joint name="leg_1_femur_joint">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+
+</robot>

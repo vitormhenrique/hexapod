@@ -1,0 +1,99 @@
+[workspace]
+name = "robot_ws"
+description = "ROS 2 Jazzy development environment for the HexNav_description workspace"
+channels = ["https://prefix.dev/conda-forge"]
+platforms = ["linux-64", "win-64", "osx-64", "osx-arm64", "linux-aarch64"]
+
+# This will automatically activate the ros workspace on activation
+[target.win.activation]
+scripts = ["install/setup.bat"]
+
+# The interactive shell here is zsh, but pixi only honors .sh/.bash activation
+# scripts on unix. colcon's setup.bash relies on ${BASH_SOURCE[0]} (empty under
+# zsh) and setup.zsh is ignored by pixi on osx-arm64. The POSIX setup.sh bakes
+# in an absolute prefix and self-locates correctly in every shell, so use that.
+[target.unix.activation]
+scripts = ["install/setup.sh"]
+
+# To build you can use - `pixi run -e <ros distro> build <Any other temporary args>`
+[feature.build.target.win-64.tasks]
+build = "colcon build --merge-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DPython_FIND_VIRTUALENV=ONLY -DPython3_FIND_VIRTUALENV=ONLY"
+
+[feature.build.target.unix.tasks]
+build = "colcon build --symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DPython_FIND_VIRTUALENV=ONLY -DPython3_FIND_VIRTUALENV=ONLY"
+
+# Dependencies used by all environments
+[dependencies]
+python = "*"
+# Build tools
+compilers = "*"
+cmake = "*"
+pkg-config = "*"
+make = "*"
+ninja = "*"
+# ROS specific tools
+rosdep = "*"
+colcon-common-extensions = "*"
+
+[target.linux.dependencies]
+libgl-devel = "*"
+
+# Define all the different ROS environments
+# Each environment corresponds to a different ROS distribution
+# and can be activated using the `pixi run/shell -e <environment>` command.
+[environments]
+noetic = { features = ["noetic", "build"] }
+humble = { features = ["humble", "build"] }
+jazzy = { features = ["jazzy", "build"] }
+kilted = { features = ["kilted", "build"] }
+lyrical = { features = ["lyrical", "build"] }
+rolling = { features = ["rolling", "build"] }
+
+### ROS Noetic ####
+[feature.noetic]
+channels = ["https://prefix.dev/robostack-noetic"]
+
+[feature.noetic.dependencies]
+ros-noetic-desktop = "*"
+catkin_tools = "*"
+
+### ROS Humble ####
+[feature.humble]
+channels = ["https://prefix.dev/robostack-humble"]
+
+[feature.humble.dependencies]
+ros-humble-desktop = "*"
+
+### ROS Jazzy ####
+[feature.jazzy]
+channels = ["https://prefix.dev/robostack-jazzy"]
+
+[feature.jazzy.dependencies]
+ros-jazzy-desktop = "*"
+ros-jazzy-ros-gz = "*" 
+gz-sim8 = "*"
+ros-jazzy-joint-state-publisher-gui = "*"
+ros-jazzy-ros2-control = "*"
+ros-jazzy-ros2-controllers = "*"
+filelock = "*"
+
+### ROS Kilted ####
+[feature.kilted]
+channels = ["https://prefix.dev/robostack-kilted"]
+
+[feature.kilted.dependencies]
+ros-kilted-desktop = "*"
+
+### ROS Lyrical ####
+[feature.lyrical]
+channels = ["https://prefix.dev/robostack-lyrical"]
+
+[feature.lyrical.dependencies]
+ros-lyrical-desktop = "*"
+
+### ROS Rolling ####
+[feature.rolling]
+channels = ["https://prefix.dev/robostack-rolling"]
+
+[feature.rolling.dependencies]
+ros-rolling-desktop = "*"
