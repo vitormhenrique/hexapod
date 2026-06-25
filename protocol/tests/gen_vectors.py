@@ -147,6 +147,7 @@ def build() -> dict:
         "api": build_api(),
         "control": build_control(),
         "motion": build_motion(),
+        "maintenance": build_maintenance(),
     }
 
 
@@ -207,6 +208,30 @@ def build_motion() -> dict:
         {
             "name": "stop_motion",
             "request": api_mod.build_stop_motion(seq=5).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_maintenance() -> dict:
+    """Deterministic request frames for the maintenance lock command group.
+
+    Responses carry the live token/state the firmware grants, which is not a
+    static fixture, so only the request encoding is pinned here. The firmware
+    native test (test_maintenance_api) covers the lock/TTL behavior.
+    """
+    cases = [
+        {
+            "name": "enter_maintenance",
+            "request": api_mod.build_enter_maintenance(seq=1).hex(),
+        },
+        {
+            "name": "exit_maintenance",
+            "request": api_mod.build_exit_maintenance(0x01020304, seq=2).hex(),
+        },
+        {
+            "name": "maint_heartbeat",
+            "request": api_mod.build_maint_heartbeat(0x01020304, seq=3).hex(),
         },
     ]
     return {"cases": cases}

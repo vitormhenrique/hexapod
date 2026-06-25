@@ -233,3 +233,28 @@ def test_parse_motion_result():
     assert rej.rejected and not rej.motion_allowed
     bad = api.parse_motion_result(bytes([api.MOTION_BAD_REQUEST]))
     assert bad.result == api.MOTION_BAD_REQUEST and not bad.motion_allowed
+
+
+_MAINT_BUILDERS = {
+    "enter_maintenance": lambda: api.build_enter_maintenance(seq=1),
+    "exit_maintenance": lambda: api.build_exit_maintenance(0x01020304, seq=2),
+    "maint_heartbeat": lambda: api.build_maint_heartbeat(0x01020304, seq=3),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["maintenance"]["cases"])
+def test_maintenance_request_golden(case):
+    # The maintenance-lock builders must reproduce the golden request bytes.
+    wire = _MAINT_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_maint_result():
+    ent = api.parse_maint_result(bytes([api.MAINT_OK, 2, 0x04, 0x03, 0x02, 0x01]))
+    assert ent.ok and ent.state == 2 and ent.token == 0x01020304
+    busy = api.parse_maint_result(bytes([api.MAINT_BUSY, 2]))
+    assert busy.busy and busy.token == 0
+    bad = api.parse_maint_result(bytes([api.MAINT_BAD_TOKEN, 8]))
+    assert bad.bad_token
+    err = api.parse_maint_result(bytes([api.MAINT_BAD_REQUEST]))
+    assert err.result == api.MAINT_BAD_REQUEST and err.state == 0

@@ -60,6 +60,14 @@ namespace protocol {
 class MotionApi;
 }
 
+// Forward declaration: the maintenance lock command group (ENTER/EXIT/HEARTBEAT
+// maintenance) is handled by a portable MaintenanceApi in
+// protocol/maintenance_api.h. handleRequest delegates that msg-id range to it
+// when a non-null instance is supplied.
+namespace protocol {
+class MaintenanceApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -101,6 +109,10 @@ constexpr uint8_t kControlMsgLast = 0x33;
 constexpr uint8_t kMotionMsgFirst = 0x34;
 constexpr uint8_t kMotionMsgLast = 0x38;
 
+// Maintenance command msg-id range (0x50..0x5F block), from protocol::maintmsg.
+constexpr uint8_t kMaintenanceMsgFirst = 0x50;
+constexpr uint8_t kMaintenanceMsgLast = 0x5F;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -135,7 +147,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      config::ConfigApi* cfg = nullptr,
                      SubscriptionManager* tel = nullptr,
                      ControlApi* ctrl = nullptr,
-                     MotionApi* motion = nullptr);
+                     MotionApi* motion = nullptr,
+                     MaintenanceApi* maint = nullptr);
 
 }  // namespace api
 }  // namespace protocol

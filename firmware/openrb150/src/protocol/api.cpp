@@ -3,6 +3,7 @@
 #include "../config/config_api.h"
 #include "control_api.h"
 #include "framing.h"
+#include "maintenance_api.h"
 #include "motion_api.h"
 #include "telemetry.h"
 
@@ -53,7 +54,7 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
                      SubscriptionManager* tel, ControlApi* ctrl,
-                     MotionApi* motion) {
+                     MotionApi* motion, MaintenanceApi* maint) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -159,6 +160,20 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                            &mot_len, &mot_flags)) {
           payload_len = mot_len;
           flags = mot_flags;
+          break;
+        }
+      }
+      // Delegate the maintenance lock group (ENTER/EXIT/HEARTBEAT) to the
+      // MaintenanceApi when present.
+      if (maint != nullptr && req.msg_id >= kMaintenanceMsgFirst &&
+          req.msg_id <= kMaintenanceMsgLast) {
+        uint16_t mnt_len = 0;
+        uint8_t mnt_flags = 0;
+        if (maint->handle(req.msg_id, req_payload,
+                          static_cast<uint16_t>(req_len), payload, kMaxPayload,
+                          &mnt_len, &mnt_flags)) {
+          payload_len = mnt_len;
+          flags = mnt_flags;
           break;
         }
       }

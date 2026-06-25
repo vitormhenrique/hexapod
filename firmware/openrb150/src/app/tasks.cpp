@@ -12,6 +12,7 @@
 #include "../protocol/control_api.h"
 #include "../protocol/frame_reader.h"
 #include "../protocol/framing.h"
+#include "../protocol/maintenance_api.h"
 #include "../protocol/motion_api.h"
 #include "../protocol/telemetry.h"
 #include "../sensors/contact_estimator.h"
@@ -87,6 +88,11 @@ protocol::ControlApi g_controlApi;
 // knows whether the intent is being honored. The goal-generation (gait/IK)
 // path consumes g_motionApi.intent() and is gated by g_motionGate.
 protocol::MotionApi g_motionApi;
+
+// Host maintenance lock (ENTER/EXIT/HEARTBEAT). apiTask drives the lock token +
+// TTL here; controlTask reads lockHeld() to feed the safety FSM's maintenance
+// inputs and force-revokes the lock on E-stop / fault.
+protocol::MaintenanceApi g_maintApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -344,7 +350,12 @@ void controlTask(void*) {
     si.jetson_fresh = g_arbiter.jetsonFresh(now_ms);
     si.rc_autonomy = g_rcStatus.autonomy;
     si.mac_lock_held = g_arbiter.macLockHeld(now_ms);
-    si.maintenance_request = false;  // wired when ENTER_MAINTENANCE lands
+    // The maintenance lock is owned by the USB MaintenanceApi; a held, fresh
+    // lock is both the maintenance request and the lock-held input the FSM
+    // keys on to enter/hold MacMaintenance (AGENTS.md 6.4).
+    const bool maint_held = g_maintApi.lockHeld(now_ms);
+    si.mac_lock_held = si.mac_lock_held || maint_held;
+    si.maintenance_request = maint_held;
     si.passive_request = false;      // wired when PASSIVE_ENTER lands
     si.torque_off = false;
     si.contact_enabled = false;      // wired with the contact feature toggle
@@ -356,6 +367,11 @@ void controlTask(void*) {
     const safety::State state = g_stateMachine.update(si, now_ms);
     g_safetyState = static_cast<uint8_t>(state);
     g_faultReason = static_cast<uint8_t>(g_stateMachine.faultReason());
+    // Force-revoke the maintenance lock once the robot is in a fault/E-stop
+    // state so a stale Mac client cannot retain bench authority across a fault.
+    if (g_safetyState >= static_cast<uint8_t>(safety::State::FaultSoft)) {
+      g_maintApi.revoke();
+    }
     // Publish the live state/fault so control-command responses can echo it.
     g_controlApi.setLiveState(g_safetyState, g_faultReason);
     // The motion gate is the conjunction of "the state allows movement" and
@@ -470,9 +486,15 @@ void apiTask(void*) {
       st.battery_mv = board::readBatteryMilliVolts();
       st.watchdog_missed = watchdog::missedMask();
 
+      // Give the maintenance lock the current time + live state so ENTER can
+      // gate on a safe state and TTL/heartbeat use the same clock as the
+      // control task.
+      g_maintApi.setNow(st.uptime_ms);
+      g_maintApi.setLiveState(g_safetyState);
+
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
-          &g_configApi, &g_subs, &g_controlApi, &g_motionApi);
+          &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi);
       if (n > 0) {
         Serial.write(out, n);
       }

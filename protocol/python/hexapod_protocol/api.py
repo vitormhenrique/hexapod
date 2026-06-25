@@ -44,6 +44,11 @@ MSG_SET_BODY_TWIST = 0x36
 MSG_SET_BODY_POSE = 0x37
 MSG_STOP_MOTION = 0x38
 
+# Maintenance command group (mirrors src/protocol/maintenance_api.h, 0x50..0x5F).
+MSG_ENTER_MAINTENANCE = 0x50
+MSG_EXIT_MAINTENANCE = 0x51
+MSG_MAINT_HEARTBEAT = 0x52
+
 # Telemetry frame msg-id base: a telemetry frame for stream s arrives with
 # header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
 MSG_TELEMETRY_BASE = 0x40
@@ -84,6 +89,13 @@ GAIT_CRAWL = 5
 MOTION_OK = 0
 MOTION_REJECTED = 1
 MOTION_BAD_REQUEST = 2
+
+# Maintenance response result byte (mirrors MaintResult).
+MAINT_OK = 0
+MAINT_REJECTED = 1
+MAINT_BAD_REQUEST = 2
+MAINT_BUSY = 3
+MAINT_BAD_TOKEN = 4
 
 DEVICE_NAME_LEN = 16
 
@@ -423,3 +435,59 @@ def parse_motion_result(payload: bytes) -> MotionResultMsg:
     if len(payload) >= 3:
         return MotionResultMsg(payload[0], payload[1], bool(payload[2]))
     return MotionResultMsg(payload[0] if payload else MOTION_BAD_REQUEST, 0, False)
+
+
+# --- Maintenance lock commands --------------------------------------------
+
+
+def build_enter_maintenance(seq: int = 0) -> bytes:
+    """Build an ENTER_MAINTENANCE command. Granted only in a safe robot state
+    (disarmed / stand-ready); the response carries the lock token.
+    """
+    return build_command(MSG_ENTER_MAINTENANCE, seq=seq)
+
+
+def build_exit_maintenance(token: int, seq: int = 0) -> bytes:
+    """Build an EXIT_MAINTENANCE command releasing the lock held by ``token``."""
+    return build_command(
+        MSG_EXIT_MAINTENANCE, seq=seq, payload=struct.pack("<I", token & 0xFFFFFFFF)
+    )
+
+
+def build_maint_heartbeat(token: int, seq: int = 0) -> bytes:
+    """Build a MAINT_HEARTBEAT command refreshing the lock TTL for ``token``."""
+    return build_command(
+        MSG_MAINT_HEARTBEAT, seq=seq, payload=struct.pack("<I", token & 0xFFFFFFFF)
+    )
+
+
+@dataclass
+class MaintResultMsg:
+    result: int
+    state: int
+    token: int  # nonzero only on a successful ENTER
+
+    @property
+    def ok(self) -> bool:
+        return self.result == MAINT_OK
+
+    @property
+    def busy(self) -> bool:
+        return self.result == MAINT_BUSY
+
+    @property
+    def bad_token(self) -> bool:
+        return self.result == MAINT_BAD_TOKEN
+
+
+def parse_maint_result(payload: bytes) -> MaintResultMsg:
+    """Decode a maintenance-command response payload. ENTER success is
+    [result, state, token(4)]; EXIT/HEARTBEAT are [result, state]; a 1-byte
+    payload is a malformed-request error.
+    """
+    if len(payload) >= 6:
+        (token,) = struct.unpack("<I", payload[2:6])
+        return MaintResultMsg(payload[0], payload[1], token)
+    if len(payload) >= 2:
+        return MaintResultMsg(payload[0], payload[1], 0)
+    return MaintResultMsg(payload[0] if payload else MAINT_BAD_REQUEST, 0, 0)
