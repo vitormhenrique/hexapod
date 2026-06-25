@@ -1,7 +1,33 @@
 .envrc
 .DS_Store
+*.swp
+*~
 
 # Beads / Dolt files (added by bd init)
 .dolt/
 *.db
 .beads-credential-key
+
+# PlatformIO firmware build output
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+.venv-*/
+
+# ROS 2 / colcon build artifacts (robot_ros_simulation)
+build/
+install/
+log/
+
+# pixi environment
+.pixi/
