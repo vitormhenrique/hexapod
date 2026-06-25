@@ -76,6 +76,14 @@ namespace protocol {
 class MaintTargetApi;
 }
 
+// Forward declaration: the DXL maintenance command group (DXL_SCAN / DXL_PING /
+// DXL_TORQUE / DXL_GET_SERVO_PROFILE / DXL_GET_RESULT) is handled by a portable
+// DxlJobApi in protocol/dxl_job_api.h. handleRequest delegates its msg-id range
+// to it when a non-null instance is supplied.
+namespace protocol {
+class DxlJobApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -126,6 +134,10 @@ constexpr uint8_t kMaintenanceMsgLast = 0x5F;
 constexpr uint8_t kMaintTargetMsgFirst = 0x53;
 constexpr uint8_t kMaintTargetMsgLast = 0x54;
 
+// DXL maintenance command msg-id range (0x60..0x6F block), from protocol::dxlmsg.
+constexpr uint8_t kDxlMsgFirst = 0x60;
+constexpr uint8_t kDxlMsgLast = 0x6F;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -162,7 +174,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      ControlApi* ctrl = nullptr,
                      MotionApi* motion = nullptr,
                      MaintenanceApi* maint = nullptr,
-                     MaintTargetApi* maint_target = nullptr);
+                     MaintTargetApi* maint_target = nullptr,
+                     DxlJobApi* dxl_jobs = nullptr);
 
 }  // namespace api
 }  // namespace protocol

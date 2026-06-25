@@ -287,3 +287,50 @@ def test_parse_joint_target_result():
     assert clamp.clamped_high and clamp.tick == 3072
     rej = api.parse_joint_target_result(bytes([api.MAINT_TARGET_REJECTED, 2]))
     assert rej.result == api.MAINT_TARGET_REJECTED and rej.tick == 0
+
+
+_DXL_BUILDERS = {
+    "dxl_scan": lambda: api.build_dxl_scan(1, 18, seq=1),
+    "dxl_ping": lambda: api.build_dxl_ping(5, seq=2),
+    "dxl_torque": lambda: api.build_dxl_torque(True, seq=3),
+    "dxl_get_servo_profile": lambda: api.build_dxl_get_servo_profile(12, seq=4),
+    "dxl_get_result": lambda: api.build_dxl_get_result(7, seq=5),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["dxl"]["cases"])
+def test_dxl_request_golden(case):
+    # The DXL maintenance builders must reproduce the golden request bytes.
+    wire = _DXL_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_dxl_submit():
+    acc = api.parse_dxl_submit(bytes([api.DXL_SUBMIT_ACCEPTED, 7, api.DXL_SLOT_PENDING]))
+    assert acc.accepted and acc.job_id == 7 and acc.slot == api.DXL_SLOT_PENDING
+    busy = api.parse_dxl_submit(bytes([api.DXL_SUBMIT_BUSY, 0, api.DXL_SLOT_RUNNING]))
+    assert not busy.accepted and busy.result == api.DXL_SUBMIT_BUSY
+    rej = api.parse_dxl_submit(bytes([api.DXL_SUBMIT_REJECTED]))
+    assert rej.result == api.DXL_SUBMIT_REJECTED and rej.job_id == 0
+
+
+def test_parse_dxl_result_pending_and_scan():
+    pend = api.parse_dxl_result(bytes([api.DXL_SLOT_PENDING, api.DXL_CODE_OK, 0]))
+    assert not pend.done and pend.slot == api.DXL_SLOT_PENDING and pend.servos() == []
+
+    # A DONE scan result: count=2 then two 6-byte servo records.
+    data = bytes([2, 1, 29, 0, 40, 1, 1, 2, 30, 0, 42, 2, 2])
+    done = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    assert done.done and done.code == api.DXL_CODE_OK
+    servos = done.servos()
+    assert len(servos) == 2
+    assert servos[0] == api.DxlServoRecord(1, 29, 40, 1, 1)
+    assert servos[1] == api.DxlServoRecord(2, 30, 42, 2, 2)
+
+
+def test_parse_dxl_result_not_found():
+    nf = api.parse_dxl_result(bytes([api.DXL_SLOT_DONE, api.DXL_CODE_NOT_FOUND, 0]))
+    assert nf.done and nf.code == api.DXL_CODE_NOT_FOUND and nf.servos() == []
+

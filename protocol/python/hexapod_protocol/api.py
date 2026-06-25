@@ -105,6 +105,32 @@ MAINT_TARGET_REJECTED = 1
 MAINT_TARGET_BAD_REQUEST = 2
 MAINT_TARGET_UNREACHABLE = 3
 
+# DXL maintenance command group (mirrors src/protocol/dxl_job_api.h, 0x60..0x6F).
+MSG_DXL_SCAN = 0x60
+MSG_DXL_PING = 0x61
+MSG_DXL_TORQUE = 0x62
+MSG_DXL_GET_SERVO_PROFILE = 0x63
+MSG_DXL_GET_RESULT = 0x64
+
+# DXL submit response byte (mirrors DxlSubmit).
+DXL_SUBMIT_ACCEPTED = 0
+DXL_SUBMIT_REJECTED = 1
+DXL_SUBMIT_BUSY = 2
+DXL_SUBMIT_BAD_REQUEST = 3
+
+# DXL job slot lifecycle (mirrors dxljob::Slot).
+DXL_SLOT_EMPTY = 0
+DXL_SLOT_PENDING = 1
+DXL_SLOT_RUNNING = 2
+DXL_SLOT_DONE = 3
+
+# DXL job result code (mirrors dxljob::Code).
+DXL_CODE_OK = 0
+DXL_CODE_NOT_FOUND = 1
+DXL_CODE_POWER_OFF = 2
+DXL_CODE_BUS_ERROR = 3
+DXL_CODE_UNSUPPORTED = 4
+
 DEVICE_NAME_LEN = 16
 
 
@@ -590,3 +616,116 @@ def parse_joint_target_result(payload: bytes) -> JointTargetResult:
         payload[0] if payload else MAINT_TARGET_BAD_REQUEST, state, False,
         False, 0,
     )
+
+
+# --- DXL maintenance commands (async job queue) ----------------------------
+
+
+def build_dxl_scan(first_id: int = 1, last_id: int = 252, seq: int = 0) -> bytes:
+    """Build a DXL_SCAN command over the inclusive id range [first, last]."""
+    return build_command(
+        MSG_DXL_SCAN,
+        seq=seq,
+        payload=struct.pack("<BB", first_id & 0xFF, last_id & 0xFF),
+    )
+
+
+def build_dxl_ping(servo_id: int, seq: int = 0) -> bytes:
+    """Build a DXL_PING command for a single servo id."""
+    return build_command(
+        MSG_DXL_PING, seq=seq, payload=struct.pack("<B", servo_id & 0xFF)
+    )
+
+
+def build_dxl_torque(on: bool, seq: int = 0) -> bytes:
+    """Build a DXL_TORQUE command (enable/disable torque on all servos)."""
+    return build_command(
+        MSG_DXL_TORQUE, seq=seq, payload=struct.pack("<B", 1 if on else 0)
+    )
+
+
+def build_dxl_get_servo_profile(servo_id: int, seq: int = 0) -> bytes:
+    """Build a DXL_GET_SERVO_PROFILE command for a single servo id."""
+    return build_command(
+        MSG_DXL_GET_SERVO_PROFILE,
+        seq=seq,
+        payload=struct.pack("<B", servo_id & 0xFF),
+    )
+
+
+def build_dxl_get_result(job_id: int, seq: int = 0) -> bytes:
+    """Build a DXL_GET_RESULT poll for a previously submitted job id."""
+    return build_command(
+        MSG_DXL_GET_RESULT, seq=seq, payload=struct.pack("<B", job_id & 0xFF)
+    )
+
+
+@dataclass
+class DxlSubmitResult:
+    result: int   # DXL_SUBMIT_*
+    job_id: int   # non-zero only when accepted
+    slot: int     # DXL_SLOT_*
+
+    @property
+    def accepted(self) -> bool:
+        return self.result == DXL_SUBMIT_ACCEPTED
+
+
+@dataclass
+class DxlServoRecord:
+    id: int
+    model: int
+    firmware: int
+    protocol: int
+    table_kind: int
+
+
+@dataclass
+class DxlJobResult:
+    slot: int          # DXL_SLOT_*
+    code: int          # DXL_CODE_* (meaningful only when slot == DONE)
+    data: bytes        # serialized job payload (empty unless DONE)
+
+    @property
+    def done(self) -> bool:
+        return self.slot == DXL_SLOT_DONE
+
+    def servos(self) -> list[DxlServoRecord]:
+        """Decode a DONE DXL_SCAN result ([count, count x 6-byte records])."""
+        if not self.done or not self.data:
+            return []
+        count = self.data[0]
+        out: list[DxlServoRecord] = []
+        off = 1
+        for _ in range(count):
+            if off + 6 > len(self.data):
+                break
+            sid = self.data[off]
+            model = self.data[off + 1] | (self.data[off + 2] << 8)
+            out.append(
+                DxlServoRecord(
+                    sid, model, self.data[off + 3], self.data[off + 4],
+                    self.data[off + 5],
+                )
+            )
+            off += 6
+        return out
+
+
+def parse_dxl_submit(payload: bytes) -> DxlSubmitResult:
+    """Decode a DXL submit response ([result, job_id, slot])."""
+    if len(payload) >= 3:
+        return DxlSubmitResult(payload[0], payload[1], payload[2])
+    return DxlSubmitResult(
+        payload[0] if payload else DXL_SUBMIT_BAD_REQUEST, 0, DXL_SLOT_EMPTY
+    )
+
+
+def parse_dxl_result(payload: bytes) -> DxlJobResult:
+    """Decode a DXL_GET_RESULT response ([slot, code, len, data...])."""
+    if len(payload) >= 3:
+        n = payload[2]
+        data = bytes(payload[3 : 3 + n])
+        return DxlJobResult(payload[0], payload[1], data)
+    return DxlJobResult(DXL_SLOT_EMPTY, DXL_CODE_OK, b"")
+

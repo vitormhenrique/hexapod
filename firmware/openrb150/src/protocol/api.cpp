@@ -2,6 +2,7 @@
 
 #include "../config/config_api.h"
 #include "control_api.h"
+#include "dxl_job_api.h"
 #include "framing.h"
 #include "maintenance_api.h"
 #include "maintenance_target_api.h"
@@ -56,7 +57,7 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
                      SubscriptionManager* tel, ControlApi* ctrl,
                      MotionApi* motion, MaintenanceApi* maint,
-                     MaintTargetApi* maint_target) {
+                     MaintTargetApi* maint_target, DxlJobApi* dxl_jobs) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -192,6 +193,21 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                                  kMaxPayload, &mt_len, &mt_flags)) {
           payload_len = mt_len;
           flags = mt_flags;
+          break;
+        }
+      }
+      // Delegate the DXL maintenance group (DXL_SCAN/PING/TORQUE/PROFILE/
+      // GET_RESULT) to the DxlJobApi when present. It enqueues a job for dxlTask
+      // and returns immediately; the host polls DXL_GET_RESULT for the outcome.
+      if (dxl_jobs != nullptr && req.msg_id >= kDxlMsgFirst &&
+          req.msg_id <= kDxlMsgLast) {
+        uint16_t dxl_len = 0;
+        uint8_t dxl_flags = 0;
+        if (dxl_jobs->handle(req.msg_id, req_payload,
+                             static_cast<uint16_t>(req_len), payload,
+                             kMaxPayload, &dxl_len, &dxl_flags)) {
+          payload_len = dxl_len;
+          flags = dxl_flags;
           break;
         }
       }

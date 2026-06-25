@@ -10,6 +10,7 @@
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
+#include "../protocol/dxl_job_api.h"
 #include "../protocol/frame_reader.h"
 #include "../protocol/framing.h"
 #include "../protocol/maintenance_api.h"
@@ -100,6 +101,11 @@ protocol::MaintenanceApi g_maintApi;
 // goal ticks. Only honored while in MacMaintenance with the lock held; the goal
 // write path consumes the stored targets under MacMaintenance authority.
 protocol::MaintTargetApi g_maintTargetApi;
+
+// Host DXL maintenance command queue (DXL_SCAN/PING/TORQUE/PROFILE). apiTask
+// enqueues a gated job here; dxlTask is the sole executor (it owns the bus) and
+// writes the serialized result back for the host to poll via DXL_GET_RESULT.
+protocol::DxlJobApi g_dxlJobApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -395,9 +401,107 @@ void controlTask(void*) {
     // Gate maintenance leg/joint targets on the live MacMaintenance state +
     // held lock so a foot/joint nudge is only accepted on the bench.
     g_maintTargetApi.setLiveState(g_safetyState, g_maintApi.lockHeld(now_ms));
-
+    // Same gate for the DXL maintenance command queue: scans/pings/torque/
+    // profile jobs are only accepted on the bench (MacMaintenance + lock).
+    g_dxlJobApi.setLiveState(g_safetyState, g_maintApi.lockHeld(now_ms));
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
+}
+
+// Pack a ServoProfile's capability flags into a single byte for the wire.
+uint8_t packServoCaps(const dxl::ServoProfile& p) {
+  uint8_t c = 0;
+  if (p.supports_sync_read) c |= 0x01;
+  if (p.supports_fast_sync_read) c |= 0x02;
+  if (p.supports_cw_ccw_angle_limits) c |= 0x04;
+  if (p.supports_min_max_position_limits) c |= 0x08;
+  if (p.supports_profile_velocity) c |= 0x10;
+  if (p.supports_bus_watchdog) c |= 0x20;
+  return c;
+}
+
+// Append the compact 6-byte servo record (id, model[2], fw, proto, table) used
+// by the DXL_SCAN result list. Returns the new write offset.
+uint8_t appendCompactServo(uint8_t* data, uint8_t off,
+                           const dxl::ServoProfile& p) {
+  data[off++] = p.id;
+  data[off++] = static_cast<uint8_t>(p.model_number & 0xFF);
+  data[off++] = static_cast<uint8_t>((p.model_number >> 8) & 0xFF);
+  data[off++] = p.firmware_version;
+  data[off++] = p.protocol_version;
+  data[off++] = static_cast<uint8_t>(p.table_kind);
+  return off;
+}
+
+// Execute one queued DXL maintenance job against the bus (dxlTask context only)
+// and write the serialized result back to the queue. No-op when the queue is
+// empty. Bus access requires DXL power on; when it is off the job is reported
+// PowerOff rather than silently returning nothing.
+void runQueuedDxlJob() {
+  protocol::DxlJobRequest job;
+  uint8_t job_id = 0;
+  if (!g_dxlJobApi.queue().claim(job, job_id)) {
+    return;  // nothing pending
+  }
+
+  uint8_t data[protocol::dxljob::kMaxResult];
+  uint8_t len = 0;
+  protocol::dxljob::Code code = protocol::dxljob::Code::Ok;
+
+  const bool power_on = board::dxlPowerEnabled();
+  if (!power_on && job.type != protocol::dxljob::Type::None) {
+    g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::PowerOff,
+                                 nullptr, 0);
+    return;
+  }
+
+  switch (job.type) {
+    case protocol::dxljob::Type::Scan: {
+      const uint8_t found = g_dxlBus.scan(job.arg0, job.arg1);
+      g_servoStatusCount = 0;  // status snapshot is stale after a rescan
+      data[len++] = found;
+      for (uint8_t i = 0; i < found; ++i) {
+        if (static_cast<uint8_t>(len + 6) > protocol::dxljob::kMaxResult) break;
+        len = appendCompactServo(data, len, g_dxlBus.profile(i));
+      }
+      break;
+    }
+    case protocol::dxljob::Type::Ping: {
+      dxl::ServoProfile p;
+      if (g_dxlBus.ping(job.arg0, p)) {
+        len = appendCompactServo(data, len, p);
+        data[len++] = p.present ? 1 : 0;
+      } else {
+        code = protocol::dxljob::Code::NotFound;
+      }
+      break;
+    }
+    case protocol::dxljob::Type::Torque: {
+      const bool on = (job.arg0 != 0);
+      const uint8_t acked = g_dxlBus.setTorqueAll(on);
+      data[len++] = on ? 1 : 0;
+      data[len++] = acked;
+      break;
+    }
+    case protocol::dxljob::Type::GetProfile: {
+      dxl::ServoProfile p;
+      if (g_dxlBus.ping(job.arg0, p)) {
+        len = appendCompactServo(data, len, p);
+        data[len++] = p.present ? 1 : 0;
+        data[len++] = packServoCaps(p);
+        data[len++] = p.torque_enabled ? 1 : 0;
+        data[len++] = p.last_error;
+      } else {
+        code = protocol::dxljob::Code::NotFound;
+      }
+      break;
+    }
+    default:
+      code = protocol::dxljob::Code::Unsupported;
+      break;
+  }
+
+  g_dxlJobApi.queue().complete(job_id, code, data, len);
 }
 
 void dxlTask(void*) {
@@ -409,6 +513,13 @@ void dxlTask(void*) {
   bool prev_authorized = false;
   for (;;) {
     tick(watchdog::TaskId::Dxl);
+
+    // Execute at most one queued DXL maintenance job per cycle. dxlTask is the
+    // sole owner of the bus, so all scan/ping/torque/profile work funnels here;
+    // apiTask only enqueues (gated on MacMaintenance + lock) and polls the
+    // result. Running one job per loop keeps the present-position streaming
+    // below responsive and bounds the per-cycle bus time.
+    runQueuedDxlJob();
 
     // Enforce the safety gate at the bus level: the instant motion is no longer
     // permitted (RC kill, host estop, disarm, fault, or a non-motion state),
@@ -510,7 +621,7 @@ void apiTask(void*) {
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
           &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
-          &g_maintTargetApi);
+          &g_maintTargetApi, &g_dxlJobApi);
       if (n > 0) {
         Serial.write(out, n);
       }

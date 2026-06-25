@@ -148,6 +148,7 @@ def build() -> dict:
         "control": build_control(),
         "motion": build_motion(),
         "maintenance": build_maintenance(),
+        "dxl": build_dxl(),
     }
 
 
@@ -240,6 +241,38 @@ def build_maintenance() -> dict:
         {
             "name": "set_joint_target",
             "request": api_mod.build_set_joint_target(2, 1, 3000, seq=5).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_dxl() -> dict:
+    """Deterministic request frames for the DXL maintenance command group.
+
+    Submit responses carry a live job id and the poll result is produced by the
+    Arduino executor on hardware, so only the request encoding is pinned here.
+    The firmware native test (test_dxl_job_api) covers the queue + gating.
+    """
+    cases = [
+        {
+            "name": "dxl_scan",
+            "request": api_mod.build_dxl_scan(1, 18, seq=1).hex(),
+        },
+        {
+            "name": "dxl_ping",
+            "request": api_mod.build_dxl_ping(5, seq=2).hex(),
+        },
+        {
+            "name": "dxl_torque",
+            "request": api_mod.build_dxl_torque(True, seq=3).hex(),
+        },
+        {
+            "name": "dxl_get_servo_profile",
+            "request": api_mod.build_dxl_get_servo_profile(12, seq=4).hex(),
+        },
+        {
+            "name": "dxl_get_result",
+            "request": api_mod.build_dxl_get_result(7, seq=5).hex(),
         },
     ]
     return {"cases": cases}
