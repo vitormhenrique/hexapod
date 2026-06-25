@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "hexapod_src",
+  "project_id": "1afcd19c-e074-4fef-b9d9-3d829ea417d1"
+}
