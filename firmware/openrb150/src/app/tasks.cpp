@@ -5,6 +5,7 @@
 
 #include "../board/board.h"
 #include "../dxl/dxl_bus.h"
+#include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/frame_reader.h"
 #include "../safety/system_state.h"
@@ -27,6 +28,13 @@ protocol::api::DeviceInfo g_deviceInfo;
 // Single owner of the DYNAMIXEL TTL bus (Serial1). Only dxlTask touches this,
 // satisfying the AGENTS.md rule that one task owns Dynamixel2Arduino/Serial1.
 dxl::DxlBus g_dxlBus(Serial1);
+
+// CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial2).
+crsf::Parser g_crsfParser;
+crsf::RcStatus g_rcStatus;
+
+// CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
+constexpr uint32_t kCrsfBaud = 420000;
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -77,10 +85,27 @@ void dxlTask(void*) {
 }
 
 void rcTask(void*) {
+  crsf::initRcStatus(g_rcStatus);
+#if defined(PIN_SERIAL2_RX)
+  // Serial2 is the ExpressLRS CRSF receiver link; rcTask owns it exclusively.
+  Serial2.begin(kCrsfBaud);
+#endif
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Rc);
-    // TODO: parse CRSF from Serial2; normalize channels; failsafe detection.
+    const uint32_t now_ms =
+        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+#if defined(PIN_SERIAL2_RX)
+    crsf::ChannelData frame;
+    while (Serial2.available() > 0) {
+      const uint8_t b = static_cast<uint8_t>(Serial2.read());
+      if (g_crsfParser.push(b, frame)) {
+        crsf::applyFrame(g_rcStatus, frame, now_ms);
+      }
+    }
+#endif
+    // Raise failsafe if no valid RC frame has arrived within the timeout.
+    crsf::evaluateFailsafe(g_rcStatus, now_ms);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kRc));
   }
 }

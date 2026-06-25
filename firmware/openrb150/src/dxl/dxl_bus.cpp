@@ -5,8 +5,9 @@ namespace dxl {
 using namespace ControlTableItem;
 
 namespace {
-// Protocol versions to try during a ping, most likely first.
-constexpr float kProtoTryOrder[] = {2.0f, 1.0f};
+// Protocol versions to try during a ping, most likely first. MX-28AT ships on
+// the legacy Protocol 1.0 table by default, so try 1.0 before 2.0.
+constexpr float kProtoTryOrder[] = {1.0f, 2.0f};
 }  // namespace
 
 DxlBus::DxlBus(HardwareSerial& port) : dxl_(port, /*dir_pin=*/-1) {}
@@ -97,9 +98,10 @@ bool DxlBus::readStatus(uint8_t id, ServoStatus& out) {
 
   const ServoProfile* p = profileById(id);
   const bool is_mx2 = (p != nullptr) && (p->table_kind == TableKind::Mx28V2);
-  // Use the servo's known protocol when available, else default to 2.0.
-  dxl_.setPortProtocolVersion((p != nullptr && p->protocol_version == 1) ? 1.0f
-                                                                         : 2.0f);
+  // Use the servo's known protocol when available, else default to 1.0 (the
+  // MX-28AT factory default table).
+  dxl_.setPortProtocolVersion((p != nullptr && p->protocol_version == 2) ? 2.0f
+                                                                         : 1.0f);
 
   int32_t v = 0;
 
