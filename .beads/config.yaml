@@ -52,3 +52,10 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+# --- Explicit backup/sync config (not local-only) ---
+# A git remote exists (origin); push Beads changes off-machine on each flush.
+backup:
+  enabled: true
+  interval: 5m
+  git-push: true

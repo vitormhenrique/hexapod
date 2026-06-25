@@ -17,6 +17,24 @@ MSG_HEARTBEAT = 0x02
 MSG_GET_STATUS = 0x03
 MSG_GET_CAPABILITIES = 0x04
 
+# Telemetry / logging command group (mirrors src/protocol/telemetry.h).
+MSG_SUBSCRIBE = 0x10
+MSG_UNSUBSCRIBE = 0x11
+MSG_SET_STREAM_RATE = 0x12
+MSG_GET_STREAM_STATS = 0x13
+
+# Config command group (mirrors src/config/config_api.h).
+MSG_CFG_GET_SUMMARY = 0x20
+MSG_CFG_GET_BLOCK = 0x21
+MSG_CFG_SET_BLOCK = 0x22
+MSG_CFG_VALIDATE = 0x23
+MSG_CFG_COMMIT = 0x24
+MSG_CFG_RESET_DEFAULTS = 0x25
+
+# Telemetry frame msg-id base: a telemetry frame for stream s arrives with
+# header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
+MSG_TELEMETRY_BASE = 0x40
+
 # Header flag bits.
 FLAG_ACK_REQ = 0x01
 FLAG_ERROR = 0x02
@@ -26,6 +44,11 @@ FLAG_FRAGMENT = 0x04
 ERR_NONE = 0
 ERR_UNKNOWN_MSG = 1
 ERR_BAD_REQUEST = 2
+
+# Subscribe/unsubscribe/set-rate result byte (mirrors SubResult).
+SUB_OK = 0
+SUB_BAD_STREAM = 1
+SUB_BAD_REQUEST = 2
 
 DEVICE_NAME_LEN = 16
 
@@ -119,3 +142,93 @@ def parse_capabilities(payload: bytes) -> Capabilities:
         feature_bits,
         name,
     )
+
+
+# --- Telemetry subscription commands --------------------------------------
+
+
+def build_subscribe(stream_id: int, rate_hz: int, seq: int = 0) -> bytes:
+    """Build a SUBSCRIBE command for ``stream_id`` at ``rate_hz``."""
+    return build_command(
+        MSG_SUBSCRIBE, seq=seq, payload=struct.pack("<BH", stream_id, rate_hz)
+    )
+
+
+def build_set_stream_rate(stream_id: int, rate_hz: int, seq: int = 0) -> bytes:
+    """Build a SET_STREAM_RATE command (same wire layout as SUBSCRIBE)."""
+    return build_command(
+        MSG_SET_STREAM_RATE, seq=seq, payload=struct.pack("<BH", stream_id, rate_hz)
+    )
+
+
+def build_unsubscribe(stream_id: int, seq: int = 0) -> bytes:
+    """Build an UNSUBSCRIBE command for ``stream_id``."""
+    return build_command(MSG_UNSUBSCRIBE, seq=seq, payload=bytes([stream_id]))
+
+
+def build_get_stream_stats(seq: int = 0) -> bytes:
+    """Build a GET_STREAM_STATS command."""
+    return build_command(MSG_GET_STREAM_STATS, seq=seq)
+
+
+@dataclass
+class SubscribeResult:
+    result: int
+    stream_id: int
+    effective_rate_hz: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SUB_OK
+
+
+def parse_subscribe_result(payload: bytes) -> SubscribeResult:
+    """Decode a SUBSCRIBE / SET_STREAM_RATE response payload."""
+    if len(payload) >= 4:
+        result, stream_id = payload[0], payload[1]
+        (rate,) = struct.unpack("<H", payload[2:4])
+        return SubscribeResult(result, stream_id, rate)
+    if len(payload) >= 2:
+        return SubscribeResult(payload[0], payload[1], 0)
+    return SubscribeResult(payload[0] if payload else SUB_BAD_REQUEST, 0, 0)
+
+
+@dataclass
+class StreamStat:
+    stream_id: int
+    enabled: bool
+    rate_hz: int
+    emitted: int
+    dropped: int
+
+
+@dataclass
+class StreamStats:
+    tx_backlog: int
+    streams: list[StreamStat]
+
+
+def parse_stream_stats(payload: bytes) -> StreamStats:
+    """Decode a GET_STREAM_STATS response payload."""
+    if len(payload) < 5:
+        return StreamStats(tx_backlog=0, streams=[])
+    count = payload[0]
+    (tx_backlog,) = struct.unpack("<I", payload[1:5])
+    out: list[StreamStat] = []
+    off = 5
+    for _ in range(count):
+        if off + 12 > len(payload):
+            break
+        sid = payload[off]
+        enabled = bool(payload[off + 1])
+        (rate,) = struct.unpack("<H", payload[off + 2 : off + 4])
+        (emitted,) = struct.unpack("<I", payload[off + 4 : off + 8])
+        (dropped,) = struct.unpack("<I", payload[off + 8 : off + 12])
+        out.append(StreamStat(sid, enabled, rate, emitted, dropped))
+        off += 12
+    return StreamStats(tx_backlog=tx_backlog, streams=out)
+
+
+def is_error(header: Header) -> bool:
+    """True if a response header has the ERROR flag set."""
+    return bool(header.flags & FLAG_ERROR)

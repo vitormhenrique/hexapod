@@ -9,6 +9,7 @@ from .crc16 import crc16
 from .cobs import cobs_encode, cobs_decode
 from .framing import Header, MsgType, encode_frame, decode_frame_body, DecodeError
 from . import api
+from . import telemetry
 
 __all__ = [
     "crc16",
@@ -20,4 +21,5 @@ __all__ = [
     "decode_frame_body",
     "DecodeError",
     "api",
+    "telemetry",
 ]
