@@ -105,6 +105,29 @@ class DxlBus {
   // servoCount()/profile()). Returns the number of servos with a fresh read.
   uint8_t syncReadStatus(ServoStatus* out, uint8_t out_cap);
 
+  // --- Logical parameter access (maintenance, ubs.4.4) ----------------------
+  // Raw register read/write by address, used by the logical-parameter API. The
+  // caller resolves the (table-aware) address/length from dxl/dxl_params.h and
+  // passes them here; this layer only selects the protocol and moves bytes.
+
+  // Read `len` (1/2/4) bytes from `addr` on servo `id` using `table`'s
+  // protocol, decoding into a (optionally signed) int32. Returns false on a
+  // failed transaction.
+  bool readRegister(uint8_t id, TableKind table, uint16_t addr, uint8_t len,
+                    bool is_signed, int32_t& out);
+
+  // Write `value` (low `len` bytes, little-endian) to `addr` on servo `id`.
+  // Returns false on a failed transaction. Does NOT manage torque; EEPROM
+  // writes require the caller to disable torque first (see setTorqueOne).
+  bool writeRegister(uint8_t id, TableKind table, uint16_t addr, uint8_t len,
+                     int32_t value);
+
+  // Enable/disable torque on a single servo. Returns true on ack.
+  bool setTorqueOne(uint8_t id, TableKind table, bool on);
+
+  // Read a single servo's torque-enable state. Returns false on a failed read.
+  bool torqueState(uint8_t id, TableKind table, bool& on);
+
   // Discovered-servo accessors.
   uint8_t servoCount() const { return count_; }
   const ServoProfile& profile(uint8_t index) const { return servos_[index]; }

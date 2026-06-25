@@ -7,6 +7,7 @@
 #include "../config/config_api.h"
 #include "../config/eeprom_24lc32.h"
 #include "../dxl/dxl_bus.h"
+#include "../dxl/dxl_params.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
@@ -433,6 +434,53 @@ uint8_t appendCompactServo(uint8_t* data, uint8_t off,
   return off;
 }
 
+// Little-endian int32 into the result buffer. Returns the new write offset.
+uint8_t appendI32(uint8_t* data, uint8_t off, int32_t v) {
+  const uint32_t raw = static_cast<uint32_t>(v);
+  data[off++] = static_cast<uint8_t>(raw & 0xFF);
+  data[off++] = static_cast<uint8_t>((raw >> 8) & 0xFF);
+  data[off++] = static_cast<uint8_t>((raw >> 16) & 0xFF);
+  data[off++] = static_cast<uint8_t>((raw >> 24) & 0xFF);
+  return off;
+}
+
+// Write one logical parameter to a servo with the maintenance-safe sequence:
+// for an EEPROM parameter, disable torque first (and confirm), write, then read
+// back and compare. RAM parameters skip the torque dance. `verified` is set
+// true only when the read-back equals the written value. Returns a result code:
+// NotFound (no profile), Unsupported (no descriptor on this table), BusError
+// (a transaction failed), VerifyFailed (mismatch), or Ok.
+protocol::dxljob::Code writeParamChecked(uint8_t id, dxl::LogicalParam param,
+                                         int32_t value, int32_t& readback,
+                                         bool& verified) {
+  using Code = protocol::dxljob::Code;
+  verified = false;
+  readback = 0;
+  const dxl::ServoProfile* p = g_dxlBus.profileById(id);
+  if (p == nullptr) return Code::NotFound;
+  dxl::ParamDescriptor d;
+  if (!dxl::paramDescriptor(p->table_kind, param, d) || !d.writable) {
+    return Code::Unsupported;
+  }
+  if (d.region == dxl::ParamRegion::Eeprom) {
+    // EEPROM writes are locked while torque is on: disable and confirm.
+    if (!g_dxlBus.setTorqueOne(id, p->table_kind, false)) return Code::BusError;
+    bool torque_on = true;
+    if (!g_dxlBus.torqueState(id, p->table_kind, torque_on) || torque_on) {
+      return Code::BusError;
+    }
+  }
+  if (!g_dxlBus.writeRegister(id, p->table_kind, d.address, d.length, value)) {
+    return Code::BusError;
+  }
+  if (!g_dxlBus.readRegister(id, p->table_kind, d.address, d.length,
+                             d.is_signed, readback)) {
+    return Code::BusError;
+  }
+  verified = (readback == value);
+  return verified ? Code::Ok : Code::VerifyFailed;
+}
+
 // Execute one queued DXL maintenance job against the bus (dxlTask context only)
 // and write the serialized result back to the queue. No-op when the queue is
 // empty. Bus access requires DXL power on; when it is off the job is reported
@@ -494,6 +542,97 @@ void runQueuedDxlJob() {
       } else {
         code = protocol::dxljob::Code::NotFound;
       }
+      break;
+    }
+    case protocol::dxljob::Type::GetParam: {
+      // [param, table_kind, length, value(i32)].
+      const dxl::ServoProfile* p = g_dxlBus.profileById(job.arg0);
+      if (p == nullptr) {
+        code = protocol::dxljob::Code::NotFound;
+        break;
+      }
+      if (!dxl::isLogicalParam(job.param)) {
+        code = protocol::dxljob::Code::Unsupported;
+        break;
+      }
+      const dxl::LogicalParam param =
+          static_cast<dxl::LogicalParam>(job.param);
+      dxl::ParamDescriptor d;
+      if (!dxl::paramDescriptor(p->table_kind, param, d)) {
+        code = protocol::dxljob::Code::Unsupported;
+        break;
+      }
+      int32_t value = 0;
+      if (!g_dxlBus.readRegister(job.arg0, p->table_kind, d.address, d.length,
+                                 d.is_signed, value)) {
+        code = protocol::dxljob::Code::BusError;
+        break;
+      }
+      data[len++] = job.param;
+      data[len++] = static_cast<uint8_t>(p->table_kind);
+      data[len++] = d.length;
+      len = appendI32(data, len, value);
+      break;
+    }
+    case protocol::dxljob::Type::SetParam: {
+      // [param, length, written(i32), readback(i32), verified].
+      if (!dxl::isLogicalParam(job.param)) {
+        code = protocol::dxljob::Code::Unsupported;
+        break;
+      }
+      const dxl::LogicalParam param =
+          static_cast<dxl::LogicalParam>(job.param);
+      int32_t readback = 0;
+      bool verified = false;
+      code = writeParamChecked(job.arg0, param, job.val_a, readback, verified);
+      if (code == protocol::dxljob::Code::NotFound ||
+          code == protocol::dxljob::Code::Unsupported) {
+        break;  // nothing meaningful to serialize
+      }
+      // Ok and VerifyFailed (and BusError after a partial write) still report
+      // the written/read values so the host sees what happened.
+      const dxl::ServoProfile* p = g_dxlBus.profileById(job.arg0);
+      dxl::ParamDescriptor d;
+      const uint8_t plen = (p != nullptr &&
+                            dxl::paramDescriptor(p->table_kind, param, d))
+                               ? d.length
+                               : 0;
+      data[len++] = job.param;
+      data[len++] = plen;
+      len = appendI32(data, len, job.val_a);
+      len = appendI32(data, len, readback);
+      data[len++] = verified ? 1 : 0;
+      break;
+    }
+    case protocol::dxljob::Type::SetLimits: {
+      // [table_kind, min(i32), max(i32), verified].
+      const dxl::ServoProfile* p = g_dxlBus.profileById(job.arg0);
+      if (p == nullptr) {
+        code = protocol::dxljob::Code::NotFound;
+        break;
+      }
+      dxl::LogicalParam min_param, max_param;
+      if (!dxl::servoLimitParams(p->table_kind, min_param, max_param)) {
+        code = protocol::dxljob::Code::Unsupported;
+        break;
+      }
+      int32_t rb_min = 0, rb_max = 0;
+      bool v_min = false, v_max = false;
+      const protocol::dxljob::Code c_min =
+          writeParamChecked(job.arg0, min_param, job.val_a, rb_min, v_min);
+      const protocol::dxljob::Code c_max =
+          writeParamChecked(job.arg0, max_param, job.val_b, rb_max, v_max);
+      // Surface the worst outcome: any bus error dominates, else a verify miss.
+      if (c_min == protocol::dxljob::Code::BusError ||
+          c_max == protocol::dxljob::Code::BusError) {
+        code = protocol::dxljob::Code::BusError;
+      } else if (!v_min || !v_max) {
+        code = protocol::dxljob::Code::VerifyFailed;
+      }
+      data[len++] = static_cast<uint8_t>(p->table_kind);
+      len = appendI32(data, len, rb_min);
+      len = appendI32(data, len, rb_max);
+      data[len++] = (v_min && v_max) ? 1 : 0;
       break;
     }
     default:

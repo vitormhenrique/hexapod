@@ -274,6 +274,22 @@ def build_dxl() -> dict:
             "name": "dxl_get_result",
             "request": api_mod.build_dxl_get_result(7, seq=5).hex(),
         },
+        {
+            "name": "dxl_get_param",
+            "request": api_mod.build_dxl_get_param(
+                3, api_mod.DXL_PARAM_CCW_ANGLE_LIMIT, seq=6
+            ).hex(),
+        },
+        {
+            "name": "dxl_set_param",
+            "request": api_mod.build_dxl_set_param(
+                5, api_mod.DXL_PARAM_MOVING_SPEED, 1000, seq=7
+            ).hex(),
+        },
+        {
+            "name": "dxl_set_servo_limits",
+            "request": api_mod.build_dxl_set_servo_limits(7, 100, 3900, seq=8).hex(),
+        },
     ]
     return {"cases": cases}
 

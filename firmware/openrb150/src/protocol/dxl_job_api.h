@@ -40,6 +40,9 @@ constexpr uint8_t kPing = 0x61;
 constexpr uint8_t kTorque = 0x62;
 constexpr uint8_t kGetServoProfile = 0x63;
 constexpr uint8_t kGetResult = 0x64;
+constexpr uint8_t kGetParam = 0x65;
+constexpr uint8_t kSetParam = 0x66;
+constexpr uint8_t kSetServoLimits = 0x67;
 constexpr uint8_t kFirst = 0x60;
 constexpr uint8_t kLast = 0x6F;
 inline bool isDxlMsg(uint8_t id) { return id >= kFirst && id <= kLast; }
@@ -54,6 +57,9 @@ enum class Type : uint8_t {
   Ping = 2,        // arg0=id
   Torque = 3,      // arg0=on (0/1) -> all discovered servos
   GetProfile = 4,  // arg0=id
+  GetParam = 5,    // arg0=id, param=LogicalParam
+  SetParam = 6,    // arg0=id, param=LogicalParam, val_a=value
+  SetLimits = 7,   // arg0=id, val_a=min_tick, val_b=max_tick
 };
 
 // Single-slot lifecycle, written only on a state transition (the SPSC fence).
@@ -67,10 +73,11 @@ enum class Slot : uint8_t {
 // Result code filled by the executor (the Arduino side maps bus outcomes here).
 enum class Code : uint8_t {
   Ok = 0,
-  NotFound = 1,    // ping/profile: no servo answered
+  NotFound = 1,    // ping/profile/param: no servo answered
   PowerOff = 2,    // DXL power is off, the bus cannot be scanned
   BusError = 3,    // a bus/library transaction failed
-  Unsupported = 4,  // job type not handled
+  Unsupported = 4,  // job type / parameter not available on this table
+  VerifyFailed = 5,  // write succeeded but read-back did not match
 };
 
 // Largest serialized job result: a full scan returns 1 count byte + up to 24
@@ -84,6 +91,9 @@ struct DxlJobRequest {
   dxljob::Type type = dxljob::Type::None;
   uint8_t arg0 = 0;
   uint8_t arg1 = 0;
+  uint8_t param = 0;     // LogicalParam value for GetParam/SetParam
+  int32_t val_a = 0;     // SetParam value, or min_tick for SetLimits
+  int32_t val_b = 0;     // max_tick for SetLimits
 };
 
 // One serialized job result (consumer -> producer).

@@ -4,6 +4,16 @@
 #include "dxl_job_api.h"
 
 namespace protocol {
+namespace {
+
+int32_t readI32(const uint8_t* p) {
+  return static_cast<int32_t>(static_cast<uint32_t>(p[0]) |
+                              (static_cast<uint32_t>(p[1]) << 8) |
+                              (static_cast<uint32_t>(p[2]) << 16) |
+                              (static_cast<uint32_t>(p[3]) << 24));
+}
+
+}  // namespace
 
 // --- DxlJobQueue -----------------------------------------------------------
 
@@ -190,6 +200,48 @@ bool DxlJobApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
       }
       job.type = dxljob::Type::GetProfile;
       job.arg0 = req[0];
+      break;
+    }
+    case dxlmsg::kGetParam: {
+      // [id, param]; reads one logical parameter from a single servo.
+      if (req_len < 2 || req[0] == 0) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      job.type = dxljob::Type::GetParam;
+      job.arg0 = req[0];
+      job.param = req[1];
+      break;
+    }
+    case dxlmsg::kSetParam: {
+      // [id, param, value(i32)]; writes one logical parameter (torque-off +
+      // read-back verify handled by the executor for EEPROM params).
+      if (req_len < 6 || req[0] == 0) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      job.type = dxljob::Type::SetParam;
+      job.arg0 = req[0];
+      job.param = req[1];
+      job.val_a = readI32(&req[2]);
+      break;
+    }
+    case dxlmsg::kSetServoLimits: {
+      // [id, min_tick(i32), max_tick(i32)]; table-aware joint travel bounds.
+      if (req_len < 9 || req[0] == 0) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      const int32_t lo = readI32(&req[1]);
+      const int32_t hi = readI32(&req[5]);
+      if (hi < lo) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      job.type = dxljob::Type::SetLimits;
+      job.arg0 = req[0];
+      job.val_a = lo;
+      job.val_b = hi;
       break;
     }
     default:

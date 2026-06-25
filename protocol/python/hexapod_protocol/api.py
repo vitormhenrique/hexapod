@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from typing import Optional
 
 from .framing import Header, MsgType, decode_frame_body, encode_frame
 
@@ -111,6 +112,9 @@ MSG_DXL_PING = 0x61
 MSG_DXL_TORQUE = 0x62
 MSG_DXL_GET_SERVO_PROFILE = 0x63
 MSG_DXL_GET_RESULT = 0x64
+MSG_DXL_GET_PARAM = 0x65
+MSG_DXL_SET_PARAM = 0x66
+MSG_DXL_SET_SERVO_LIMITS = 0x67
 
 # DXL submit response byte (mirrors DxlSubmit).
 DXL_SUBMIT_ACCEPTED = 0
@@ -130,6 +134,34 @@ DXL_CODE_NOT_FOUND = 1
 DXL_CODE_POWER_OFF = 2
 DXL_CODE_BUS_ERROR = 3
 DXL_CODE_UNSUPPORTED = 4
+DXL_CODE_VERIFY_FAILED = 5
+
+# DXL logical parameters (mirrors dxl::LogicalParam in src/dxl/dxl_params.h).
+DXL_PARAM_ID = 0
+DXL_PARAM_BAUD_RATE = 1
+DXL_PARAM_RETURN_DELAY_TIME = 2
+DXL_PARAM_CW_ANGLE_LIMIT = 3
+DXL_PARAM_CCW_ANGLE_LIMIT = 4
+DXL_PARAM_MIN_POSITION_LIMIT = 5
+DXL_PARAM_MAX_POSITION_LIMIT = 6
+DXL_PARAM_TEMPERATURE_LIMIT = 7
+DXL_PARAM_MIN_VOLTAGE_LIMIT = 8
+DXL_PARAM_MAX_VOLTAGE_LIMIT = 9
+DXL_PARAM_MAX_TORQUE = 10
+DXL_PARAM_STATUS_RETURN_LEVEL = 11
+DXL_PARAM_SHUTDOWN = 12
+DXL_PARAM_PID_P = 13
+DXL_PARAM_PID_I = 14
+DXL_PARAM_PID_D = 15
+DXL_PARAM_MOVING_SPEED = 16
+DXL_PARAM_TORQUE_LIMIT = 17
+DXL_PARAM_GOAL_ACCELERATION = 18
+DXL_PARAM_HOMING_OFFSET = 19
+DXL_PARAM_PROFILE_VELOCITY = 20
+DXL_PARAM_PROFILE_ACCELERATION = 21
+DXL_PARAM_BUS_WATCHDOG = 22
+DXL_PARAM_TORQUE_ENABLE = 23
+DXL_PARAM_COUNT = 24
 
 DEVICE_NAME_LEN = 16
 
@@ -561,7 +593,7 @@ class LegTargetResult:
     result: int
     state: int
     reachable: bool
-    clamp_low: int   # bitmask over (coxa, femur, tibia)
+    clamp_low: int  # bitmask over (coxa, femur, tibia)
     clamp_high: int
     ticks: tuple[int, int, int]
 
@@ -591,12 +623,20 @@ def parse_leg_target_result(payload: bytes) -> LegTargetResult:
     if len(payload) >= 11:
         c, f, t = struct.unpack("<HHH", payload[5:11])
         return LegTargetResult(
-            payload[0], payload[1], bool(payload[2]), payload[3], payload[4],
+            payload[0],
+            payload[1],
+            bool(payload[2]),
+            payload[3],
+            payload[4],
             (c, f, t),
         )
     state = payload[1] if len(payload) >= 2 else 0
     return LegTargetResult(
-        payload[0] if payload else MAINT_TARGET_BAD_REQUEST, state, False, 0, 0,
+        payload[0] if payload else MAINT_TARGET_BAD_REQUEST,
+        state,
+        False,
+        0,
+        0,
         (0, 0, 0),
     )
 
@@ -613,8 +653,11 @@ def parse_joint_target_result(payload: bytes) -> JointTargetResult:
         )
     state = payload[1] if len(payload) >= 2 else 0
     return JointTargetResult(
-        payload[0] if payload else MAINT_TARGET_BAD_REQUEST, state, False,
-        False, 0,
+        payload[0] if payload else MAINT_TARGET_BAD_REQUEST,
+        state,
+        False,
+        False,
+        0,
     )
 
 
@@ -660,11 +703,40 @@ def build_dxl_get_result(job_id: int, seq: int = 0) -> bytes:
     )
 
 
+def build_dxl_get_param(servo_id: int, param: int, seq: int = 0) -> bytes:
+    """Build a DXL_GET_PARAM command ([id, param])."""
+    return build_command(
+        MSG_DXL_GET_PARAM,
+        seq=seq,
+        payload=struct.pack("<BB", servo_id & 0xFF, param & 0xFF),
+    )
+
+
+def build_dxl_set_param(servo_id: int, param: int, value: int, seq: int = 0) -> bytes:
+    """Build a DXL_SET_PARAM command ([id, param, value(i32)])."""
+    return build_command(
+        MSG_DXL_SET_PARAM,
+        seq=seq,
+        payload=struct.pack("<BBi", servo_id & 0xFF, param & 0xFF, value),
+    )
+
+
+def build_dxl_set_servo_limits(
+    servo_id: int, min_tick: int, max_tick: int, seq: int = 0
+) -> bytes:
+    """Build a DXL_SET_SERVO_LIMITS command ([id, min(i32), max(i32)])."""
+    return build_command(
+        MSG_DXL_SET_SERVO_LIMITS,
+        seq=seq,
+        payload=struct.pack("<Bii", servo_id & 0xFF, min_tick, max_tick),
+    )
+
+
 @dataclass
 class DxlSubmitResult:
-    result: int   # DXL_SUBMIT_*
-    job_id: int   # non-zero only when accepted
-    slot: int     # DXL_SLOT_*
+    result: int  # DXL_SUBMIT_*
+    job_id: int  # non-zero only when accepted
+    slot: int  # DXL_SLOT_*
 
     @property
     def accepted(self) -> bool:
@@ -682,9 +754,9 @@ class DxlServoRecord:
 
 @dataclass
 class DxlJobResult:
-    slot: int          # DXL_SLOT_*
-    code: int          # DXL_CODE_* (meaningful only when slot == DONE)
-    data: bytes        # serialized job payload (empty unless DONE)
+    slot: int  # DXL_SLOT_*
+    code: int  # DXL_CODE_* (meaningful only when slot == DONE)
+    data: bytes  # serialized job payload (empty unless DONE)
 
     @property
     def done(self) -> bool:
@@ -704,12 +776,68 @@ class DxlJobResult:
             model = self.data[off + 1] | (self.data[off + 2] << 8)
             out.append(
                 DxlServoRecord(
-                    sid, model, self.data[off + 3], self.data[off + 4],
+                    sid,
+                    model,
+                    self.data[off + 3],
+                    self.data[off + 4],
                     self.data[off + 5],
                 )
             )
             off += 6
         return out
+
+    def param(self) -> Optional["DxlParamValue"]:
+        """Decode a DONE GET_PARAM result ([param, table, len, value(i32)])."""
+        if not self.done or len(self.data) < 7:
+            return None
+        param, table, length = self.data[0], self.data[1], self.data[2]
+        value = struct.unpack_from("<i", self.data, 3)[0]
+        return DxlParamValue(param, table, length, value)
+
+    def set_param(self) -> Optional["DxlSetParamResult"]:
+        """Decode a SET_PARAM result ([param, len, written, readback, ok])."""
+        if len(self.data) < 11:
+            return None
+        param, length = self.data[0], self.data[1]
+        written = struct.unpack_from("<i", self.data, 2)[0]
+        readback = struct.unpack_from("<i", self.data, 6)[0]
+        verified = self.data[10] != 0
+        return DxlSetParamResult(param, length, written, readback, verified)
+
+    def servo_limits(self) -> Optional["DxlServoLimitsResult"]:
+        """Decode a SET_SERVO_LIMITS result ([table, min, max, ok])."""
+        if len(self.data) < 10:
+            return None
+        table = self.data[0]
+        min_tick = struct.unpack_from("<i", self.data, 1)[0]
+        max_tick = struct.unpack_from("<i", self.data, 5)[0]
+        verified = self.data[9] != 0
+        return DxlServoLimitsResult(table, min_tick, max_tick, verified)
+
+
+@dataclass
+class DxlParamValue:
+    param: int  # DXL_PARAM_*
+    table_kind: int
+    length: int  # 1, 2, or 4 bytes
+    value: int
+
+
+@dataclass
+class DxlSetParamResult:
+    param: int  # DXL_PARAM_*
+    length: int
+    written: int
+    readback: int
+    verified: bool
+
+
+@dataclass
+class DxlServoLimitsResult:
+    table_kind: int
+    min_tick: int
+    max_tick: int
+    verified: bool
 
 
 def parse_dxl_submit(payload: bytes) -> DxlSubmitResult:
@@ -728,4 +856,3 @@ def parse_dxl_result(payload: bytes) -> DxlJobResult:
         data = bytes(payload[3 : 3 + n])
         return DxlJobResult(payload[0], payload[1], data)
     return DxlJobResult(DXL_SLOT_EMPTY, DXL_CODE_OK, b"")
-

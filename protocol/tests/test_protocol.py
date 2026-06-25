@@ -269,7 +269,8 @@ def test_parse_leg_target_result():
     )
     assert ok.ok and ok.reachable and ok.ticks == (2048, 2100, 1990)
     unreach = api.parse_leg_target_result(
-        bytes([api.MAINT_TARGET_UNREACHABLE, 8, 0, 0, 0]) + struct.pack("<HHH", 1024, 1024, 3072)
+        bytes([api.MAINT_TARGET_UNREACHABLE, 8, 0, 0, 0])
+        + struct.pack("<HHH", 1024, 1024, 3072)
     )
     assert not unreach.reachable and unreach.result == api.MAINT_TARGET_UNREACHABLE
     rej = api.parse_leg_target_result(bytes([api.MAINT_TARGET_REJECTED, 2]))
@@ -295,6 +296,13 @@ _DXL_BUILDERS = {
     "dxl_torque": lambda: api.build_dxl_torque(True, seq=3),
     "dxl_get_servo_profile": lambda: api.build_dxl_get_servo_profile(12, seq=4),
     "dxl_get_result": lambda: api.build_dxl_get_result(7, seq=5),
+    "dxl_get_param": lambda: api.build_dxl_get_param(
+        3, api.DXL_PARAM_CCW_ANGLE_LIMIT, seq=6
+    ),
+    "dxl_set_param": lambda: api.build_dxl_set_param(
+        5, api.DXL_PARAM_MOVING_SPEED, 1000, seq=7
+    ),
+    "dxl_set_servo_limits": lambda: api.build_dxl_set_servo_limits(7, 100, 3900, seq=8),
 }
 
 
@@ -306,7 +314,9 @@ def test_dxl_request_golden(case):
 
 
 def test_parse_dxl_submit():
-    acc = api.parse_dxl_submit(bytes([api.DXL_SUBMIT_ACCEPTED, 7, api.DXL_SLOT_PENDING]))
+    acc = api.parse_dxl_submit(
+        bytes([api.DXL_SUBMIT_ACCEPTED, 7, api.DXL_SLOT_PENDING])
+    )
     assert acc.accepted and acc.job_id == 7 and acc.slot == api.DXL_SLOT_PENDING
     busy = api.parse_dxl_submit(bytes([api.DXL_SUBMIT_BUSY, 0, api.DXL_SLOT_RUNNING]))
     assert not busy.accepted and busy.result == api.DXL_SUBMIT_BUSY
@@ -334,3 +344,56 @@ def test_parse_dxl_result_not_found():
     nf = api.parse_dxl_result(bytes([api.DXL_SLOT_DONE, api.DXL_CODE_NOT_FOUND, 0]))
     assert nf.done and nf.code == api.DXL_CODE_NOT_FOUND and nf.servos() == []
 
+
+def test_parse_dxl_get_param_result():
+    # [param, table, len, value(i32)] -> CcwAngleLimit=4, legacy table, 2 bytes.
+    data = struct.pack("<BBBi", api.DXL_PARAM_CCW_ANGLE_LIMIT, 1, 2, 3000)
+    res = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    pv = res.param()
+    assert pv is not None
+    assert pv.param == api.DXL_PARAM_CCW_ANGLE_LIMIT
+    assert pv.table_kind == 1 and pv.length == 2 and pv.value == 3000
+    # A signed value (e.g. HomingOffset) round-trips through the i32 decode.
+    sdata = struct.pack("<BBBi", api.DXL_PARAM_HOMING_OFFSET, 2, 4, -128)
+    sres = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(sdata)]) + sdata
+    )
+    assert sres.param().value == -128
+    # Pending result yields no param decode.
+    assert (
+        api.parse_dxl_result(bytes([api.DXL_SLOT_PENDING, api.DXL_CODE_OK, 0])).param()
+        is None
+    )
+
+
+def test_parse_dxl_set_param_result():
+    # [param, len, written(i32), readback(i32), verified].
+    data = struct.pack("<BBiiB", api.DXL_PARAM_MOVING_SPEED, 2, 1000, 1000, 1)
+    res = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    sp = res.set_param()
+    assert sp is not None
+    assert sp.param == api.DXL_PARAM_MOVING_SPEED and sp.length == 2
+    assert sp.written == 1000 and sp.readback == 1000 and sp.verified
+    # A verify mismatch is surfaced.
+    bad = struct.pack("<BBiiB", api.DXL_PARAM_MOVING_SPEED, 2, 1000, 999, 0)
+    badres = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_VERIFY_FAILED, len(bad)]) + bad
+    )
+    assert badres.code == api.DXL_CODE_VERIFY_FAILED
+    assert not badres.set_param().verified
+
+
+def test_parse_dxl_servo_limits_result():
+    # [table, min(i32), max(i32), verified].
+    data = struct.pack("<BiiB", 2, 100, 3900, 1)
+    res = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    lim = res.servo_limits()
+    assert lim is not None
+    assert lim.table_kind == 2 and lim.min_tick == 100
+    assert lim.max_tick == 3900 and lim.verified

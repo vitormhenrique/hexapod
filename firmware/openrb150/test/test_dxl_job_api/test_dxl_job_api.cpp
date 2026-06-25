@@ -334,6 +334,95 @@ void test_torque_and_profile_submit() {
   TEST_ASSERT_EQUAL(12, job.arg0);
 }
 
+void test_get_param_submit() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  // GET_PARAM id=3, param=4 (CcwAngleLimit).
+  const uint8_t req[2] = {3, 4};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kGetParam, req, 2, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::GetParam),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(3, job.arg0);
+  TEST_ASSERT_EQUAL(4, job.param);
+  // Too-short request is BadRequest.
+  const uint8_t bad[1] = {3};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kGetParam, bad, 1, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+}
+
+void test_set_param_submit() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  // SET_PARAM id=5, param=16 (MovingSpeed), value=0x000003E8 (1000) LE.
+  const uint8_t req[6] = {5, 16, 0xE8, 0x03, 0x00, 0x00};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kSetParam, req, 6, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::SetParam),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(5, job.arg0);
+  TEST_ASSERT_EQUAL(16, job.param);
+  TEST_ASSERT_EQUAL_INT32(1000, job.val_a);
+  // Too-short request is BadRequest.
+  const uint8_t bad[5] = {5, 16, 0, 0, 0};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kSetParam, bad, 5, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+}
+
+void test_set_servo_limits_submit() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  // SET_SERVO_LIMITS id=7, min=100, max=3900 (both i32 LE).
+  const uint8_t req[9] = {7,
+                          100, 0, 0, 0,
+                          0x3C, 0x0F, 0, 0};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kSetServoLimits, req, 9, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::SetLimits),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(7, job.arg0);
+  TEST_ASSERT_EQUAL_INT32(100, job.val_a);
+  TEST_ASSERT_EQUAL_INT32(3900, job.val_b);
+  // max < min is BadRequest (no job queued).
+  const uint8_t inverted[9] = {7,
+                               0x3C, 0x0F, 0, 0,
+                               100, 0, 0, 0};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kSetServoLimits, inverted, 9, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+  // Too-short request is BadRequest.
+  const uint8_t bad[8] = {7, 0, 0, 0, 0, 0, 0, 0};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kSetServoLimits, bad, 8, out,
+                          &out_len, &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+}
+
 void test_handle_declines_out_of_range() {
   DxlJobApi api_obj;
   api_obj.reset();
@@ -344,12 +433,11 @@ void test_handle_declines_out_of_range() {
   // 0x40 is outside the DXL block: handler declines.
   TEST_ASSERT_FALSE(runDxl(api_obj, 0x40, nullptr, 0, out, &out_len,
                            &out_flags));
-  // 0x65 is inside the reserved block but unassigned: declined too.
-  TEST_ASSERT_FALSE(runDxl(api_obj, 0x65, nullptr, 0, out, &out_len,
+  // 0x6F is the block tail but unassigned: declined too.
+  TEST_ASSERT_FALSE(runDxl(api_obj, 0x6F, nullptr, 0, out, &out_len,
                            &out_flags));
 }
 
-void setUp() {}
 void tearDown() {}
 
 int main(int, char**) {
@@ -366,6 +454,9 @@ int main(int, char**) {
   RUN_TEST(test_submit_busy_when_job_in_flight);
   RUN_TEST(test_bad_requests);
   RUN_TEST(test_torque_and_profile_submit);
+  RUN_TEST(test_get_param_submit);
+  RUN_TEST(test_set_param_submit);
+  RUN_TEST(test_set_servo_limits_submit);
   RUN_TEST(test_handle_declines_out_of_range);
   return UNITY_END();
 }

@@ -259,4 +259,79 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
   return fresh;
 }
 
+bool DxlBus::readRegister(uint8_t id, TableKind table, uint16_t addr,
+                          uint8_t len, bool is_signed, int32_t& out) {
+  if (!ready_ || (len != 1 && len != 2 && len != 4)) {
+    return false;
+  }
+  selectProtocol(table);
+  uint8_t buf[4] = {0, 0, 0, 0};
+  const int32_t n = dxl_.read(id, addr, len, buf, sizeof(buf));
+  if (n < static_cast<int32_t>(len)) {
+    stats_.reads_fail++;
+    stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+    return false;
+  }
+  uint32_t raw = 0;
+  for (uint8_t i = 0; i < len; ++i) {
+    raw |= static_cast<uint32_t>(buf[i]) << (8 * i);
+  }
+  if (is_signed && len < 4) {
+    // Sign-extend from the top bit of the value's width.
+    const uint32_t sign_bit = 1u << (8 * len - 1);
+    if (raw & sign_bit) {
+      raw |= ~((1u << (8 * len)) - 1);
+    }
+  }
+  out = static_cast<int32_t>(raw);
+  stats_.reads_ok++;
+  return true;
+}
+
+bool DxlBus::writeRegister(uint8_t id, TableKind table, uint16_t addr,
+                           uint8_t len, int32_t value) {
+  if (!ready_ || (len != 1 && len != 2 && len != 4)) {
+    return false;
+  }
+  selectProtocol(table);
+  const uint32_t raw = static_cast<uint32_t>(value);
+  uint8_t buf[4];
+  for (uint8_t i = 0; i < len; ++i) {
+    buf[i] = static_cast<uint8_t>((raw >> (8 * i)) & 0xFF);
+  }
+  if (!dxl_.write(id, addr, buf, len)) {
+    stats_.writes_fail++;
+    stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+    return false;
+  }
+  stats_.writes_ok++;
+  return true;
+}
+
+bool DxlBus::setTorqueOne(uint8_t id, TableKind table, bool on) {
+  if (!ready_) {
+    return false;
+  }
+  selectProtocol(table);
+  const bool ok = on ? dxl_.torqueOn(id) : dxl_.torqueOff(id);
+  if (!ok) {
+    stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+  }
+  return ok;
+}
+
+bool DxlBus::torqueState(uint8_t id, TableKind table, bool& on) {
+  if (!ready_) {
+    return false;
+  }
+  selectProtocol(table);
+  on = dxl_.getTorqueEnableStat(id);
+  const uint8_t err = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+  if (err != 0) {
+    stats_.last_error = err;
+    return false;
+  }
+  return true;
+}
+
 }  // namespace dxl
