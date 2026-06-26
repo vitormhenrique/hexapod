@@ -191,6 +191,30 @@
       }
     ]
   },
+  "feature": {
+    "cases": [
+      {
+        "name": "feature_get",
+        "request": "0002a5020102390201010101010101032c2900"
+      },
+      {
+        "name": "feature_set_enable",
+        "request": "0002a50201023a0202010101010202010401891000"
+      },
+      {
+        "name": "feature_set_disable",
+        "request": "0002a50201023a02030101010102020202038f0900"
+      },
+      {
+        "name": "feature_get_reasons",
+        "request": "0002a50201023b02040101010101010318bf00"
+      },
+      {
+        "name": "feature_reset_defaults",
+        "request": "0002a50201023c02050101010101010331e400"
+      }
+    ]
+  },
   "maintenance": {
     "cases": [
       {

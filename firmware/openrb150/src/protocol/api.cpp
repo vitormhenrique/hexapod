@@ -3,6 +3,7 @@
 #include "../config/config_api.h"
 #include "control_api.h"
 #include "dxl_job_api.h"
+#include "feature_api.h"
 #include "framing.h"
 #include "maintenance_api.h"
 #include "maintenance_target_api.h"
@@ -57,7 +58,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      uint8_t* out, size_t out_cap, config::ConfigApi* cfg,
                      SubscriptionManager* tel, ControlApi* ctrl,
                      MotionApi* motion, MaintenanceApi* maint,
-                     MaintTargetApi* maint_target, DxlJobApi* dxl_jobs) {
+                     MaintTargetApi* maint_target, DxlJobApi* dxl_jobs,
+                     FeatureApi* features) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -163,6 +165,20 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                            &mot_len, &mot_flags)) {
           payload_len = mot_len;
           flags = mot_flags;
+          break;
+        }
+      }
+      // Delegate the feature flag group (FEATURE_GET/SET/GET_REASONS/
+      // RESET_DEFAULTS) to the FeatureApi when present.
+      if (features != nullptr && req.msg_id >= kFeatureMsgFirst &&
+          req.msg_id <= kFeatureMsgLast) {
+        uint16_t feat_len = 0;
+        uint8_t feat_flags = 0;
+        if (features->handle(req.msg_id, req_payload,
+                             static_cast<uint16_t>(req_len), payload,
+                             kMaxPayload, &feat_len, &feat_flags)) {
+          payload_len = feat_len;
+          flags = feat_flags;
           break;
         }
       }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 from .framing import Header, MsgType, decode_frame_body, encode_frame
 
@@ -44,6 +44,12 @@ MSG_SET_GAIT_PARAMS = 0x35
 MSG_SET_BODY_TWIST = 0x36
 MSG_SET_BODY_POSE = 0x37
 MSG_STOP_MOTION = 0x38
+
+# Feature flag command group (mirrors src/protocol/feature_api.h, 0x39..0x3C).
+MSG_FEATURE_GET = 0x39
+MSG_FEATURE_SET = 0x3A
+MSG_FEATURE_GET_REASONS = 0x3B
+MSG_FEATURE_RESET_DEFAULTS = 0x3C
 
 # Maintenance command group (mirrors src/protocol/maintenance_api.h, 0x50..0x5F).
 MSG_ENTER_MAINTENANCE = 0x50
@@ -92,6 +98,28 @@ GAIT_CRAWL = 5
 MOTION_OK = 0
 MOTION_REJECTED = 1
 MOTION_BAD_REQUEST = 2
+
+# Feature ids (mirror protocol::Feature; wire-stable, append-only).
+FEATURE_FOOT_CONTACT = 0
+FEATURE_TERRAIN_LEVELING = 1
+FEATURE_SENSOR_POLLING = 2
+FEATURE_JETSON_CONTROL = 3
+FEATURE_PASSIVE_POSE = 4
+FEATURE_COUNT = 5
+
+# Feature unavailability reason byte (mirrors protocol::FeatureReason).
+FEATURE_REASON_NONE = 0
+FEATURE_REASON_HARDWARE_MISSING = 1
+FEATURE_REASON_NOT_CALIBRATED = 2
+FEATURE_REASON_UNSAFE_STATE = 3
+FEATURE_REASON_STALE_DATA = 4
+FEATURE_REASON_DEPENDENCY_OFF = 5
+FEATURE_REASON_NOT_IMPLEMENTED = 6
+
+# Feature response result byte (mirrors protocol::FeatureResult).
+FEATURE_OK = 0
+FEATURE_REJECTED = 1
+FEATURE_BAD_REQUEST = 2
 
 # Maintenance response result byte (mirrors MaintResult).
 MAINT_OK = 0
@@ -503,6 +531,161 @@ def parse_motion_result(payload: bytes) -> MotionResultMsg:
     if len(payload) >= 3:
         return MotionResultMsg(payload[0], payload[1], bool(payload[2]))
     return MotionResultMsg(payload[0] if payload else MOTION_BAD_REQUEST, 0, False)
+
+
+# --- Feature flag commands ------------------------------------------------
+
+
+def build_feature_get(seq: int = 0) -> bytes:
+    """Build a FEATURE_GET command. The response lists every feature's
+    [id, available, enabled, reason].
+    """
+    return build_command(MSG_FEATURE_GET, seq=seq)
+
+
+def build_feature_set(feature: int, enable: bool, seq: int = 0) -> bytes:
+    """Build a FEATURE_SET command. Enabling a feature the firmware reports as
+    unavailable returns FEATURE_REJECTED with the reason echoed; disabling is
+    always honored.
+    """
+    payload = bytes([feature & 0xFF, 1 if enable else 0])
+    return build_command(MSG_FEATURE_SET, seq=seq, payload=payload)
+
+
+def build_feature_get_reasons(seq: int = 0) -> bytes:
+    """Build a FEATURE_GET_REASONS command. The response lists every feature's
+    [id, reason].
+    """
+    return build_command(MSG_FEATURE_GET_REASONS, seq=seq)
+
+
+def build_feature_reset_defaults(seq: int = 0) -> bytes:
+    """Build a FEATURE_RESET_DEFAULTS command restoring the compiled enable
+    set. The response carries the full feature state list.
+    """
+    return build_command(MSG_FEATURE_RESET_DEFAULTS, seq=seq)
+
+
+@dataclass
+class FeatureState:
+    feature: int
+    available: bool
+    enabled: bool
+    reason: int
+
+
+@dataclass
+class FeatureList:
+    state: int
+    features: List[FeatureState]
+
+    def get(self, feature: int) -> Optional[FeatureState]:
+        for f in self.features:
+            if f.feature == feature:
+                return f
+        return None
+
+
+def parse_feature_list(payload: bytes) -> FeatureList:
+    """Decode a FEATURE_GET / FEATURE_RESET_DEFAULTS state list.
+
+    FEATURE_GET response:            [state, count, {id, available, enabled,
+                                      reason} x count]
+    FEATURE_RESET_DEFAULTS response: [result, state, count, {id, available,
+                                      enabled, reason} x count]
+    The leading result byte of RESET is skipped by detecting the layout from
+    the count field's position.
+    """
+    if len(payload) < 2:
+        return FeatureList(0, [])
+    # RESET_DEFAULTS prefixes a result byte; GET does not. Disambiguate by
+    # checking whether the records fit from offset 2 (GET) or 3 (RESET).
+    for header in (2, 3):
+        if len(payload) < header:
+            continue
+        count = payload[header - 1]
+        if len(payload) == header + 4 * count:
+            state = payload[header - 2] if header == 3 else payload[0]
+            feats = []
+            off = header
+            for _ in range(count):
+                feats.append(
+                    FeatureState(
+                        payload[off],
+                        bool(payload[off + 1]),
+                        bool(payload[off + 2]),
+                        payload[off + 3],
+                    )
+                )
+                off += 4
+            return FeatureList(state, feats)
+    return FeatureList(payload[0], [])
+
+
+@dataclass
+class FeatureReasonEntry:
+    feature: int
+    reason: int
+
+
+@dataclass
+class FeatureReasons:
+    state: int
+    reasons: List[FeatureReasonEntry]
+
+
+def parse_feature_reasons(payload: bytes) -> FeatureReasons:
+    """Decode a FEATURE_GET_REASONS response ([state, count, {id, reason} x
+    count]).
+    """
+    if len(payload) < 2:
+        return FeatureReasons(0, [])
+    state = payload[0]
+    count = payload[1]
+    out = []
+    off = 2
+    for _ in range(count):
+        if off + 2 > len(payload):
+            break
+        out.append(FeatureReasonEntry(payload[off], payload[off + 1]))
+        off += 2
+    return FeatureReasons(state, out)
+
+
+@dataclass
+class FeatureSetResult:
+    result: int
+    state: int
+    feature: int
+    available: bool
+    enabled: bool
+    reason: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == FEATURE_OK
+
+    @property
+    def rejected(self) -> bool:
+        return self.result == FEATURE_REJECTED
+
+
+def parse_feature_set_result(payload: bytes) -> FeatureSetResult:
+    """Decode a FEATURE_SET response ([result, state, id, available, enabled,
+    reason]). A 1-byte payload is a malformed-request error.
+    """
+    if len(payload) >= 6:
+        return FeatureSetResult(
+            payload[0],
+            payload[1],
+            payload[2],
+            bool(payload[3]),
+            bool(payload[4]),
+            payload[5],
+        )
+    return FeatureSetResult(
+        payload[0] if payload else FEATURE_BAD_REQUEST, 0, 0, False, False, 0
+    )
 
 
 # --- Maintenance lock commands --------------------------------------------

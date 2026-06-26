@@ -60,6 +60,14 @@ namespace protocol {
 class MotionApi;
 }
 
+// Forward declaration: the feature flag command group (FEATURE_GET / FEATURE_SET
+// / FEATURE_GET_REASONS / FEATURE_RESET_DEFAULTS) is handled by a portable
+// FeatureApi in protocol/feature_api.h. handleRequest delegates that msg-id
+// range to it when a non-null instance is supplied.
+namespace protocol {
+class FeatureApi;
+}
+
 // Forward declaration: the maintenance lock command group (ENTER/EXIT/HEARTBEAT
 // maintenance) is handled by a portable MaintenanceApi in
 // protocol/maintenance_api.h. handleRequest delegates that msg-id range to it
@@ -125,6 +133,10 @@ constexpr uint8_t kControlMsgLast = 0x33;
 constexpr uint8_t kMotionMsgFirst = 0x34;
 constexpr uint8_t kMotionMsgLast = 0x38;
 
+// Feature flag command msg-id range, mirrored from protocol::featuremsg.
+constexpr uint8_t kFeatureMsgFirst = 0x39;
+constexpr uint8_t kFeatureMsgLast = 0x3C;
+
 // Maintenance command msg-id range (0x50..0x5F block), from protocol::maintmsg.
 constexpr uint8_t kMaintenanceMsgFirst = 0x50;
 constexpr uint8_t kMaintenanceMsgLast = 0x5F;
@@ -175,7 +187,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      MotionApi* motion = nullptr,
                      MaintenanceApi* maint = nullptr,
                      MaintTargetApi* maint_target = nullptr,
-                     DxlJobApi* dxl_jobs = nullptr);
+                     DxlJobApi* dxl_jobs = nullptr,
+                     FeatureApi* features = nullptr);
 
 }  // namespace api
 }  // namespace protocol

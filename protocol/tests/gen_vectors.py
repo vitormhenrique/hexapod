@@ -147,6 +147,7 @@ def build() -> dict:
         "api": build_api(),
         "control": build_control(),
         "motion": build_motion(),
+        "feature": build_feature(),
         "maintenance": build_maintenance(),
         "dxl": build_dxl(),
     }
@@ -209,6 +210,42 @@ def build_motion() -> dict:
         {
             "name": "stop_motion",
             "request": api_mod.build_stop_motion(seq=5).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_feature() -> dict:
+    """Deterministic request frames for the feature flag command group.
+
+    Responses reflect the live availability/reason the firmware publishes, which
+    is not a static fixture, so only the request encoding is pinned here. The
+    firmware native test (test_feature_api) covers the response behavior.
+    """
+    cases = [
+        {
+            "name": "feature_get",
+            "request": api_mod.build_feature_get(seq=1).hex(),
+        },
+        {
+            "name": "feature_set_enable",
+            "request": api_mod.build_feature_set(
+                api_mod.FEATURE_FOOT_CONTACT, True, seq=2
+            ).hex(),
+        },
+        {
+            "name": "feature_set_disable",
+            "request": api_mod.build_feature_set(
+                api_mod.FEATURE_SENSOR_POLLING, False, seq=3
+            ).hex(),
+        },
+        {
+            "name": "feature_get_reasons",
+            "request": api_mod.build_feature_get_reasons(seq=4).hex(),
+        },
+        {
+            "name": "feature_reset_defaults",
+            "request": api_mod.build_feature_reset_defaults(seq=5).hex(),
         },
     ]
     return {"cases": cases}

@@ -236,6 +236,85 @@ def test_parse_motion_result():
     assert bad.result == api.MOTION_BAD_REQUEST and not bad.motion_allowed
 
 
+_FEATURE_BUILDERS = {
+    "feature_get": lambda: api.build_feature_get(seq=1),
+    "feature_set_enable": lambda: api.build_feature_set(
+        api.FEATURE_FOOT_CONTACT, True, seq=2
+    ),
+    "feature_set_disable": lambda: api.build_feature_set(
+        api.FEATURE_SENSOR_POLLING, False, seq=3
+    ),
+    "feature_get_reasons": lambda: api.build_feature_get_reasons(seq=4),
+    "feature_reset_defaults": lambda: api.build_feature_reset_defaults(seq=5),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["feature"]["cases"])
+def test_feature_request_golden(case):
+    # The feature-flag builders must reproduce the golden request bytes.
+    wire = _FEATURE_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_feature_list():
+    # FEATURE_GET layout: [state, count, {id, available, enabled, reason} x count]
+    payload = bytes([2, 2]) + bytes(
+        [api.FEATURE_FOOT_CONTACT, 1, 1, api.FEATURE_REASON_NONE]
+    ) + bytes(
+        [api.FEATURE_TERRAIN_LEVELING, 0, 0, api.FEATURE_REASON_DEPENDENCY_OFF]
+    )
+    fl = api.parse_feature_list(payload)
+    assert fl.state == 2 and len(fl.features) == 2
+    fc = fl.get(api.FEATURE_FOOT_CONTACT)
+    assert fc.available and fc.enabled and fc.reason == api.FEATURE_REASON_NONE
+    tl = fl.get(api.FEATURE_TERRAIN_LEVELING)
+    assert not tl.enabled and tl.reason == api.FEATURE_REASON_DEPENDENCY_OFF
+
+
+def test_parse_feature_list_reset_layout():
+    # FEATURE_RESET_DEFAULTS prefixes a result byte before [state, count, ...].
+    payload = bytes([api.FEATURE_OK, 3, 1]) + bytes(
+        [api.FEATURE_SENSOR_POLLING, 1, 1, api.FEATURE_REASON_NONE]
+    )
+    fl = api.parse_feature_list(payload)
+    assert fl.state == 3 and len(fl.features) == 1
+    sp = fl.get(api.FEATURE_SENSOR_POLLING)
+    assert sp.available and sp.enabled
+
+
+def test_parse_feature_reasons():
+    payload = bytes([4, 2]) + bytes(
+        [api.FEATURE_FOOT_CONTACT, api.FEATURE_REASON_HARDWARE_MISSING]
+    ) + bytes([api.FEATURE_PASSIVE_POSE, api.FEATURE_REASON_NOT_IMPLEMENTED])
+    fr = api.parse_feature_reasons(payload)
+    assert fr.state == 4 and len(fr.reasons) == 2
+    assert fr.reasons[0].feature == api.FEATURE_FOOT_CONTACT
+    assert fr.reasons[0].reason == api.FEATURE_REASON_HARDWARE_MISSING
+
+
+def test_parse_feature_set_result():
+    ok = api.parse_feature_set_result(
+        bytes([api.FEATURE_OK, 2, api.FEATURE_FOOT_CONTACT, 1, 1, api.FEATURE_REASON_NONE])
+    )
+    assert ok.ok and ok.feature == api.FEATURE_FOOT_CONTACT and ok.enabled
+    rej = api.parse_feature_set_result(
+        bytes(
+            [
+                api.FEATURE_REJECTED,
+                4,
+                api.FEATURE_TERRAIN_LEVELING,
+                0,
+                0,
+                api.FEATURE_REASON_HARDWARE_MISSING,
+            ]
+        )
+    )
+    assert rej.rejected and not rej.available
+    assert rej.reason == api.FEATURE_REASON_HARDWARE_MISSING
+    bad = api.parse_feature_set_result(bytes([api.FEATURE_BAD_REQUEST]))
+    assert bad.result == api.FEATURE_BAD_REQUEST and not bad.enabled
+
+
 _MAINT_BUILDERS = {
     "enter_maintenance": lambda: api.build_enter_maintenance(seq=1),
     "exit_maintenance": lambda: api.build_exit_maintenance(0x01020304, seq=2),

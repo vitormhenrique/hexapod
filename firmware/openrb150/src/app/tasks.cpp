@@ -12,6 +12,7 @@
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
 #include "../protocol/dxl_job_api.h"
+#include "../protocol/feature_api.h"
 #include "../protocol/frame_reader.h"
 #include "../protocol/framing.h"
 #include "../protocol/maintenance_api.h"
@@ -107,6 +108,13 @@ protocol::MaintTargetApi g_maintTargetApi;
 // enqueues a gated job here; dxlTask is the sole executor (it owns the bus) and
 // writes the serialized result back for the host to poll via DXL_GET_RESULT.
 protocol::DxlJobApi g_dxlJobApi;
+
+// Host feature-flag command surface (FEATURE_GET/SET/GET_REASONS/RESET). Stores
+// the host's desired enable set; controlTask publishes per-feature availability
+// each cycle and consumes the desired set to drive the real toggles. Effective
+// enabled = desired && available, so the firmware can auto-disable a feature
+// (e.g. when its hardware disappears) without losing the host's intent.
+protocol::FeatureApi g_featureApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -316,6 +324,65 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
   return o;
 }
 
+// Publish per-feature availability to the FeatureApi and drive the real runtime
+// toggles from the host's desired set. Effective enabled = desired && available,
+// so a feature whose hardware/state disappears is auto-disabled while the host's
+// intent is preserved (AGENTS.md 1.3). Runs each control cycle.
+//
+// Availability today:
+//   * SensorPolling   - available when the I2C mux is present; the one fully
+//                        wired runtime toggle (drives g_sensorPollingEnabled).
+//   * FootContact     - needs mux + >=1 present foot sensor + polling on; the
+//                        gait-engine consumption lands in ubs.5, so it reports
+//                        available for streaming but is not yet fed to the gait.
+//   * TerrainLeveling - depends on FootContact (ubs.5); reports DependencyOff.
+//   * PassivePose     - torque-off pose streaming lands in ubs.6; NotImplemented.
+//   * JetsonControl   - Jetson bridge lands later; NotImplemented.
+void updateFeatureFlags(uint32_t /*now_ms*/) {
+  using protocol::Feature;
+  using protocol::FeatureReason;
+
+  const bool mux = g_i2cTopology.mux_present;
+  const bool any_foot = g_footPresentMask != 0;
+
+  // SensorPolling: real toggle, available whenever the mux is present.
+  g_featureApi.setAvailability(
+      Feature::SensorPolling, mux,
+      mux ? FeatureReason::None : FeatureReason::HardwareMissing);
+
+  // FootContact: estimator can run when sensors are present and polled.
+  const bool polling = g_featureApi.effectiveEnabled(Feature::SensorPolling);
+  FeatureReason contact_reason = FeatureReason::None;
+  bool contact_avail = true;
+  if (!mux || !any_foot) {
+    contact_avail = false;
+    contact_reason = FeatureReason::HardwareMissing;
+  } else if (!polling) {
+    contact_avail = false;
+    contact_reason = FeatureReason::DependencyOff;
+  }
+  g_featureApi.setAvailability(Feature::FootContact, contact_avail,
+                               contact_reason);
+
+  // TerrainLeveling: needs FootContact active (gait consumption is ubs.5).
+  const bool contact_on = g_featureApi.effectiveEnabled(Feature::FootContact);
+  g_featureApi.setAvailability(
+      Feature::TerrainLeveling, false,
+      contact_on ? FeatureReason::NotImplemented : FeatureReason::DependencyOff);
+
+  // PassivePose / JetsonControl: not yet wired in this build.
+  g_featureApi.setAvailability(Feature::PassivePose, false,
+                               FeatureReason::NotImplemented);
+  g_featureApi.setAvailability(Feature::JetsonControl, false,
+                               FeatureReason::NotImplemented);
+
+  g_featureApi.setLiveState(g_safetyState);
+
+  // Drive the one real toggle: raw foot-sensor polling.
+  g_sensorPollingEnabled =
+      g_featureApi.effectiveEnabled(Feature::SensorPolling);
+}
+
 // --- Task bodies ----------------------------------------------------------
 // Each task runs a fixed-period loop with vTaskDelayUntil so timing does not
 // drift with body execution time. Bodies are stubs for the skeleton.
@@ -405,6 +472,12 @@ void controlTask(void*) {
     // Same gate for the DXL maintenance command queue: scans/pings/torque/
     // profile jobs are only accepted on the bench (MacMaintenance + lock).
     g_dxlJobApi.setLiveState(g_safetyState, g_maintApi.lockHeld(now_ms));
+
+    // --- Feature flags: publish availability and consume host intent --------
+    // Reflect what the current hardware/state permits so FEATURE_SET can only
+    // be honoured when it is safe (AGENTS.md 1.3). Engines that are not yet
+    // wired report NotImplemented so the host gets an honest reason.
+    updateFeatureFlags(now_ms);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
 }
@@ -829,7 +902,7 @@ void apiTask(void*) {
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
           &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
-          &g_maintTargetApi, &g_dxlJobApi);
+          &g_maintTargetApi, &g_dxlJobApi, &g_featureApi);
       if (n > 0) {
         Serial.write(out, n);
       }
