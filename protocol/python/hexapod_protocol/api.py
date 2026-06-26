@@ -32,6 +32,17 @@ MSG_CFG_VALIDATE = 0x23
 MSG_CFG_COMMIT = 0x24
 MSG_CFG_RESET_DEFAULTS = 0x25
 
+# Config validate/commit result byte (mirrors config::CfgResult).
+CFG_OK = 0
+CFG_VALIDATION_FAILED = 1
+CFG_VOLATILE = 2
+CFG_COMMIT_FAILED = 3
+
+# Config error byte returned with the protocol error flag (mirrors CfgError).
+CFG_ERR_NONE = 0
+CFG_ERR_BAD_REQUEST = 1
+CFG_ERR_BAD_RANGE = 2
+
 # Safety control command group (mirrors src/protocol/control_api.h, 0x30..0x33).
 MSG_ESTOP = 0x30
 MSG_CLEAR_FAULT = 0x31
@@ -291,6 +302,29 @@ def parse_response(wire: bytes) -> tuple[Header, bytes]:
     if not wire or wire[0] != 0x00 or wire[-1] != 0x00:
         raise ValueError("frame missing 0x00 delimiters")
     return decode_frame_body(wire[1:-1])
+
+
+# --- Session commands ------------------------------------------------------
+
+
+def build_hello(seq: int = 0) -> bytes:
+    """Build a HELLO command (handshake; firmware replies with HelloInfo)."""
+    return build_command(MSG_HELLO, seq=seq)
+
+
+def build_heartbeat(seq: int = 0) -> bytes:
+    """Build a HEARTBEAT command (liveness ping; replies uptime + state)."""
+    return build_command(MSG_HEARTBEAT, seq=seq)
+
+
+def build_get_status(seq: int = 0) -> bytes:
+    """Build a GET_STATUS command (replies with StatusInfo)."""
+    return build_command(MSG_GET_STATUS, seq=seq)
+
+
+def build_get_capabilities(seq: int = 0) -> bytes:
+    """Build a GET_CAPABILITIES command (replies with Capabilities)."""
+    return build_command(MSG_GET_CAPABILITIES, seq=seq)
 
 
 def parse_hello(payload: bytes) -> HelloInfo:
@@ -1596,3 +1630,75 @@ def parse_dxl_result(payload: bytes) -> DxlJobResult:
         data = bytes(payload[3 : 3 + n])
         return DxlJobResult(payload[0], payload[1], data)
     return DxlJobResult(DXL_SLOT_EMPTY, DXL_CODE_OK, b"")
+
+
+# --- Config commands -------------------------------------------------------
+
+
+def build_cfg_get_summary(seq: int = 0) -> bytes:
+    """Build a CFG_GET_SUMMARY command (replies with a ConfigSummary)."""
+    return build_command(MSG_CFG_GET_SUMMARY, seq=seq)
+
+
+def build_cfg_get_block(offset: int, length: int, seq: int = 0) -> bytes:
+    """Build a CFG_GET_BLOCK command for a window of the staged payload."""
+    return build_command(
+        MSG_CFG_GET_BLOCK, seq=seq, payload=struct.pack("<HH", offset, length)
+    )
+
+
+def build_cfg_set_block(offset: int, data: bytes, seq: int = 0) -> bytes:
+    """Build a CFG_SET_BLOCK command writing ``data`` into the staging buffer."""
+    return build_command(
+        MSG_CFG_SET_BLOCK,
+        seq=seq,
+        payload=struct.pack("<HH", offset, len(data)) + bytes(data),
+    )
+
+
+def build_cfg_validate(seq: int = 0) -> bytes:
+    """Build a CFG_VALIDATE command (validate the staged config)."""
+    return build_command(MSG_CFG_VALIDATE, seq=seq)
+
+
+def build_cfg_commit(seq: int = 0) -> bytes:
+    """Build a CFG_COMMIT command (persist the staged config to EEPROM)."""
+    return build_command(MSG_CFG_COMMIT, seq=seq)
+
+
+def build_cfg_reset_defaults(seq: int = 0) -> bytes:
+    """Build a CFG_RESET_DEFAULTS command (reload compiled defaults)."""
+    return build_command(MSG_CFG_RESET_DEFAULTS, seq=seq)
+
+
+@dataclass
+class CfgBlockAck:
+    """Decoded CFG_SET_BLOCK ack ([offset u16, len u16])."""
+
+    offset: int
+    length: int
+
+
+def parse_cfg_block_ack(payload: bytes) -> CfgBlockAck:
+    """Decode a CFG_SET_BLOCK ack payload ([offset u16, len u16])."""
+    if len(payload) >= 4:
+        offset, length = struct.unpack("<HH", payload[:4])
+        return CfgBlockAck(offset, length)
+    return CfgBlockAck(0, 0)
+
+
+@dataclass
+class CfgResult:
+    """Decoded CFG_VALIDATE / CFG_COMMIT / CFG_RESET_DEFAULTS response."""
+
+    result: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == CFG_OK
+
+
+def parse_cfg_result(payload: bytes) -> CfgResult:
+    """Decode a single-byte config result payload (validate/commit/reset)."""
+    return CfgResult(payload[0] if payload else CFG_VALIDATION_FAILED)
+

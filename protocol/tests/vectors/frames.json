@@ -588,5 +588,35 @@
         "clamped_high": false
       }
     ]
+  },
+  "config_cmds": {
+    "cases": [
+      {
+        "name": "cfg_get_summary",
+        "request": "0002a502010220020101010101010103b49800"
+      },
+      {
+        "name": "cfg_get_block",
+        "request": "0002a502010221020201010101020402100220037d0400"
+      },
+      {
+        "name": "cfg_set_block",
+        "request": "0002a502010222020301010101020c02100208010a01020304050607435c00",
+        "offset": 16,
+        "data": "0001020304050607"
+      },
+      {
+        "name": "cfg_validate",
+        "request": "0002a502010223020401010101010103c56100"
+      },
+      {
+        "name": "cfg_commit",
+        "request": "0002a502010224020501010101010103ec3a00"
+      },
+      {
+        "name": "cfg_reset_defaults",
+        "request": "0002a502010225020601010101010103dc9d00"
+      }
+    ]
   }
 }

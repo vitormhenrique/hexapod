@@ -155,8 +155,8 @@ def build() -> dict:
         "passive": build_passive(),
         "telemetry": build_telemetry(),
         "config": build_config(),
+        "config_cmds": build_config_cmds(),
     }
-
 def build_control() -> dict:
     """Deterministic request frames for the safety control command group.
 
@@ -489,6 +489,44 @@ def build_passive() -> dict:
         {
             "name": "passive_zero_reference",
             "request": api_mod.build_passive_zero_reference(seq=4).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_config_cmds() -> dict:
+    """Deterministic request frames for the config command group
+    (CFG_GET_SUMMARY / GET_BLOCK / SET_BLOCK / VALIDATE / COMMIT /
+    RESET_DEFAULTS). Responses depend on live staged state (firmware
+    test_config_api covers behavior), so only request encoding is pinned.
+    """
+    block_data = bytes(range(8))
+    cases = [
+        {
+            "name": "cfg_get_summary",
+            "request": api_mod.build_cfg_get_summary(seq=1).hex(),
+        },
+        {
+            "name": "cfg_get_block",
+            "request": api_mod.build_cfg_get_block(16, 32, seq=2).hex(),
+        },
+        {
+            "name": "cfg_set_block",
+            "request": api_mod.build_cfg_set_block(16, block_data, seq=3).hex(),
+            "offset": 16,
+            "data": block_data.hex(),
+        },
+        {
+            "name": "cfg_validate",
+            "request": api_mod.build_cfg_validate(seq=4).hex(),
+        },
+        {
+            "name": "cfg_commit",
+            "request": api_mod.build_cfg_commit(seq=5).hex(),
+        },
+        {
+            "name": "cfg_reset_defaults",
+            "request": api_mod.build_cfg_reset_defaults(seq=6).hex(),
         },
     ]
     return {"cases": cases}

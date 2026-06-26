@@ -185,6 +185,66 @@ def test_api_unknown_is_error():
     assert payload == bytes([api.ERR_UNKNOWN_MSG])
 
 
+_SESSION_BUILDERS = {
+    "hello": api.build_hello,
+    "heartbeat": api.build_heartbeat,
+    "get_status": api.build_get_status,
+    "get_capabilities": api.build_get_capabilities,
+}
+
+
+@pytest.mark.parametrize("name", list(_SESSION_BUILDERS))
+def test_session_builders_match_golden(name):
+    # Dedicated session builders must reproduce the golden request frames.
+    case = next(c for c in VECTORS["api"]["cases"] if c["name"] == name)
+    wire = _SESSION_BUILDERS[name](seq=case["seq"])
+    assert wire.hex() == case["request"]
+
+
+_CONFIG_CMD_BUILDERS = {
+    "cfg_get_summary": lambda c: api.build_cfg_get_summary(seq=1),
+    "cfg_get_block": lambda c: api.build_cfg_get_block(16, 32, seq=2),
+    "cfg_set_block": lambda c: api.build_cfg_set_block(
+        c["offset"], bytes.fromhex(c["data"]), seq=3
+    ),
+    "cfg_validate": lambda c: api.build_cfg_validate(seq=4),
+    "cfg_commit": lambda c: api.build_cfg_commit(seq=5),
+    "cfg_reset_defaults": lambda c: api.build_cfg_reset_defaults(seq=6),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["config_cmds"]["cases"])
+def test_config_command_request_golden(case):
+    # The config command builders must reproduce the golden request bytes.
+    wire = _CONFIG_CMD_BUILDERS[case["name"]](case)
+    assert wire.hex() == case["request"]
+
+
+def test_config_command_builder_decode_roundtrip():
+    # A SET_BLOCK request decodes back to the same offset/len/data via the
+    # firmware-mirrored layout ([offset u16, len u16, data]).
+    data = bytes(range(8))
+    wire = api.build_cfg_set_block(16, data, seq=7)
+    header, payload = api.parse_response(wire)
+    assert header.msg_id == api.MSG_CFG_SET_BLOCK
+    off, length = struct.unpack("<HH", payload[:4])
+    assert off == 16 and length == len(data)
+    assert payload[4:] == data
+    # GET_BLOCK request carries just the window.
+    gwire = api.build_cfg_get_block(64, 96, seq=8)
+    _, gpayload = api.parse_response(gwire)
+    assert struct.unpack("<HH", gpayload[:4]) == (64, 96)
+
+
+def test_parse_cfg_result_and_block_ack():
+    assert api.parse_cfg_result(bytes([api.CFG_OK])).ok is True
+    assert api.parse_cfg_result(bytes([api.CFG_VOLATILE])).ok is False
+    assert api.parse_cfg_result(b"").ok is False  # defensive default
+    ack = api.parse_cfg_block_ack(struct.pack("<HH", 12, 34))
+    assert ack.offset == 12 and ack.length == 34
+    assert api.parse_cfg_block_ack(b"\x01") == api.CfgBlockAck(0, 0)
+
+
 _CONTROL_BUILDERS = {
     "estop": lambda: api.build_estop(seq=1),
     "clear_fault": lambda: api.build_clear_fault(seq=2),
