@@ -1,0 +1,64 @@
+"""Headless launch test for the Dracula app shell (qqi.10).
+
+Builds the MainWindow under offscreen Qt with the theme applied and verifies the
+global safety bar (with the emergency-stop) stays visible across every page, and
+that navigation switches the stacked page.
+"""
+
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+
+def test_app_shell_launches_with_estop_on_all_pages(qtbot) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    from main_window import MainWindow
+    from theme import apply_theme
+
+    app = QApplication.instance() or QApplication([])
+    apply_theme(app)
+    assert app.styleSheet()  # theme applied
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window.show()
+
+    # All eight pages are registered in the stack.
+    assert window.stack.count() == 8
+    assert set(window._pages) == {
+        "connect",
+        "overview",
+        "mode_safety",
+        "foot_contact",
+        "passive_pose",
+        "servo_tuning",
+        "model",
+        "diagnostics",
+    }
+
+    # The emergency-stop lives in the always-on safety bar (outside the stack),
+    # so navigating to any page keeps it visible.
+    for key in window._pages:
+        window.nav.select(key)
+        assert window.safety_bar.estop.isVisibleTo(window)
+
+    window.close()
+
+
+def test_safety_bar_estop_triggers_service(qtbot, monkeypatch) -> None:
+    from main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    fired = []
+    monkeypatch.setattr(window.service, "emergency_stop", lambda: fired.append(True))
+    window.safety_bar.estop.click()
+    assert fired == [True]

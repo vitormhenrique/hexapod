@@ -1,0 +1,104 @@
+"""Headless construction + behavior tests for the core companion pages (qqi.9).
+
+Each page must build with a disconnected :class:`ConnectionService` under
+offscreen Qt and react to the service signals it subscribes to.
+"""
+
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+from hexapod_protocol import api
+from hexapod_protocol import telemetry as tlm
+
+pytest.importorskip("PySide6")
+
+
+def _service():
+    from services import ConnectionService
+
+    return ConnectionService()
+
+
+def test_connect_page_builds_and_shows_firmware(qtbot) -> None:
+    from ui.pages import ConnectPage
+
+    service = _service()
+    page = ConnectPage(service)
+    qtbot.addWidget(page)
+    # refresh_ports ran during build; combo has at least the placeholder.
+    assert page.port_combo.count() >= 1
+
+    hello = api.HelloInfo(0, 1, 0, 2, 3, "HexNav")
+    service.hello_received.emit(hello)
+    assert page.device_lbl.text() == "HexNav"
+    assert page.fw_lbl.text() == "0.2.3"
+
+    caps = api.Capabilities(0, 1, 0, 2, 3, 0x7, "HexNav")
+    service.capabilities_received.emit(caps)
+    assert page.caps_lbl.text() == "0x00000007"
+
+    # Connected toggles the button enablement.
+    service.connected.emit(True)
+    assert not page.connect_btn.isEnabled()
+    assert page.disconnect_btn.isEnabled()
+
+
+def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
+    from ui.pages import OverviewPage
+
+    service = _service()
+    page = OverviewPage(service)
+    qtbot.addWidget(page)
+
+    st = api.StatusInfo(
+        uptime_ms=5000,
+        state=5,
+        dxl_power=True,
+        dxl_power_control=True,
+        battery_mv=11800,
+        watchdog_missed=0,
+    )
+    service.status_received.emit(st)
+    assert "11800 mV" in page.badges["battery"]._value.text()
+    assert page.badges["uptime"]._value.text() == "5 s"
+
+    cs = tlm.ControlStateTelemetry(
+        command_source=1,
+        motion_authorized=True,
+        kill_active=False,
+        state=5,
+        fault_reason=0,
+        motion_gate=True,
+    )
+    service.telemetry.emit(int(tlm.StreamId.CONTROL_STATE), cs)
+    assert page.badges["source"]._value.text() == "RC"
+    assert page.badges["gate"]._value.text() == "OPEN"
+
+
+def test_mode_safety_page_constructs(qtbot) -> None:
+    from ui.pages import ModeSafetyPage
+
+    service = _service()
+    page = ModeSafetyPage(service)
+    qtbot.addWidget(page)
+    assert page is not None
+
+
+def test_diagnostics_page_appends_feed(qtbot) -> None:
+    from ui.pages import DiagnosticsPage
+
+    service = _service()
+    page = DiagnosticsPage(service)
+    qtbot.addWidget(page)
+
+    health = tlm.HealthTelemetry(1000, 5, 0, 0, 11700)
+    service.telemetry.emit(int(tlm.StreamId.HEALTH), health)
+    service.event.emit("connect", "fw 0.2")
+    text = page.feed.toPlainText()
+    assert "health" in text
+    assert "[connect] fw 0.2" in text
