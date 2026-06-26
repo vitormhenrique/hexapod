@@ -148,6 +148,7 @@ def build() -> dict:
         "control": build_control(),
         "motion": build_motion(),
         "feature": build_feature(),
+        "sensor": build_sensor(),
         "maintenance": build_maintenance(),
         "dxl": build_dxl(),
     }
@@ -246,6 +247,46 @@ def build_feature() -> dict:
         {
             "name": "feature_reset_defaults",
             "request": api_mod.build_feature_reset_defaults(seq=5).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_sensor() -> dict:
+    """Deterministic request frames for the sensor / contact / leveling group
+    (ubs.5.1 subset: CONTACT_*/LEVELING_* control).
+
+    Responses reflect the live feature availability/reason the firmware
+    publishes, which is not a static fixture, so only the request encoding is
+    pinned here. The firmware native test (test_sensor_api) covers the response
+    behavior.
+    """
+    cases = [
+        {
+            "name": "contact_enable",
+            "request": api_mod.build_contact_enable(seq=1).hex(),
+        },
+        {
+            "name": "contact_disable",
+            "request": api_mod.build_contact_disable(seq=2).hex(),
+        },
+        {
+            "name": "contact_set_thresholds",
+            "request": api_mod.build_contact_set_thresholds(
+                3, 1200, 800, 1500, seq=3
+            ).hex(),
+        },
+        {
+            "name": "leveling_enable",
+            "request": api_mod.build_leveling_enable(seq=4).hex(),
+        },
+        {
+            "name": "leveling_disable",
+            "request": api_mod.build_leveling_disable(seq=5).hex(),
+        },
+        {
+            "name": "leveling_set_params",
+            "request": api_mod.build_leveling_set_params(5000, 200, 64, seq=6).hex(),
         },
     ]
     return {"cases": cases}

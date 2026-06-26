@@ -18,6 +18,7 @@
 #include "../protocol/maintenance_api.h"
 #include "../protocol/maintenance_target_api.h"
 #include "../protocol/motion_api.h"
+#include "../protocol/sensor_api.h"
 #include "../protocol/telemetry.h"
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
@@ -115,6 +116,12 @@ protocol::DxlJobApi g_dxlJobApi;
 // enabled = desired && available, so the firmware can auto-disable a feature
 // (e.g. when its hardware disappears) without losing the host's intent.
 protocol::FeatureApi g_featureApi;
+
+// Host sensor / contact / leveling command surface (CONTACT_*/LEVELING_*/
+// I2C_*/SENSOR_*). Enable/disable route through g_featureApi (single source of
+// truth); CONTACT_SET_THRESHOLDS stages per-foot thresholds consumed by i2cTask
+// (the contact-estimator owner). Wired to g_featureApi once at apiTask startup.
+protocol::SensorApi g_sensorApi;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -858,6 +865,9 @@ void apiTask(void*) {
   // adopted; the shadow object is stable, so this pointer stays valid across
   // adopt/commit) so maintenance targets can run IK + the servo map.
   g_maintTargetApi.setConfig(&g_configApi.config());
+  // Route CONTACT/LEVELING enable/disable through the shared feature surface so
+  // there is one desired-feature set (AGENTS.md 1.3).
+  g_sensorApi.setFeatureApi(&g_featureApi);
 #ifdef HEXAPOD_ENABLE_DXL_RAW_REGISTER
   // Expert-only: raw DXL register read/write (DXL_READ_REGISTER /
   // DXL_WRITE_REGISTER). Off by default; build with this macro defined to
@@ -902,7 +912,7 @@ void apiTask(void*) {
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
           &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
-          &g_maintTargetApi, &g_dxlJobApi, &g_featureApi);
+          &g_maintTargetApi, &g_dxlJobApi, &g_featureApi, &g_sensorApi);
       if (n > 0) {
         Serial.write(out, n);
       }
@@ -1008,6 +1018,20 @@ void i2cTask(void*) {
       xSemaphoreGive(g_commitMutex);
       if (ok) g_configVolatile = false;  // a valid slot now exists
       xSemaphoreGive(g_commitDone);
+    }
+
+    // Apply host-staged per-foot contact thresholds (CONTACT_SET_THRESHOLDS).
+    // apiTask only stages them (it cannot touch the estimator); i2cTask owns the
+    // estimator, so it applies the latest set whenever the sequence advances.
+    static uint32_t applied_threshold_seq = 0;
+    const uint32_t want_seq = g_sensorApi.thresholdSeq();
+    if (want_seq != applied_threshold_seq) {
+      const protocol::ContactThresholds& t = g_sensorApi.thresholds();
+      for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+        g_contact.setThresholds(i, t.near_thresh[i], t.touch_thresh[i],
+                                t.load_thresh[i]);
+      }
+      applied_threshold_seq = want_seq;
     }
 
     // Poll one foot sensor per iteration (round-robin) so each pass does bounded

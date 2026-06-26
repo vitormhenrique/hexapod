@@ -315,6 +315,59 @@ def test_parse_feature_set_result():
     assert bad.result == api.FEATURE_BAD_REQUEST and not bad.enabled
 
 
+_SENSOR_BUILDERS = {
+    "contact_enable": lambda: api.build_contact_enable(seq=1),
+    "contact_disable": lambda: api.build_contact_disable(seq=2),
+    "contact_set_thresholds": lambda: api.build_contact_set_thresholds(
+        3, 1200, 800, 1500, seq=3
+    ),
+    "leveling_enable": lambda: api.build_leveling_enable(seq=4),
+    "leveling_disable": lambda: api.build_leveling_disable(seq=5),
+    "leveling_set_params": lambda: api.build_leveling_set_params(5000, 200, 64, seq=6),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["sensor"]["cases"])
+def test_sensor_request_golden(case):
+    # The sensor/contact/leveling builders must reproduce the golden bytes.
+    wire = _SENSOR_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_sensor_feature_result():
+    ok = api.parse_sensor_feature_result(
+        bytes([api.SENSOR_OK, 2, 1, 1, api.FEATURE_REASON_NONE])
+    )
+    assert ok.ok and ok.available and ok.enabled
+    rej = api.parse_sensor_feature_result(
+        bytes([api.SENSOR_REJECTED, 2, 0, 0, api.FEATURE_REASON_HARDWARE_MISSING])
+    )
+    assert rej.rejected and not rej.enabled
+    assert rej.reason == api.FEATURE_REASON_HARDWARE_MISSING
+    bad = api.parse_sensor_feature_result(bytes([api.SENSOR_BAD_REQUEST]))
+    assert bad.result == api.SENSOR_BAD_REQUEST and not bad.enabled
+
+
+def test_parse_contact_threshold_result():
+    ok = api.parse_contact_threshold_result(
+        struct.pack("<BBHHH", api.SENSOR_OK, 3, 1200, 800, 1500)
+    )
+    assert ok.ok and ok.foot == 3
+    assert ok.near == 1200 and ok.touch == 800 and ok.load == 1500
+    bad = api.parse_contact_threshold_result(bytes([api.SENSOR_BAD_REQUEST]))
+    assert bad.result == api.SENSOR_BAD_REQUEST and not bad.ok
+
+
+def test_parse_leveling_params_result():
+    ok = api.parse_leveling_params_result(
+        struct.pack("<BHHH", api.SENSOR_OK, 5000, 200, 64)
+    )
+    assert ok.ok and ok.max_tilt_mdeg == 5000
+    assert ok.rate_mdeg_s == 200 and ok.response_x255 == 64
+    bad = api.parse_leveling_params_result(bytes([api.SENSOR_BAD_REQUEST]))
+    assert bad.result == api.SENSOR_BAD_REQUEST and not bad.ok
+
+
 _MAINT_BUILDERS = {
     "enter_maintenance": lambda: api.build_enter_maintenance(seq=1),
     "exit_maintenance": lambda: api.build_exit_maintenance(0x01020304, seq=2),

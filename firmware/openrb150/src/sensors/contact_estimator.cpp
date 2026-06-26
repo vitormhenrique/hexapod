@@ -37,6 +37,21 @@ void ContactEstimator::configure(const config::FootSensorCal (&cal)[kNumFeet],
   }
 }
 
+void ContactEstimator::setThresholds(uint8_t leg, uint16_t near_thresh,
+                                     uint16_t touch_thresh,
+                                     uint16_t load_thresh) {
+  if (leg >= kNumFeet) return;
+  if (params_.release_den == 0) params_.release_den = 1;
+  FootCtx& c = ctx_[leg];
+  c.near_thresh = near_thresh;
+  c.touch_thresh = touch_thresh;
+  c.load_thresh = load_thresh;
+  // Keep the release hysteresis fraction consistent with configure().
+  c.release_thresh =
+      (static_cast<int32_t>(touch_thresh) * params_.release_num) /
+      params_.release_den;
+}
+
 void ContactEstimator::reset() {
   for (uint8_t i = 0; i < kNumFeet; ++i) {
     const int32_t keep_baseline = feet_[i].pressure_baseline;

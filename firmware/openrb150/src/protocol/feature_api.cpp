@@ -37,6 +37,34 @@ bool FeatureApi::effectiveEnabled(Feature f) const {
   return state_[i].desired && state_[i].available;
 }
 
+FeatureApplyResult FeatureApi::applyDesired(Feature f, bool enable) {
+  FeatureApplyResult r;
+  const uint8_t i = static_cast<uint8_t>(f);
+  if (i >= kFeatureCount) {
+    r.result = FeatureResult::BadRequest;
+    r.feature = i;
+    r.available = false;
+    r.enabled = false;
+    r.reason = FeatureReason::None;
+    return r;
+  }
+  State& s = state_[i];
+  // Enabling a feature the firmware says is unavailable is rejected with the
+  // reason echoed; disabling is always honoured (only reduces authority).
+  if (enable && !s.available) {
+    r.result = FeatureResult::Rejected;
+  } else {
+    if (s.desired != enable) ++seq_;
+    s.desired = enable;
+    r.result = FeatureResult::Ok;
+  }
+  r.feature = i;
+  r.available = s.available;
+  r.enabled = s.desired && s.available;
+  r.reason = s.reason;
+  return r;
+}
+
 uint16_t FeatureApi::writeFullState(uint8_t* out, uint16_t off) const {
   for (uint8_t i = 0; i < kFeatureCount; ++i) {
     out[off++] = i;
@@ -85,22 +113,14 @@ bool FeatureApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
         *out_flags = 0x02;
         return true;
       }
-      State& s = state_[fid];
-      FeatureResult result = FeatureResult::Ok;
-      // Enabling a feature the firmware says is unavailable is rejected with the
-      // reason echoed; disabling is always honoured (only reduces authority).
-      if (enable && !s.available) {
-        result = FeatureResult::Rejected;
-      } else {
-        if (s.desired != enable) ++seq_;
-        s.desired = enable;
-      }
-      out[0] = static_cast<uint8_t>(result);
+      const FeatureApplyResult r =
+          applyDesired(static_cast<Feature>(fid), enable);
+      out[0] = static_cast<uint8_t>(r.result);
       out[1] = live_state_;
-      out[2] = fid;
-      out[3] = s.available ? 1 : 0;
-      out[4] = (s.desired && s.available) ? 1 : 0;
-      out[5] = static_cast<uint8_t>(s.reason);
+      out[2] = r.feature;
+      out[3] = r.available ? 1 : 0;
+      out[4] = r.enabled ? 1 : 0;
+      out[5] = static_cast<uint8_t>(r.reason);
       *out_len = 6;
       return true;
     }

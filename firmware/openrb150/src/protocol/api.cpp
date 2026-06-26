@@ -8,6 +8,7 @@
 #include "maintenance_api.h"
 #include "maintenance_target_api.h"
 #include "motion_api.h"
+#include "sensor_api.h"
 #include "telemetry.h"
 
 namespace protocol {
@@ -59,7 +60,7 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      SubscriptionManager* tel, ControlApi* ctrl,
                      MotionApi* motion, MaintenanceApi* maint,
                      MaintTargetApi* maint_target, DxlJobApi* dxl_jobs,
-                     FeatureApi* features) {
+                     FeatureApi* features, SensorApi* sensors) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -224,6 +225,21 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                              kMaxPayload, &dxl_len, &dxl_flags)) {
           payload_len = dxl_len;
           flags = dxl_flags;
+          break;
+        }
+      }
+      // Delegate the sensor / contact / leveling group (CONTACT_*/LEVELING_*/
+      // I2C_*/SENSOR_*) to the SensorApi when present. Its ids occupy the
+      // 0x70-0x7F block.
+      if (sensors != nullptr && req.msg_id >= kSensorMsgFirst &&
+          req.msg_id <= kSensorMsgLast) {
+        uint16_t sen_len = 0;
+        uint8_t sen_flags = 0;
+        if (sensors->handle(req.msg_id, req_payload,
+                            static_cast<uint16_t>(req_len), payload,
+                            kMaxPayload, &sen_len, &sen_flags)) {
+          payload_len = sen_len;
+          flags = sen_flags;
           break;
         }
       }

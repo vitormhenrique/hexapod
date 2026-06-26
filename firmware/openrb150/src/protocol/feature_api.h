@@ -71,6 +71,17 @@ enum class FeatureResult : uint8_t {
   BadRequest = 2,  // malformed payload / unknown feature id
 };
 
+// Outcome of applying a desired enable/disable to one feature. Shared by
+// FEATURE_SET and the contact/leveling enable commands so there is one source
+// of truth for the desired set (AGENTS.md 1.3).
+struct FeatureApplyResult {
+  FeatureResult result;
+  uint8_t feature;
+  bool available;
+  bool enabled;
+  FeatureReason reason;
+};
+
 // Compiled default enable set. SensorPolling defaults on so present boards
 // stream raw data; all richer/safety features default off until requested.
 constexpr bool kFeatureDefaultEnabled[kFeatureCount] = {
@@ -96,6 +107,7 @@ class FeatureApi {
 
   // Publish the live safety-state byte echoed in responses for context.
   void setLiveState(uint8_t state) { live_state_ = state; }
+  uint8_t liveState() const { return live_state_; }
 
   // --- Host intent consumed by the control task ----------------------------
   // The host's requested enable for `f` (default-seeded). The task ANDs this
@@ -106,6 +118,12 @@ class FeatureApi {
   // Increments whenever the desired set changes (SET / RESET_DEFAULTS) so the
   // task can detect host changes without diffing each flag.
   uint32_t seq() const { return seq_; }
+
+  // Apply a desired enable/disable to one feature and report the outcome.
+  // Enabling an unavailable feature is Rejected (never forced on) and echoes
+  // the blocking reason; disable always succeeds. Shared by FEATURE_SET and the
+  // contact/leveling enable commands. `f` must be a valid feature.
+  FeatureApplyResult applyDesired(Feature f, bool enable);
 
   // --- Command handling ----------------------------------------------------
   // Dispatch a feature command. Returns false if `msg_id` is not in the feature

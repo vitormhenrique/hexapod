@@ -94,6 +94,12 @@ class ContactEstimator {
   void configure(const config::FootSensorCal (&cal)[kNumFeet],
                  const ContactParams& params);
 
+  // Update just the near/touch/load thresholds for one foot at runtime (host
+  // CONTACT_SET_THRESHOLDS) without disturbing baselines, counters, or the live
+  // state. The release threshold is recomputed from the new touch threshold.
+  void setThresholds(uint8_t leg, uint16_t near_thresh, uint16_t touch_thresh,
+                     uint16_t load_thresh);
+
   // Reset all feet to AIR with zero counters (baselines kept from configure).
   void reset();
 

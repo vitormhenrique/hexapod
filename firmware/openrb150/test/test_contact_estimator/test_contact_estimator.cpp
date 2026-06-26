@@ -199,6 +199,41 @@ void test_loaded_mask_multiple_feet() {
   TEST_ASSERT_EQUAL_UINT8(0x15, est.loadedMask());  // bits 0,2,4
 }
 
+// Runtime setThresholds() (host CONTACT_SET_THRESHOLDS) changes the touch/load
+// gates without disturbing baselines, so the same sample now classifies
+// differently.
+void test_set_thresholds_changes_classification() {
+  FootSensorCal cal[kNumFeet];
+  enabledCal(cal, /*baseline=*/1000, /*near=*/50, /*touch=*/100, /*load=*/300);
+  ContactEstimator est;
+  est.configure(cal, fastParams());
+
+  // delta 150 >= touch(100) but < load(300) -> TOUCH.
+  est.update(0, s(0, 1150), 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Touch),
+                          static_cast<uint8_t>(est.foot(0).state));
+
+  // Lower the load threshold below the live delta; the next equal sample now
+  // reaches LOADED. Baseline is untouched (still 1000).
+  est.setThresholds(0, /*near=*/50, /*touch=*/100, /*load=*/120);
+  est.update(0, s(0, 1150), 20);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Loaded),
+                          static_cast<uint8_t>(est.foot(0).state));
+  TEST_ASSERT_EQUAL_INT32(1000, est.foot(0).pressure_baseline);
+}
+
+// setThresholds() ignores out-of-range legs (no crash / no effect).
+void test_set_thresholds_bad_leg_ignored() {
+  FootSensorCal cal[kNumFeet];
+  enabledCal(cal);
+  ContactEstimator est;
+  est.configure(cal, fastParams());
+  est.setThresholds(kNumFeet, 1, 2, 3);  // out of range, must be a no-op
+  est.update(0, s(80, 1000), 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Near),
+                          static_cast<uint8_t>(est.foot(0).state));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_disabled_foot_stays_air);
@@ -210,5 +245,7 @@ int main(int, char**) {
   RUN_TEST(test_never_stale_without_a_sample);
   RUN_TEST(test_baseline_drift_tracks_while_unloaded);
   RUN_TEST(test_loaded_mask_multiple_feet);
+  RUN_TEST(test_set_thresholds_changes_classification);
+  RUN_TEST(test_set_thresholds_bad_leg_ignored);
   return UNITY_END();
 }

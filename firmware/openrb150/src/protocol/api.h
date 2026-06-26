@@ -92,6 +92,14 @@ namespace protocol {
 class DxlJobApi;
 }
 
+// Forward declaration: the sensor / contact / leveling command group
+// (CONTACT_*/LEVELING_*/I2C_*/SENSOR_*) is handled by a portable SensorApi in
+// protocol/sensor_api.h. handleRequest delegates its 0x70-0x7F msg-id block to
+// it when a non-null instance is supplied.
+namespace protocol {
+class SensorApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -150,6 +158,11 @@ constexpr uint8_t kMaintTargetMsgLast = 0x54;
 constexpr uint8_t kDxlMsgFirst = 0x60;
 constexpr uint8_t kDxlMsgLast = 0x6F;
 
+// Sensor / contact / leveling command msg-id block (0x70..0x7F), from
+// protocol::sensormsg.
+constexpr uint8_t kSensorMsgFirst = 0x70;
+constexpr uint8_t kSensorMsgLast = 0x7F;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -188,7 +201,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      MaintenanceApi* maint = nullptr,
                      MaintTargetApi* maint_target = nullptr,
                      DxlJobApi* dxl_jobs = nullptr,
-                     FeatureApi* features = nullptr);
+                     FeatureApi* features = nullptr,
+                     SensorApi* sensors = nullptr);
 
 }  // namespace api
 }  // namespace protocol

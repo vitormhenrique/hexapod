@@ -215,6 +215,34 @@
       }
     ]
   },
+  "sensor": {
+    "cases": [
+      {
+        "name": "contact_enable",
+        "request": "0002a502010270020101010101010103387e00"
+      },
+      {
+        "name": "contact_disable",
+        "request": "0002a50201027102020101010101010308d900"
+      },
+      {
+        "name": "contact_set_thresholds",
+        "request": "0002a50201027202030101010102070a03b0042003dc05488d00"
+      },
+      {
+        "name": "leveling_enable",
+        "request": "0002a502010273020401010101010103498700"
+      },
+      {
+        "name": "leveling_disable",
+        "request": "0002a50201027402050101010101010360dc00"
+      },
+      {
+        "name": "leveling_set_params",
+        "request": "0002a5020102750206010101010206048813c8024003861b00"
+      }
+    ]
+  },
   "maintenance": {
     "cases": [
       {

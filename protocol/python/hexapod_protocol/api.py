@@ -146,6 +146,26 @@ MSG_DXL_SET_SERVO_LIMITS = 0x67
 MSG_DXL_READ_REGISTER = 0x68
 MSG_DXL_WRITE_REGISTER = 0x69
 
+# Sensor / contact / leveling command group (mirrors src/protocol/sensor_api.h,
+# 0x70..0x7F). ubs.5.1 covers the contact + leveling control subset; the I2C
+# scan / topology / sensor status / rate / calibrate commands (0x76..0x7B) are
+# added by ubs.5.2.
+MSG_CONTACT_ENABLE = 0x70
+MSG_CONTACT_DISABLE = 0x71
+MSG_CONTACT_SET_THRESHOLDS = 0x72
+MSG_LEVELING_ENABLE = 0x73
+MSG_LEVELING_DISABLE = 0x74
+MSG_LEVELING_SET_PARAMS = 0x75
+
+# Sensor response result byte (mirrors protocol::SensorResult).
+SENSOR_OK = 0
+SENSOR_REJECTED = 1
+SENSOR_BAD_REQUEST = 2
+
+# Foot count for the contact sensors (mirrors protocol::kSensorNumFeet).
+SENSOR_NUM_FEET = 6
+
+
 # DXL submit response byte (mirrors DxlSubmit).
 DXL_SUBMIT_ACCEPTED = 0
 DXL_SUBMIT_REJECTED = 1
@@ -688,7 +708,143 @@ def parse_feature_set_result(payload: bytes) -> FeatureSetResult:
     )
 
 
+# --- Sensor / contact / leveling commands ---------------------------------
+
+
+def build_contact_enable(seq: int = 0) -> bytes:
+    """Build a CONTACT_ENABLE command (routes to the FootContact feature).
+    Enabling while sensors are missing/stale returns SENSOR_REJECTED with the
+    blocking reason echoed.
+    """
+    return build_command(MSG_CONTACT_ENABLE, seq=seq)
+
+
+def build_contact_disable(seq: int = 0) -> bytes:
+    """Build a CONTACT_DISABLE command (always honored)."""
+    return build_command(MSG_CONTACT_DISABLE, seq=seq)
+
+
+def build_leveling_enable(seq: int = 0) -> bytes:
+    """Build a LEVELING_ENABLE command (routes to the TerrainLeveling feature)."""
+    return build_command(MSG_LEVELING_ENABLE, seq=seq)
+
+
+def build_leveling_disable(seq: int = 0) -> bytes:
+    """Build a LEVELING_DISABLE command (always honored)."""
+    return build_command(MSG_LEVELING_DISABLE, seq=seq)
+
+
+def build_contact_set_thresholds(
+    foot: int, near: int, touch: int, load: int, seq: int = 0
+) -> bytes:
+    """Build a CONTACT_SET_THRESHOLDS command for one foot. The firmware stages
+    the per-foot near/touch/load gates and the contact estimator applies them.
+    """
+    payload = struct.pack(
+        "<BHHH", foot & 0xFF, near & 0xFFFF, touch & 0xFFFF, load & 0xFFFF
+    )
+    return build_command(MSG_CONTACT_SET_THRESHOLDS, seq=seq, payload=payload)
+
+
+def build_leveling_set_params(
+    max_tilt_mdeg: int, rate_mdeg_s: int, response_x255: int, seq: int = 0
+) -> bytes:
+    """Build a LEVELING_SET_PARAMS command staging the leveling tunables."""
+    payload = struct.pack(
+        "<HHH",
+        max_tilt_mdeg & 0xFFFF,
+        rate_mdeg_s & 0xFFFF,
+        response_x255 & 0xFFFF,
+    )
+    return build_command(MSG_LEVELING_SET_PARAMS, seq=seq, payload=payload)
+
+
+@dataclass
+class SensorFeatureResult:
+    """Response to CONTACT_*/LEVELING_* enable/disable ([result, state,
+    available, enabled, reason]).
+    """
+
+    result: int
+    state: int
+    available: bool
+    enabled: bool
+    reason: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SENSOR_OK
+
+    @property
+    def rejected(self) -> bool:
+        return self.result == SENSOR_REJECTED
+
+
+def parse_sensor_feature_result(payload: bytes) -> SensorFeatureResult:
+    """Decode a contact/leveling enable/disable response. A 1-byte payload is a
+    malformed-request error.
+    """
+    if len(payload) >= 5:
+        return SensorFeatureResult(
+            payload[0], payload[1], bool(payload[2]), bool(payload[3]), payload[4]
+        )
+    return SensorFeatureResult(
+        payload[0] if payload else SENSOR_BAD_REQUEST, 0, False, False, 0
+    )
+
+
+@dataclass
+class ContactThresholdResult:
+    """Response to CONTACT_SET_THRESHOLDS ([result, foot, near, touch, load])."""
+
+    result: int
+    foot: int
+    near: int
+    touch: int
+    load: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SENSOR_OK
+
+
+def parse_contact_threshold_result(payload: bytes) -> ContactThresholdResult:
+    """Decode a CONTACT_SET_THRESHOLDS response. A 1-byte payload is an error."""
+    if len(payload) >= 8:
+        foot = payload[1]
+        near, touch, load = struct.unpack_from("<HHH", payload, 2)
+        return ContactThresholdResult(payload[0], foot, near, touch, load)
+    return ContactThresholdResult(
+        payload[0] if payload else SENSOR_BAD_REQUEST, 0, 0, 0, 0
+    )
+
+
+@dataclass
+class LevelingParamsResult:
+    """Response to LEVELING_SET_PARAMS ([result, max_tilt, rate, response])."""
+
+    result: int
+    max_tilt_mdeg: int
+    rate_mdeg_s: int
+    response_x255: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SENSOR_OK
+
+
+def parse_leveling_params_result(payload: bytes) -> LevelingParamsResult:
+    """Decode a LEVELING_SET_PARAMS response. A 1-byte payload is an error."""
+    if len(payload) >= 7:
+        max_tilt, rate, response = struct.unpack_from("<HHH", payload, 1)
+        return LevelingParamsResult(payload[0], max_tilt, rate, response)
+    return LevelingParamsResult(
+        payload[0] if payload else SENSOR_BAD_REQUEST, 0, 0, 0
+    )
+
+
 # --- Maintenance lock commands --------------------------------------------
+
 
 
 def build_enter_maintenance(seq: int = 0) -> bytes:
