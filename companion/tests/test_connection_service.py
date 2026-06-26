@@ -169,3 +169,48 @@ def test_connect_open_failure_emits_error(qtbot, monkeypatch) -> None:
     assert "/dev/nope" in msg
     assert not service.is_connected
 
+
+def test_available_ports_discovers_without_hardware(monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+    from transport import PortInfo
+
+    ports = [PortInfo("/dev/cu.usbmodem1", "OpenRB-150", "hwid-1")]
+    monkeypatch.setattr(services_mod, "list_serial_ports", lambda: ports)
+
+    service = ConnectionService()
+    found = service.available_ports()
+    assert [p.device for p in found] == ["/dev/cu.usbmodem1"]
+
+
+def test_reconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None:
+    """connect -> disconnect -> connect again re-handshakes on a fresh link."""
+    from services import ConnectionService
+    import services as services_mod
+
+    streams: list[RespondingStream] = []
+
+    def fake_open(port, baud=115200):
+        stream = RespondingStream(_handshake_handlers())
+        streams.append(stream)
+        return stream
+
+    monkeypatch.setattr(services_mod, "open_serial", fake_open)
+
+    service = ConnectionService()
+    with qtbot.waitSignal(service.connected, timeout=2000) as blocker:
+        service.connect_to("/dev/fake")
+    assert blocker.args == [True]
+
+    with qtbot.waitSignal(service.connected, timeout=2000):
+        service.disconnect()
+    assert streams[0].closed
+
+    # A second connect opens a new link and handshakes again.
+    with qtbot.waitSignal(service.connected, timeout=2000) as blocker:
+        service.connect_to("/dev/fake")
+    assert blocker.args == [True]
+    assert service.is_connected
+    assert len(streams) == 2
+    service.disconnect()
+

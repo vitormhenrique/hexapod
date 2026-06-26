@@ -135,6 +135,33 @@ def test_decode_rejects_truncation():
 
 
 # --------------------------------------------------------------------------- #
+# Schema-version detection
+# --------------------------------------------------------------------------- #
+def test_decoded_header_exposes_schema_version():
+    """A decoded frame surfaces the magic + schema version for negotiation."""
+    from hexapod_protocol.framing import MAGIC, VERSION_MAJOR, VERSION_MINOR
+
+    h = Header(msg_type=2, msg_id=1, seq=3, timestamp_ms=99)
+    wire = encode_frame(h, bytes([0xDE, 0xAD]))
+    header, _ = decode_frame_body(wire[1:-1])
+    assert header.magic == MAGIC
+    assert header.version_major == VERSION_MAJOR
+    assert header.version_minor == VERSION_MINOR
+
+
+def test_schema_version_mismatch_is_detectable():
+    """A client can detect an incompatible major version from the header."""
+    from hexapod_protocol.framing import VERSION_MAJOR
+
+    h = Header(msg_type=2, msg_id=1, seq=0, timestamp_ms=0)
+    h.version_major = VERSION_MAJOR + 1  # firmware speaks a newer major schema
+    wire = encode_frame(h, b"")  # CRC still valid for the bumped version
+    header, _ = decode_frame_body(wire[1:-1])
+    # Decoding succeeds (CRC ok) but the major version differs -> caller rejects.
+    assert header.version_major != VERSION_MAJOR
+
+
+# --------------------------------------------------------------------------- #
 # USB API v0
 # --------------------------------------------------------------------------- #
 @pytest.mark.parametrize("case", VECTORS["api"]["cases"])
