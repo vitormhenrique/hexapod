@@ -27,6 +27,9 @@ class ConnectionService(QObject):
     telemetry = Signal(int, object)  # stream_id, decoded record
     event = Signal(str, str)  # kind, detail
     error = Signal(str)
+    control_result = Signal(str, object)  # kind, api.ControlResult
+    motion_result = Signal(str, object)  # kind, api.MotionResultMsg
+    feature_result = Signal(object)  # api.FeatureSetResult
 
     def __init__(self) -> None:
         super().__init__()
@@ -106,13 +109,105 @@ class ConnectionService(QObject):
             ).start()
 
     def emergency_stop(self) -> None:
-        """Best-effort estop. Wired to a real ESTOP msg-id when firmware adds it."""
+        """Send a real ESTOP command on a worker thread and report the ack."""
         self.event.emit("estop", "operator pressed EMERGENCY STOP")
-        # TODO: send api.MSG_ESTOP once defined in the firmware protocol.
+        client = self._client
+        if client is None:
+            self.error.emit("ESTOP: not connected")
+            return
+
+        def worker() -> None:
+            res = client.estop()
+            if res is None:
+                self.error.emit("ESTOP: no response from firmware")
+            else:
+                self.control_result.emit("estop", res)
+                self.event.emit("estop", f"firmware state={res.state}")
+
+        threading.Thread(target=worker, name="hexapod-estop", daemon=True).start()
+
+    def clear_fault(self) -> None:
+        self._run_control("clear_fault", lambda c: c.clear_fault())
+
+    def set_arming(self, arm: bool) -> None:
+        self._run_control(
+            "arm" if arm else "disarm", lambda c: c.set_arming(arm)
+        )
+
+    def set_mode(self, mode: int) -> None:
+        self._run_control("set_mode", lambda c: c.set_mode(mode))
+
+    def set_gait(self, gait: int) -> None:
+        self._run_motion("set_gait", lambda c: c.set_gait(gait))
+
+    def stop_motion(self) -> None:
+        self._run_motion("stop_motion", lambda c: c.stop_motion())
+
+    def set_feature(self, feature: int, enable: bool) -> None:
+        """Enable/disable a feature flag; emit the firmware's reflected state."""
+        client = self._client
+        if client is None:
+            self.error.emit("feature: not connected")
+            return
+
+        def worker() -> None:
+            res = client.feature_set(feature, enable)
+            if res is None:
+                self.error.emit("feature: no response")
+            else:
+                self.feature_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def passive_enter(self) -> None:
+        self._run_in_worker(lambda c: c.passive_enter())
+
+    def passive_exit(self) -> None:
+        self._run_in_worker(lambda c: c.passive_exit())
 
     @property
     def client(self) -> Optional[ProtocolClient]:
         return self._client
+
+    # --- command plumbing -------------------------------------------------
+
+    def _run_control(self, kind: str, call) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit(f"{kind}: not connected")
+            return
+
+        def worker() -> None:
+            res = call(client)
+            if res is None:
+                self.error.emit(f"{kind}: no response")
+            else:
+                self.control_result.emit(kind, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_motion(self, kind: str, call) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit(f"{kind}: not connected")
+            return
+
+        def worker() -> None:
+            res = call(client)
+            if res is None:
+                self.error.emit(f"{kind}: no response")
+            else:
+                self.motion_result.emit(kind, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_in_worker(self, call) -> None:
+        client = self._client
+        if client is None:
+            return
+        threading.Thread(
+            target=lambda: client and call(client), daemon=True
+        ).start()
 
     # --- internal ---------------------------------------------------------
 

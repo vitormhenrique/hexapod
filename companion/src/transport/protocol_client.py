@@ -183,6 +183,176 @@ class ProtocolClient:
         r = self.request(api.MSG_GET_STREAM_STATS)
         return api.parse_stream_stats(r.payload) if r else None
 
+    # --- typed control-group commands ------------------------------------
+    #
+    # Each method reuses the golden ``api.build_*`` frame builders as the single
+    # source of truth for the wire payload, then re-sends the payload through
+    # ``request`` so the client owns seq allocation and response correlation.
+
+    def _send_built(self, frame: bytes) -> Optional[Response]:
+        """Re-send a pre-built command frame under a client-managed seq."""
+        header, payload = decode_frame_body(frame[1:-1])
+        return self.request(header.msg_id, payload)
+
+    # Safety control.
+    def estop(self) -> Optional[api.ControlResult]:
+        r = self._send_built(api.build_estop())
+        return api.parse_control_result(r.payload) if r else None
+
+    def clear_fault(self) -> Optional[api.ControlResult]:
+        r = self._send_built(api.build_clear_fault())
+        return api.parse_control_result(r.payload) if r else None
+
+    def set_arming(self, arm: bool) -> Optional[api.ControlResult]:
+        r = self._send_built(api.build_set_arming(arm))
+        return api.parse_control_result(r.payload) if r else None
+
+    def set_mode(self, mode: int) -> Optional[api.ControlResult]:
+        r = self._send_built(api.build_set_mode(mode))
+        return api.parse_control_result(r.payload) if r else None
+
+    # Motion.
+    def set_gait(self, gait: int) -> Optional[api.MotionResultMsg]:
+        r = self._send_built(api.build_set_gait(gait))
+        return api.parse_motion_result(r.payload) if r else None
+
+    def set_gait_params(
+        self,
+        body_height_mm: int,
+        stride_len_mm: int,
+        step_height_mm: int,
+        duty_x255: int,
+        speed_x255: int,
+    ) -> Optional[api.MotionResultMsg]:
+        r = self._send_built(
+            api.build_set_gait_params(
+                body_height_mm,
+                stride_len_mm,
+                step_height_mm,
+                duty_x255,
+                speed_x255,
+            )
+        )
+        return api.parse_motion_result(r.payload) if r else None
+
+    def set_body_twist(
+        self, vx: float, vy: float, wz: float
+    ) -> Optional[api.MotionResultMsg]:
+        r = self._send_built(api.build_set_body_twist(vx, vy, wz))
+        return api.parse_motion_result(r.payload) if r else None
+
+    def set_body_pose(
+        self,
+        x_mm: float,
+        y_mm: float,
+        z_mm: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> Optional[api.MotionResultMsg]:
+        r = self._send_built(
+            api.build_set_body_pose(x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg)
+        )
+        return api.parse_motion_result(r.payload) if r else None
+
+    def stop_motion(self) -> Optional[api.MotionResultMsg]:
+        r = self._send_built(api.build_stop_motion())
+        return api.parse_motion_result(r.payload) if r else None
+
+    # Feature flags.
+    def feature_get(self) -> Optional[api.FeatureList]:
+        r = self._send_built(api.build_feature_get())
+        return api.parse_feature_list(r.payload) if r else None
+
+    def feature_set(self, feature: int, enable: bool) -> Optional[api.FeatureSetResult]:
+        r = self._send_built(api.build_feature_set(feature, enable))
+        return api.parse_feature_set_result(r.payload) if r else None
+
+    def feature_get_reasons(self) -> Optional[api.FeatureReasons]:
+        r = self._send_built(api.build_feature_get_reasons())
+        return api.parse_feature_reasons(r.payload) if r else None
+
+    def feature_reset_defaults(self) -> Optional[api.FeatureList]:
+        r = self._send_built(api.build_feature_reset_defaults())
+        return api.parse_feature_list(r.payload) if r else None
+
+    # Contact / leveling.
+    def contact_enable(self, enable: bool) -> Optional[api.SensorFeatureResult]:
+        frame = api.build_contact_enable() if enable else api.build_contact_disable()
+        r = self._send_built(frame)
+        return api.parse_sensor_feature_result(r.payload) if r else None
+
+    def leveling_enable(self, enable: bool) -> Optional[api.SensorFeatureResult]:
+        frame = api.build_leveling_enable() if enable else api.build_leveling_disable()
+        r = self._send_built(frame)
+        return api.parse_sensor_feature_result(r.payload) if r else None
+
+    # Passive pose streaming.
+    def passive_enter(self) -> Optional[api.PassiveResult]:
+        r = self._send_built(api.build_passive_enter())
+        return api.parse_passive_result(r.payload) if r else None
+
+    def passive_exit(self) -> Optional[api.PassiveResult]:
+        r = self._send_built(api.build_passive_exit())
+        return api.parse_passive_result(r.payload) if r else None
+
+    def passive_set_stream_rate(self, rate_hz: int) -> Optional[api.PassiveRateResult]:
+        r = self._send_built(api.build_passive_set_stream_rate(rate_hz))
+        return api.parse_passive_rate_result(r.payload) if r else None
+
+    # Maintenance lock.
+    def enter_maintenance(self) -> Optional[api.MaintResultMsg]:
+        r = self._send_built(api.build_enter_maintenance())
+        return api.parse_maint_result(r.payload) if r else None
+
+    def exit_maintenance(self, token: int) -> Optional[api.MaintResultMsg]:
+        r = self._send_built(api.build_exit_maintenance(token))
+        return api.parse_maint_result(r.payload) if r else None
+
+    # --- DXL async job helpers -------------------------------------------
+    #
+    # DXL maintenance runs on a single-slot firmware job queue: submit a job,
+    # then poll GET_RESULT until the slot is DONE. ``dxl_run`` wraps that loop.
+
+    def dxl_submit(self, frame: bytes) -> Optional[api.DxlSubmitResult]:
+        r = self._send_built(frame)
+        return api.parse_dxl_submit(r.payload) if r else None
+
+    def dxl_get_result(self, job_id: int) -> Optional[api.DxlJobResult]:
+        r = self._send_built(api.build_dxl_get_result(job_id))
+        return api.parse_dxl_result(r.payload) if r else None
+
+    def dxl_run(
+        self, frame: bytes, poll_interval: float = 0.02, timeout: float = 2.0
+    ) -> Optional[api.DxlJobResult]:
+        """Submit a DXL job frame and poll until it completes or times out."""
+        sub = self.dxl_submit(frame)
+        if sub is None or not sub.accepted:
+            return None
+        deadline = time.monotonic() + timeout
+        result: Optional[api.DxlJobResult] = None
+        while time.monotonic() < deadline:
+            result = self.dxl_get_result(sub.job_id)
+            if result is not None and result.slot == api.DXL_SLOT_DONE:
+                return result
+            time.sleep(poll_interval)
+        return result
+
+    def dxl_get_param(self, servo_id: int, param: int) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_get_param(servo_id, param))
+
+    def dxl_set_param(
+        self, servo_id: int, param: int, value: int
+    ) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_set_param(servo_id, param, value))
+
+    def dxl_set_servo_limits(
+        self, servo_id: int, min_tick: int, max_tick: int
+    ) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(
+            api.build_dxl_set_servo_limits(servo_id, min_tick, max_tick)
+        )
+
     # --- reader loop ------------------------------------------------------
 
     def _read_loop(self) -> None:
