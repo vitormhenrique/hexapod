@@ -30,6 +30,8 @@ class ConnectionService(QObject):
     control_result = Signal(str, object)  # kind, api.ControlResult
     motion_result = Signal(str, object)  # kind, api.MotionResultMsg
     feature_result = Signal(object)  # api.FeatureSetResult
+    feature_list = Signal(object)  # api.FeatureList
+    maint_result = Signal(object)  # api.MaintResultMsg
 
     def __init__(self) -> None:
         super().__init__()
@@ -38,6 +40,7 @@ class ConnectionService(QObject):
         self._poll.setInterval(1000)
         self._poll.timeout.connect(self._poll_status)
         self._last_state: Optional[int] = None
+        self._maint_token: int = 0
 
     # --- discovery --------------------------------------------------------
 
@@ -164,6 +167,62 @@ class ConnectionService(QObject):
 
     def passive_exit(self) -> None:
         self._run_in_worker(lambda c: c.passive_exit())
+
+    def refresh_features(self) -> None:
+        """Request the live feature-flag table; emit it via ``feature_list``."""
+        client = self._client
+        if client is None:
+            return
+
+        def worker() -> None:
+            fl = client.feature_get()
+            if fl is not None:
+                self.feature_list.emit(fl)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def enter_maintenance(self) -> None:
+        """Acquire the maintenance lock; cache the returned token on success."""
+        client = self._client
+        if client is None:
+            self.error.emit("maintenance: not connected")
+            return
+
+        def worker() -> None:
+            res = client.enter_maintenance()
+            if res is None:
+                self.error.emit("maintenance: no response")
+                return
+            if res.ok:
+                self._maint_token = res.token
+                self.event.emit(
+                    "commit", f"maintenance lock acquired (token {res.token})"
+                )
+            else:
+                self.event.emit("error", "maintenance lock rejected")
+            self.maint_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def exit_maintenance(self) -> None:
+        """Release the cached maintenance lock token."""
+        client = self._client
+        if client is None:
+            self.error.emit("maintenance: not connected")
+            return
+        token = self._maint_token
+
+        def worker() -> None:
+            res = client.exit_maintenance(token)
+            if res is None:
+                self.error.emit("maintenance: no response")
+                return
+            if res.ok:
+                self._maint_token = 0
+                self.event.emit("commit", "maintenance lock released")
+            self.maint_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     @property
     def client(self) -> Optional[ProtocolClient]:

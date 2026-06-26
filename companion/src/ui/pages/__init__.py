@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -17,11 +18,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
 from services import ConnectionService
 from theme import DRACULA
-from ui.widgets import StatCard, StatusBadge
+from ui.widgets import FeatureToggleCard, StatCard, StatusBadge
 
 
 class BasePage(QWidget):
@@ -240,7 +242,7 @@ class OverviewPage(BasePage):
 
 class ModeSafetyPage(BasePage):
     title = "Mode & Safety Center"
-    subtitle = "Telemetry subscriptions and safety controls."
+    subtitle = "Arming, fault recovery, maintenance/passive locks, and feature flags."
 
     STREAMS = [
         ("health", 5),
@@ -252,7 +254,157 @@ class ModeSafetyPage(BasePage):
         ("api_stats", 2),
     ]
 
+    FEATURES = [
+        (api.FEATURE_FOOT_CONTACT, "Foot Contact"),
+        (api.FEATURE_TERRAIN_LEVELING, "Terrain Leveling"),
+        (api.FEATURE_SENSOR_POLLING, "Sensor Polling"),
+        (api.FEATURE_JETSON_CONTROL, "Jetson Control"),
+        (api.FEATURE_PASSIVE_POSE, "Passive Pose"),
+    ]
+
+    REASON_NAMES = {
+        api.FEATURE_REASON_NONE: "NONE",
+        api.FEATURE_REASON_HARDWARE_MISSING: "hardware missing",
+        api.FEATURE_REASON_NOT_CALIBRATED: "not calibrated",
+        api.FEATURE_REASON_UNSAFE_STATE: "unsafe state",
+        api.FEATURE_REASON_STALE_DATA: "stale data",
+        api.FEATURE_REASON_DEPENDENCY_OFF: "dependency off",
+        api.FEATURE_REASON_NOT_IMPLEMENTED: "not implemented",
+    }
+
     def build(self) -> None:
+        self.content.addWidget(self._safety_controls())
+        self.content.addWidget(self._lock_controls())
+        self.content.addWidget(self._feature_flags())
+        self.content.addWidget(self._subscriptions())
+
+        safety = QGroupBox("Emergency stop")
+        slay = QHBoxLayout(safety)
+        estop = QPushButton("\u23fb  EMERGENCY STOP")
+        estop.setObjectName("EmergencyStop")
+        estop.clicked.connect(self.service.emergency_stop)
+        slay.addWidget(estop)
+        slay.addStretch(1)
+        self.content.addWidget(safety)
+
+        self.service.connected.connect(self._on_connected)
+        self.service.feature_list.connect(self._on_feature_list)
+        self.service.feature_result.connect(lambda _r: self.service.refresh_features())
+        self.service.maint_result.connect(self._on_maint_result)
+        self.service.control_result.connect(self._on_control_result)
+
+    # --- groups -----------------------------------------------------------
+
+    def _safety_controls(self) -> QGroupBox:
+        box = QGroupBox("Safety controls")
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        arm = QPushButton("Arm")
+        arm.setToolTip("Release the host disarm latch (RC arm switch still required).")
+        arm.clicked.connect(lambda: self.service.set_arming(True))
+
+        disarm = QPushButton("Disarm")
+        disarm.clicked.connect(
+            lambda: self._confirm(
+                "Disarm robot",
+                "Latch a host force-disarm? This removes motion authority.",
+                lambda: self.service.set_arming(False),
+            )
+        )
+
+        clear = QPushButton("Clear Fault")
+        clear.clicked.connect(
+            lambda: self._confirm(
+                "Clear fault",
+                "Release the host E-stop latch and request a fault clear?",
+                self.service.clear_fault,
+            )
+        )
+
+        set_disarmed = QPushButton("Set mode: Disarmed")
+        set_disarmed.clicked.connect(lambda: self.service.set_mode(2))
+
+        force_estop = QPushButton("Set mode: E-stop")
+        force_estop.clicked.connect(
+            lambda: self._confirm(
+                "Force E-stop mode",
+                "Drive the safety machine into ESTOP?",
+                lambda: self.service.set_mode(12),
+            )
+        )
+
+        for i, btn in enumerate((arm, disarm, clear, set_disarmed, force_estop)):
+            btn.setCursor(Qt.PointingHandCursor)
+            grid.addWidget(btn, i // 3, i % 3)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+
+        self.action_lbl = QLabel("No command sent yet.")
+        self.action_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+        grid.addWidget(self.action_lbl, 2, 0, 1, 3)
+        return box
+
+    def _lock_controls(self) -> QGroupBox:
+        box = QGroupBox("Maintenance & passive pose")
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        enter_m = QPushButton("Enter Maintenance")
+        enter_m.clicked.connect(self.service.enter_maintenance)
+        exit_m = QPushButton("Exit Maintenance")
+        exit_m.clicked.connect(self.service.exit_maintenance)
+
+        enter_p = QPushButton("Enter Passive Pose")
+        enter_p.clicked.connect(
+            lambda: self._confirm(
+                "Enter passive pose",
+                "Disable all servo torque and stream present positions?",
+                self.service.passive_enter,
+            )
+        )
+        exit_p = QPushButton("Exit Passive Pose")
+        exit_p.clicked.connect(self.service.passive_exit)
+
+        for i, btn in enumerate((enter_m, exit_m, enter_p, exit_p)):
+            btn.setCursor(Qt.PointingHandCursor)
+            grid.addWidget(btn, i // 2, i % 2)
+        for c in range(2):
+            grid.setColumnStretch(c, 1)
+
+        self.lock_lbl = QLabel("Maintenance lock: none")
+        self.lock_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+        grid.addWidget(self.lock_lbl, 2, 0, 1, 2)
+        return box
+
+    def _feature_flags(self) -> QGroupBox:
+        box = QGroupBox("Feature flags")
+        outer = QVBoxLayout(box)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        self._feature_cards: dict[int, FeatureToggleCard] = {}
+        for i, (fid, name) in enumerate(self.FEATURES):
+            card = FeatureToggleCard(fid, name)
+            card.toggled.connect(self._on_feature_toggle)
+            grid.addWidget(card, i // 2, i % 2)
+            self._feature_cards[fid] = card
+        for c in range(2):
+            grid.setColumnStretch(c, 1)
+        outer.addLayout(grid)
+
+        refresh = QPushButton("Refresh feature state")
+        refresh.setCursor(Qt.PointingHandCursor)
+        refresh.clicked.connect(self.service.refresh_features)
+        row = QHBoxLayout()
+        row.addWidget(refresh)
+        row.addStretch(1)
+        outer.addLayout(row)
+        return box
+
+    def _subscriptions(self) -> QGroupBox:
         box = QGroupBox("Telemetry subscriptions")
         lay = QGridLayout(box)
         lay.setHorizontalSpacing(12)
@@ -269,16 +421,60 @@ class ModeSafetyPage(BasePage):
             self._buttons[name] = btn
         for c in range(2):
             lay.setColumnStretch(c, 1)
-        self.content.addWidget(box)
+        return box
 
-        safety = QGroupBox("Safety")
-        slay = QHBoxLayout(safety)
-        estop = QPushButton("\u23fb  EMERGENCY STOP")
-        estop.setObjectName("EmergencyStop")
-        estop.clicked.connect(self.service.emergency_stop)
-        slay.addWidget(estop)
-        slay.addStretch(1)
-        self.content.addWidget(safety)
+    # --- actions / reactions ---------------------------------------------
+
+    def _confirm(self, title: str, text: str, action) -> None:
+        reply = QMessageBox.question(
+            self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            action()
+
+    def _on_feature_toggle(self, feature: int, enable: bool) -> None:
+        if enable and feature == api.FEATURE_JETSON_CONTROL:
+            self._confirm(
+                "Enable Jetson control",
+                "Grant the Jetson high-level motion authority?",
+                lambda: self.service.set_feature(feature, True),
+            )
+            # Revert the optimistic check until the firmware confirms.
+            self.service.refresh_features()
+        else:
+            self.service.set_feature(feature, enable)
+
+    def _on_feature_list(self, fl) -> None:
+        for f in fl.features:
+            card = self._feature_cards.get(f.feature)
+            if card is not None:
+                card.set_state(
+                    f.available,
+                    f.enabled,
+                    self.REASON_NAMES.get(f.reason, str(f.reason)),
+                )
+
+    def _on_maint_result(self, res) -> None:
+        if res.token:
+            self.lock_lbl.setText(f"Maintenance lock: held (token {res.token})")
+        elif res.ok:
+            self.lock_lbl.setText("Maintenance lock: none")
+        else:
+            self.lock_lbl.setText(
+                f"Maintenance lock: rejected (result {res.result})"
+            )
+
+    def _on_control_result(self, kind: str, res) -> None:
+        state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
+        verdict = "ok" if res.ok else f"rejected ({res.result})"
+        self.action_lbl.setText(f"{kind}: {verdict} — state {state}")
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.refresh_features()
+        else:
+            self.lock_lbl.setText("Maintenance lock: none")
+            self.action_lbl.setText("No command sent yet.")
 
     def _toggle(self, name: str, rate: int, checked: bool) -> None:
         sid = int(tlm.stream_id_from_name(name))

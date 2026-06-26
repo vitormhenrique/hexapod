@@ -85,6 +85,69 @@ class StatCard(QFrame):
         self._dot.setStyleSheet(f"color: {status_color(level)}; font-size: 11px;")
 
 
+class FeatureToggleCard(QFrame):
+    """A feature-flag tile: name, availability/enabled state + reason, toggle.
+
+    The button is disabled when the firmware reports the feature unavailable and
+    shows the unavailability reason, so the operator always sees *why* a feature
+    cannot be turned on (AGENTS.md 1.3 / 7.3).
+    """
+
+    toggled = Signal(int, bool)  # feature id, desired-enable
+
+    def __init__(self, feature_id: int, name: str, parent=None) -> None:
+        super().__init__(parent)
+        self._feature = feature_id
+        self.setObjectName("StatCard")
+        self.setMinimumHeight(96)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self._dot = QLabel("\u25cf")
+        self._dot.setStyleSheet(f"color: {DRACULA.comment}; font-size: 11px;")
+        self._dot.setFixedWidth(12)
+        cap = QLabel(name.upper())
+        cap.setObjectName("StatCaption")
+        top.addWidget(self._dot)
+        top.addWidget(cap)
+        top.addStretch(1)
+        self._btn = QPushButton("Enable")
+        self._btn.setCheckable(True)
+        self._btn.setCursor(Qt.PointingHandCursor)
+        self._btn.clicked.connect(lambda checked: self.toggled.emit(self._feature, checked))
+        top.addWidget(self._btn)
+        lay.addLayout(top)
+
+        self._reason = QLabel("--")
+        self._reason.setObjectName("StatCaption")
+        lay.addWidget(self._reason)
+        lay.addStretch(1)
+
+    @property
+    def feature(self) -> int:
+        return self._feature
+
+    def set_state(self, available: bool, enabled: bool, reason: str) -> None:
+        self._btn.setEnabled(available)
+        self._btn.blockSignals(True)
+        self._btn.setChecked(enabled)
+        self._btn.blockSignals(False)
+        self._btn.setText("Enabled" if enabled else "Enable")
+        if not available:
+            level = "idle"
+            self._reason.setText(f"unavailable — {reason}")
+        elif enabled:
+            level = "ok"
+            self._reason.setText("enabled")
+        else:
+            level = "warn"
+            self._reason.setText(reason if reason and reason != "NONE" else "available")
+        self._dot.setStyleSheet(f"color: {status_color(level)}; font-size: 11px;")
+
+
 def _badge_separator() -> QFrame:
     sep = QFrame()
     sep.setObjectName("BadgeSep")
@@ -239,6 +302,7 @@ from ui.widgets.hexapod_view import HexapodView  # noqa: E402  (re-export)
 __all__ = [
     "StatusBadge",
     "StatCard",
+    "FeatureToggleCard",
     "EmergencyStopButton",
     "SafetyBar",
     "NavRail",
