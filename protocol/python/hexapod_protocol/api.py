@@ -156,6 +156,12 @@ MSG_CONTACT_SET_THRESHOLDS = 0x72
 MSG_LEVELING_ENABLE = 0x73
 MSG_LEVELING_DISABLE = 0x74
 MSG_LEVELING_SET_PARAMS = 0x75
+MSG_I2C_SCAN = 0x76
+MSG_I2C_GET_TOPOLOGY = 0x77
+MSG_SENSOR_GET_STATUS = 0x78
+MSG_SENSOR_SET_RATE = 0x79
+MSG_CONTACT_CALIBRATE = 0x7A
+MSG_SENSOR_CALIBRATE = 0x7B
 
 # Sensor response result byte (mirrors protocol::SensorResult).
 SENSOR_OK = 0
@@ -164,6 +170,12 @@ SENSOR_BAD_REQUEST = 2
 
 # Foot count for the contact sensors (mirrors protocol::kSensorNumFeet).
 SENSOR_NUM_FEET = 6
+
+# Mux channel count for the I2C topology (mirrors protocol::kSensorNumChannels).
+SENSOR_NUM_CHANNELS = 8
+
+# Calibrate-all foot selector for CONTACT_CALIBRATE.
+SENSOR_CALIBRATE_ALL = 0xFF
 
 
 # DXL submit response byte (mirrors DxlSubmit).
@@ -840,6 +852,215 @@ def parse_leveling_params_result(payload: bytes) -> LevelingParamsResult:
         return LevelingParamsResult(payload[0], max_tilt, rate, response)
     return LevelingParamsResult(
         payload[0] if payload else SENSOR_BAD_REQUEST, 0, 0, 0
+    )
+
+
+# --- I2C scan / topology / sensor status / rate / calibrate (ubs.5.2) ------
+
+
+def build_i2c_scan(seq: int = 0) -> bytes:
+    """Build an I2C_SCAN command. The firmware re-runs its discovery scan
+    (owned by i2cTask); poll I2C_GET_TOPOLOGY afterwards for the result.
+    """
+    return build_command(MSG_I2C_SCAN, seq=seq)
+
+
+def build_i2c_get_topology(seq: int = 0) -> bytes:
+    """Build an I2C_GET_TOPOLOGY command (reads the published topology)."""
+    return build_command(MSG_I2C_GET_TOPOLOGY, seq=seq)
+
+
+def build_sensor_get_status(seq: int = 0) -> bytes:
+    """Build a SENSOR_GET_STATUS command (reads the fused foot-status)."""
+    return build_command(MSG_SENSOR_GET_STATUS, seq=seq)
+
+
+def build_sensor_set_rate(rate_hz: int, seq: int = 0) -> bytes:
+    """Build a SENSOR_SET_RATE command staging the target poll rate (Hz)."""
+    payload = struct.pack("<H", rate_hz & 0xFFFF)
+    return build_command(MSG_SENSOR_SET_RATE, seq=seq, payload=payload)
+
+
+def build_contact_calibrate(foot: int = SENSOR_CALIBRATE_ALL, seq: int = 0) -> bytes:
+    """Build a CONTACT_CALIBRATE command. `foot` selects one foot (0..5) or
+    SENSOR_CALIBRATE_ALL (0xFF) for every foot. The firmware re-zeroes the
+    per-foot pressure baseline to the current reading (foot must be at rest).
+    """
+    payload = bytes([foot & 0xFF])
+    return build_command(MSG_CONTACT_CALIBRATE, seq=seq, payload=payload)
+
+
+def build_sensor_calibrate(seq: int = 0) -> bytes:
+    """Build a SENSOR_CALIBRATE command (re-baselines every foot)."""
+    return build_command(MSG_SENSOR_CALIBRATE, seq=seq)
+
+
+@dataclass
+class I2cScanResult:
+    """Response to I2C_SCAN ([result, scan_seq u16])."""
+
+    result: int
+    scan_seq: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SENSOR_OK
+
+
+def parse_i2c_scan_result(payload: bytes) -> I2cScanResult:
+    """Decode an I2C_SCAN response."""
+    if len(payload) >= 3:
+        return I2cScanResult(payload[0], struct.unpack_from("<H", payload, 1)[0])
+    return I2cScanResult(payload[0] if payload else SENSOR_BAD_REQUEST, 0)
+
+
+@dataclass
+class TopologyChannel:
+    """One mux channel from I2C_GET_TOPOLOGY."""
+
+    scanned: bool
+    vcnl_present: bool
+    lps_present: bool
+    device_count: int
+    state: int  # 0 missing, 1 present, 2 fault
+
+
+@dataclass
+class I2cTopologyResult:
+    """Response to I2C_GET_TOPOLOGY (mux/eeprom presence + per-channel state)."""
+
+    mux_present: bool
+    eeprom_present: bool
+    channels: List[TopologyChannel]
+
+
+def parse_i2c_topology_result(payload: bytes) -> I2cTopologyResult:
+    """Decode an I2C_GET_TOPOLOGY response. A short payload yields no channels."""
+    if len(payload) < 3:
+        return I2cTopologyResult(False, False, [])
+    mux = bool(payload[0])
+    eeprom = bool(payload[1])
+    n = payload[2]
+    channels: List[TopologyChannel] = []
+    off = 3
+    for _ in range(n):
+        if off + 5 > len(payload):
+            break
+        channels.append(
+            TopologyChannel(
+                bool(payload[off]),
+                bool(payload[off + 1]),
+                bool(payload[off + 2]),
+                payload[off + 3],
+                payload[off + 4],
+            )
+        )
+        off += 5
+    return I2cTopologyResult(mux, eeprom, channels)
+
+
+@dataclass
+class FootStatus:
+    """One foot from SENSOR_GET_STATUS."""
+
+    state: int
+    confidence: int
+    proximity: int
+    pressure_delta: int
+    flags: int
+
+    @property
+    def near(self) -> bool:
+        return bool(self.flags & 0x01)
+
+    @property
+    def touch(self) -> bool:
+        return bool(self.flags & 0x02)
+
+    @property
+    def loaded(self) -> bool:
+        return bool(self.flags & 0x04)
+
+    @property
+    def release(self) -> bool:
+        return bool(self.flags & 0x08)
+
+    @property
+    def stale(self) -> bool:
+        return bool(self.flags & 0x10)
+
+    @property
+    def fault(self) -> bool:
+        return bool(self.flags & 0x20)
+
+
+@dataclass
+class SensorStatusResult:
+    """Response to SENSOR_GET_STATUS (present mask, polling flag, per-foot)."""
+
+    present_mask: int
+    polling_enabled: bool
+    feet: List[FootStatus]
+
+
+def parse_sensor_status_result(payload: bytes) -> SensorStatusResult:
+    """Decode a SENSOR_GET_STATUS response."""
+    if len(payload) < 3:
+        return SensorStatusResult(0, False, [])
+    n = payload[0]
+    present_mask = payload[1]
+    polling = bool(payload[2])
+    feet: List[FootStatus] = []
+    off = 3
+    for _ in range(n):
+        if off + 7 > len(payload):
+            break
+        state = payload[off]
+        confidence = payload[off + 1]
+        proximity, delta = struct.unpack_from("<Hh", payload, off + 2)
+        flags = payload[off + 6]
+        feet.append(FootStatus(state, confidence, proximity, delta, flags))
+        off += 7
+    return SensorStatusResult(present_mask, polling, feet)
+
+
+@dataclass
+class SensorRateResult:
+    """Response to SENSOR_SET_RATE ([result, rate_hz u16])."""
+
+    result: int
+    rate_hz: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SENSOR_OK
+
+
+def parse_sensor_rate_result(payload: bytes) -> SensorRateResult:
+    """Decode a SENSOR_SET_RATE response. A 1-byte payload is an error."""
+    if len(payload) >= 3:
+        return SensorRateResult(payload[0], struct.unpack_from("<H", payload, 1)[0])
+    return SensorRateResult(payload[0] if payload else SENSOR_BAD_REQUEST, 0)
+
+
+@dataclass
+class SensorCalibrateResult:
+    """Response to CONTACT_CALIBRATE / SENSOR_CALIBRATE ([result, foot_mask])."""
+
+    result: int
+    mask: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == SENSOR_OK
+
+
+def parse_sensor_calibrate_result(payload: bytes) -> SensorCalibrateResult:
+    """Decode a calibrate response. A 1-byte payload is an error."""
+    if len(payload) >= 2:
+        return SensorCalibrateResult(payload[0], payload[1])
+    return SensorCalibrateResult(
+        payload[0] if payload else SENSOR_BAD_REQUEST, 0
     )
 
 

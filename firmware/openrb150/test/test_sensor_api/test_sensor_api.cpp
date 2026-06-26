@@ -255,6 +255,241 @@ void test_set_leveling_params_ok() {
   TEST_ASSERT_EQUAL_UINT(5000, sen.levelingParams().max_tilt_mdeg);
 }
 
+// ---- ubs.5.2: I2C scan / topology / status / rate / calibrate -------------
+
+// I2C_SCAN bumps the scan sequence (i2cTask re-runs scanAll) and acks it.
+void test_i2c_scan_bumps_seq() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  TEST_ASSERT_EQUAL_UINT32(0, sen.scanSeq());
+
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kI2cScan, 1, nullptr, 0, &h,
+                              p, &len));
+  TEST_ASSERT_EQUAL_UINT(3, len);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::Ok), p[0]);
+  TEST_ASSERT_EQUAL_UINT(1, rd16(&p[1]));
+  TEST_ASSERT_EQUAL_UINT32(1, sen.scanSeq());
+}
+
+// I2C_GET_TOPOLOGY with no snapshot wired returns a well-formed empty topology.
+void test_i2c_topology_no_snapshot() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kI2cGetTopology, 1, nullptr,
+                              0, &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(3 + 8 * 5, len);
+  TEST_ASSERT_EQUAL_UINT(0, p[0]);  // mux absent
+  TEST_ASSERT_EQUAL_UINT(0, p[1]);  // eeprom absent
+  TEST_ASSERT_EQUAL_UINT(8, p[2]);  // channel count
+}
+
+// I2C_GET_TOPOLOGY encodes the published snapshot.
+void test_i2c_topology_snapshot() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  TopologySnapshot topo{};
+  topo.valid = 1;
+  topo.mux_present = 1;
+  topo.eeprom_present = 1;
+  topo.num_channels = kSensorNumChannels;
+  topo.channels[2].scanned = 1;
+  topo.channels[2].vcnl_present = 1;
+  topo.channels[2].lps_present = 1;
+  topo.channels[2].device_count = 2;
+  topo.channels[2].state = 1;  // Present
+  sen.setSnapshots(&topo, nullptr);
+
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kI2cGetTopology, 1, nullptr,
+                              0, &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(1, p[0]);  // mux
+  TEST_ASSERT_EQUAL_UINT(1, p[1]);  // eeprom
+  TEST_ASSERT_EQUAL_UINT(8, p[2]);
+  // Channel 2 block starts at 3 + 2*5 = 13.
+  TEST_ASSERT_EQUAL_UINT(1, p[13]);      // scanned
+  TEST_ASSERT_EQUAL_UINT(1, p[14]);      // vcnl
+  TEST_ASSERT_EQUAL_UINT(1, p[15]);      // lps
+  TEST_ASSERT_EQUAL_UINT(2, p[16]);      // device_count
+  TEST_ASSERT_EQUAL_UINT(1, p[17]);      // state Present
+}
+
+// SENSOR_GET_STATUS encodes the published foot-status snapshot.
+void test_sensor_status_snapshot() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  StatusSnapshot status{};
+  status.valid = 1;
+  status.num_feet = kSensorNumFeet;
+  status.present_mask = 0x05;       // feet 0 and 2 present
+  status.polling_enabled = 1;
+  status.feet[2].state = 3;         // Loaded
+  status.feet[2].confidence = 210;
+  status.feet[2].proximity = 1234;
+  status.feet[2].pressure_delta = -50;
+  status.feet[2].flags = 0x04;      // loaded
+  sen.setSnapshots(nullptr, &status);
+
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kSensorGetStatus, 1, nullptr,
+                              0, &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(3 + 6 * 7, len);
+  TEST_ASSERT_EQUAL_UINT(kSensorNumFeet, p[0]);
+  TEST_ASSERT_EQUAL_UINT(0x05, p[1]);  // present_mask
+  TEST_ASSERT_EQUAL_UINT(1, p[2]);     // polling
+  // Foot 2 block starts at 3 + 2*7 = 17.
+  TEST_ASSERT_EQUAL_UINT(3, p[17]);              // state
+  TEST_ASSERT_EQUAL_UINT(210, p[18]);            // confidence
+  TEST_ASSERT_EQUAL_UINT(1234, rd16(&p[19]));    // proximity
+  TEST_ASSERT_EQUAL_INT16(-50, static_cast<int16_t>(rd16(&p[21])));
+  TEST_ASSERT_EQUAL_UINT(0x04, p[23]);           // flags
+}
+
+// SENSOR_SET_RATE stages and echoes a valid poll rate.
+void test_sensor_set_rate_ok() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  uint8_t req[2];
+  wr16(&req[0], 50);
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kSensorSetRate, 1, req,
+                              sizeof(req), &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(3, len);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::Ok), p[0]);
+  TEST_ASSERT_EQUAL_UINT(50, rd16(&p[1]));
+  TEST_ASSERT_EQUAL_UINT(50, sen.sensorRateHz());
+  TEST_ASSERT_EQUAL_UINT32(1, sen.rateSeq());
+}
+
+// SENSOR_SET_RATE rejects an out-of-range (zero) rate.
+void test_sensor_set_rate_bad() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  uint8_t req[2];
+  wr16(&req[0], 0);
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kSensorSetRate, 1, req,
+                              sizeof(req), &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::BadRequest), p[0]);
+  TEST_ASSERT_TRUE((h.flags & api::flag::kError) != 0);
+  TEST_ASSERT_EQUAL_UINT32(0, sen.rateSeq());
+}
+
+// CONTACT_CALIBRATE for one foot stages the matching single-bit mask.
+void test_contact_calibrate_one_foot() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  uint8_t req[1] = {2};
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kContactCalibrate, 1, req,
+                              sizeof(req), &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(2, len);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::Ok), p[0]);
+  TEST_ASSERT_EQUAL_HEX8(0x04, p[1]);
+  TEST_ASSERT_EQUAL_HEX8(0x04, sen.calibrateMask());
+  TEST_ASSERT_EQUAL_UINT32(1, sen.calibrateSeq());
+}
+
+// CONTACT_CALIBRATE 0xFF stages an all-feet mask.
+void test_contact_calibrate_all() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  uint8_t req[1] = {0xFF};
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kContactCalibrate, 1, req,
+                              sizeof(req), &h, p, &len));
+  TEST_ASSERT_EQUAL_HEX8(0x3F, p[1]);
+  TEST_ASSERT_EQUAL_HEX8(0x3F, sen.calibrateMask());
+}
+
+// CONTACT_CALIBRATE with a bad foot index is BadRequest and does not stage.
+void test_contact_calibrate_bad_foot() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  uint8_t req[1] = {kSensorNumFeet};
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kContactCalibrate, 1, req,
+                              sizeof(req), &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::BadRequest), p[0]);
+  TEST_ASSERT_EQUAL_UINT32(0, sen.calibrateSeq());
+}
+
+// CONTACT_CALIBRATE is rejected when the snapshot shows no present sensors.
+void test_contact_calibrate_rejected_no_sensors() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  StatusSnapshot status{};
+  status.valid = 1;
+  status.present_mask = 0;  // no feet present
+  sen.setSnapshots(nullptr, &status);
+  uint8_t req[1] = {0xFF};
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kContactCalibrate, 1, req,
+                              sizeof(req), &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::Rejected), p[0]);
+  TEST_ASSERT_TRUE((h.flags & api::flag::kError) != 0);
+  TEST_ASSERT_EQUAL_UINT32(0, sen.calibrateSeq());
+}
+
+// SENSOR_CALIBRATE stages an all-feet mask regardless of payload.
+void test_sensor_calibrate_all() {
+  FeatureApi feat;
+  SensorApi sen;
+  sen.setFeatureApi(&feat);
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    runSensor(feat, sen, sensormsg::kSensorCalibrate, 1, nullptr,
+                              0, &h, p, &len));
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(SensorResult::Ok), p[0]);
+  TEST_ASSERT_EQUAL_HEX8(0x3F, p[1]);
+  TEST_ASSERT_EQUAL_HEX8(0x3F, sen.calibrateMask());
+  TEST_ASSERT_EQUAL_UINT32(1, sen.calibrateSeq());
+}
+
 // Without a SensorApi delegate the sensor block is an unknown message.
 void test_unknown_without_sensor_api() {
   FeatureApi feat;
@@ -290,6 +525,17 @@ int main(int, char**) {
   RUN_TEST(test_set_thresholds_bad_foot);
   RUN_TEST(test_set_thresholds_short);
   RUN_TEST(test_set_leveling_params_ok);
+  RUN_TEST(test_i2c_scan_bumps_seq);
+  RUN_TEST(test_i2c_topology_no_snapshot);
+  RUN_TEST(test_i2c_topology_snapshot);
+  RUN_TEST(test_sensor_status_snapshot);
+  RUN_TEST(test_sensor_set_rate_ok);
+  RUN_TEST(test_sensor_set_rate_bad);
+  RUN_TEST(test_contact_calibrate_one_foot);
+  RUN_TEST(test_contact_calibrate_all);
+  RUN_TEST(test_contact_calibrate_bad_foot);
+  RUN_TEST(test_contact_calibrate_rejected_no_sensors);
+  RUN_TEST(test_sensor_calibrate_all);
   RUN_TEST(test_unknown_without_sensor_api);
   return UNITY_END();
 }

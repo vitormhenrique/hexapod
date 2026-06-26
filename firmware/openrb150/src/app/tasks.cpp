@@ -123,6 +123,12 @@ protocol::FeatureApi g_featureApi;
 // (the contact-estimator owner). Wired to g_featureApi once at apiTask startup.
 protocol::SensorApi g_sensorApi;
 
+// Published snapshots the SensorApi reads (apiTask) and i2cTask keeps current:
+// the I2C topology (refreshed on each scan) and the fused foot-contact status.
+// Single-writer (i2cTask) / multi-reader PODs, like g_footState.
+protocol::TopologySnapshot g_sensorTopoSnap;
+protocol::StatusSnapshot g_sensorStatusSnap;
+
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
 
@@ -868,6 +874,10 @@ void apiTask(void*) {
   // Route CONTACT/LEVELING enable/disable through the shared feature surface so
   // there is one desired-feature set (AGENTS.md 1.3).
   g_sensorApi.setFeatureApi(&g_featureApi);
+  // Give the sensor API read access to the topology / foot-status snapshots
+  // i2cTask publishes so I2C_GET_TOPOLOGY / SENSOR_GET_STATUS can encode them
+  // (apiTask is a reader only; i2cTask owns Wire).
+  g_sensorApi.setSnapshots(&g_sensorTopoSnap, &g_sensorStatusSnap);
 #ifdef HEXAPOD_ENABLE_DXL_RAW_REGISTER
   // Expert-only: raw DXL register read/write (DXL_READ_REGISTER /
   // DXL_WRITE_REGISTER). Off by default; build with this macro defined to
@@ -948,6 +958,50 @@ void apiTask(void*) {
   }
 }
 
+// Publish the discovered I2C topology into the portable snapshot the SensorApi
+// reads for I2C_GET_TOPOLOGY. Called after each scan (boot + I2C_SCAN). Only
+// i2cTask writes this snapshot.
+void publishTopologySnapshot() {
+  protocol::TopologySnapshot& s = g_sensorTopoSnap;
+  s.mux_present = g_i2cTopology.mux_present ? 1 : 0;
+  s.eeprom_present = g_i2cTopology.eeprom_present ? 1 : 0;
+  s.num_channels = protocol::kSensorNumChannels;
+  for (uint8_t i = 0; i < protocol::kSensorNumChannels; ++i) {
+    const i2c::ChannelInfo& c = g_i2cTopology.channels[i];
+    s.channels[i].scanned = c.scanned ? 1 : 0;
+    s.channels[i].vcnl_present = c.vcnl_present ? 1 : 0;
+    s.channels[i].lps_present = c.lps_present ? 1 : 0;
+    s.channels[i].device_count = c.device_count;
+    s.channels[i].state = static_cast<uint8_t>(c.state);
+  }
+  s.valid = 1;
+}
+
+// Publish the fused per-foot contact state into the snapshot the SensorApi
+// reads for SENSOR_GET_STATUS. Called each i2cTask pass after the foot copy.
+void publishStatusSnapshot() {
+  protocol::StatusSnapshot& s = g_sensorStatusSnap;
+  s.num_feet = sensors::kNumFeet;
+  s.present_mask = g_footPresentMask;
+  s.polling_enabled = g_sensorPollingEnabled ? 1 : 0;
+  for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+    const sensors::LegContactState& f = g_footState[i];
+    s.feet[i].state = static_cast<uint8_t>(f.state);
+    s.feet[i].confidence = f.confidence;
+    s.feet[i].proximity = f.proximity_raw;
+    s.feet[i].pressure_delta = static_cast<int16_t>(f.pressure_delta);
+    uint8_t flags = 0;
+    if (f.near_surface) flags |= 0x01;
+    if (f.touch) flags |= 0x02;
+    if (f.loaded) flags |= 0x04;
+    if (f.release) flags |= 0x08;
+    if (f.stale) flags |= 0x10;
+    if (f.fault) flags |= 0x20;
+    s.feet[i].flags = flags;
+  }
+  s.valid = 1;
+}
+
 void i2cTask(void*) {
   // Bring up the root I2C bus and run a one-time discovery scan so capabilities
   // (mux/EEPROM presence, per-channel foot sensors) are known early. Running it
@@ -955,6 +1009,7 @@ void i2cTask(void*) {
   g_i2cBus.begin();
   g_i2cBus.scanAll(g_i2cTopology);
   g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
+  publishTopologySnapshot();
 
   // Seed the contact estimator with the compiled-default foot calibration so it
   // is usable immediately (per-foot classification stays disabled until a
@@ -1034,12 +1089,45 @@ void i2cTask(void*) {
       applied_threshold_seq = want_seq;
     }
 
+    // Round-robin foot-sensor polling state (declared before the scan/calibrate
+    // service blocks so a re-scan can force a re-power of rediscovered boards).
+    static uint8_t poll_ch = 0;
+    static uint8_t configured_mask = 0;
+
+    // Service a host-requested I2C re-scan (I2C_SCAN). i2cTask is the sole Wire
+    // owner, so the blocking probe runs here; the host polls I2C_GET_TOPOLOGY
+    // for the refreshed result. selectNone() first so the mux is in a known
+    // state before scanning the root bus + channels.
+    static uint32_t applied_scan_seq = 0;
+    const uint32_t want_scan = g_sensorApi.scanSeq();
+    if (want_scan != applied_scan_seq) {
+      g_i2cBus.selectNone();
+      g_i2cBus.scanAll(g_i2cTopology);
+      g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
+      configured_mask = 0;  // force re-power of any (re)discovered boards
+      publishTopologySnapshot();
+      applied_scan_seq = want_scan;
+    }
+
+    // Service a host-requested baseline capture (CONTACT_CALIBRATE /
+    // SENSOR_CALIBRATE). The estimator (owned here) re-zeroes the per-foot
+    // pressure baseline to the latest reading for each requested foot.
+    static uint32_t applied_calibrate_seq = 0;
+    const uint32_t want_cal = g_sensorApi.calibrateSeq();
+    if (want_cal != applied_calibrate_seq) {
+      const uint8_t mask = g_sensorApi.calibrateMask();
+      for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+        if ((mask & static_cast<uint8_t>(1u << i)) != 0) {
+          g_contact.captureBaseline(i);
+        }
+      }
+      applied_calibrate_seq = want_cal;
+    }
+
     // Poll one foot sensor per iteration (round-robin) so each pass does bounded
     // Wire work and the control loop is never stalled by a slow/missing board
     // (AGENTS.md 1.1 / 5.4). The mux requires exclusive one-hot channel select;
     // we select, read, then deselect so the root bus (EEPROM) stays addressable.
-    static uint8_t poll_ch = 0;
-    static uint8_t configured_mask = 0;
     if (g_sensorPollingEnabled && g_i2cTopology.mux_present) {
       const uint8_t ch = poll_ch;
       poll_ch = static_cast<uint8_t>((poll_ch + 1) % i2c::kNumFootChannels);
@@ -1067,6 +1155,8 @@ void i2cTask(void*) {
     for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
       g_footState[i] = g_contact.foot(i);
     }
+    // Mirror the fused foot state into the SensorApi snapshot (SENSOR_GET_STATUS).
+    publishStatusSnapshot();
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kI2c));
   }

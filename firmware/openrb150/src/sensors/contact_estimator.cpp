@@ -52,6 +52,16 @@ void ContactEstimator::setThresholds(uint8_t leg, uint16_t near_thresh,
       params_.release_den;
 }
 
+void ContactEstimator::captureBaseline(uint8_t leg) {
+  if (leg >= kNumFeet) return;
+  LegContactState& st = feet_[leg];
+  // Re-zero the baseline to the latest raw pressure so a resting foot reads a
+  // ~0 delta. The state machine counters are left untouched; the next update
+  // re-classifies against the new baseline.
+  st.pressure_baseline = st.pressure_raw;
+  st.pressure_delta = 0;
+}
+
 void ContactEstimator::reset() {
   for (uint8_t i = 0; i < kNumFeet; ++i) {
     const int32_t keep_baseline = feet_[i].pressure_baseline;

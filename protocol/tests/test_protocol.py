@@ -324,6 +324,15 @@ _SENSOR_BUILDERS = {
     "leveling_enable": lambda: api.build_leveling_enable(seq=4),
     "leveling_disable": lambda: api.build_leveling_disable(seq=5),
     "leveling_set_params": lambda: api.build_leveling_set_params(5000, 200, 64, seq=6),
+    "i2c_scan": lambda: api.build_i2c_scan(seq=7),
+    "i2c_get_topology": lambda: api.build_i2c_get_topology(seq=8),
+    "sensor_get_status": lambda: api.build_sensor_get_status(seq=9),
+    "sensor_set_rate": lambda: api.build_sensor_set_rate(50, seq=10),
+    "contact_calibrate": lambda: api.build_contact_calibrate(2, seq=11),
+    "contact_calibrate_all": lambda: api.build_contact_calibrate(
+        api.SENSOR_CALIBRATE_ALL, seq=12
+    ),
+    "sensor_calibrate": lambda: api.build_sensor_calibrate(seq=13),
 }
 
 
@@ -365,6 +374,64 @@ def test_parse_leveling_params_result():
     assert ok.ok and ok.max_tilt_mdeg == 5000
     assert ok.rate_mdeg_s == 200 and ok.response_x255 == 64
     bad = api.parse_leveling_params_result(bytes([api.SENSOR_BAD_REQUEST]))
+    assert bad.result == api.SENSOR_BAD_REQUEST and not bad.ok
+
+
+def test_parse_i2c_scan_result():
+    ok = api.parse_i2c_scan_result(struct.pack("<BH", api.SENSOR_OK, 7))
+    assert ok.ok and ok.scan_seq == 7
+    bad = api.parse_i2c_scan_result(bytes([api.SENSOR_BAD_REQUEST]))
+    assert bad.result == api.SENSOR_BAD_REQUEST and not bad.ok
+
+
+def test_parse_i2c_topology_result():
+    payload = bytearray([1, 1, api.SENSOR_NUM_CHANNELS])
+    for ch in range(api.SENSOR_NUM_CHANNELS):
+        if ch == 2:
+            payload += bytes([1, 1, 1, 2, 1])  # present board
+        else:
+            payload += bytes([0, 0, 0, 0, 0])
+    topo = api.parse_i2c_topology_result(bytes(payload))
+    assert topo.mux_present and topo.eeprom_present
+    assert len(topo.channels) == api.SENSOR_NUM_CHANNELS
+    assert topo.channels[2].vcnl_present and topo.channels[2].lps_present
+    assert topo.channels[2].device_count == 2 and topo.channels[2].state == 1
+    assert not topo.channels[0].scanned
+    short = api.parse_i2c_topology_result(b"")
+    assert short.channels == []
+
+
+def test_parse_sensor_status_result():
+    payload = bytearray([api.SENSOR_NUM_FEET, 0x05, 1])
+    for foot in range(api.SENSOR_NUM_FEET):
+        if foot == 2:
+            payload += struct.pack("<BBHhB", 3, 210, 1234, -50, 0x04)
+        else:
+            payload += struct.pack("<BBHhB", 0, 0, 0, 0, 0)
+    status = api.parse_sensor_status_result(bytes(payload))
+    assert status.present_mask == 0x05 and status.polling_enabled
+    assert len(status.feet) == api.SENSOR_NUM_FEET
+    f = status.feet[2]
+    assert f.state == 3 and f.confidence == 210
+    assert f.proximity == 1234 and f.pressure_delta == -50
+    assert f.loaded and not f.stale
+    short = api.parse_sensor_status_result(b"")
+    assert short.feet == []
+
+
+def test_parse_sensor_rate_result():
+    ok = api.parse_sensor_rate_result(struct.pack("<BH", api.SENSOR_OK, 50))
+    assert ok.ok and ok.rate_hz == 50
+    bad = api.parse_sensor_rate_result(bytes([api.SENSOR_BAD_REQUEST]))
+    assert bad.result == api.SENSOR_BAD_REQUEST and not bad.ok
+
+
+def test_parse_sensor_calibrate_result():
+    ok = api.parse_sensor_calibrate_result(bytes([api.SENSOR_OK, 0x3F]))
+    assert ok.ok and ok.mask == 0x3F
+    rej = api.parse_sensor_calibrate_result(bytes([api.SENSOR_REJECTED, 0x3F]))
+    assert not rej.ok and rej.mask == 0x3F
+    bad = api.parse_sensor_calibrate_result(bytes([api.SENSOR_BAD_REQUEST]))
     assert bad.result == api.SENSOR_BAD_REQUEST and not bad.ok
 
 

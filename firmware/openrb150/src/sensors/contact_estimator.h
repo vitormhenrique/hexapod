@@ -100,6 +100,12 @@ class ContactEstimator {
   void setThresholds(uint8_t leg, uint16_t near_thresh, uint16_t touch_thresh,
                      uint16_t load_thresh);
 
+  // Capture the current pressure reading as the new per-foot baseline (host
+  // CONTACT_CALIBRATE / SENSOR_CALIBRATE). The foot must be at rest/unloaded
+  // when called; the live delta drops to ~0. Counters/state are left intact so
+  // the next update re-classifies against the new baseline. Owned by i2cTask.
+  void captureBaseline(uint8_t leg);
+
   // Reset all feet to AIR with zero counters (baselines kept from configure).
   void reset();
 

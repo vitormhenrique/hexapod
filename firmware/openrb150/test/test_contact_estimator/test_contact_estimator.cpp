@@ -234,6 +234,41 @@ void test_set_thresholds_bad_leg_ignored() {
                           static_cast<uint8_t>(est.foot(0).state));
 }
 
+// captureBaseline() re-zeroes the per-foot baseline to the latest reading so a
+// foot resting under load reads ~0 delta and no longer classifies as loaded.
+void test_capture_baseline_rezeroes_delta() {
+  FootSensorCal cal[kNumFeet];
+  enabledCal(cal, /*baseline=*/1000, /*near=*/50, /*touch=*/100, /*load=*/300);
+  ContactEstimator est;
+  est.configure(cal, fastParams());
+
+  // A standing offset of 400 over baseline -> LOADED.
+  est.update(0, s(0, 1400), 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Loaded),
+                          static_cast<uint8_t>(est.foot(0).state));
+
+  // Capture the current reading (1400) as the new baseline; delta drops to 0.
+  est.captureBaseline(0);
+  TEST_ASSERT_EQUAL_INT32(1400, est.foot(0).pressure_baseline);
+  TEST_ASSERT_EQUAL_INT32(0, est.foot(0).pressure_delta);
+
+  // The same raw 1400 now reads delta 0 -> falls back out of LOADED.
+  est.update(0, s(0, 1400), 20);
+  est.update(0, s(0, 1400), 30);
+  TEST_ASSERT_NOT_EQUAL(static_cast<uint8_t>(ContactState::Loaded),
+                        static_cast<uint8_t>(est.foot(0).state));
+}
+
+// captureBaseline() ignores out-of-range legs (no crash / no effect).
+void test_capture_baseline_bad_leg_ignored() {
+  FootSensorCal cal[kNumFeet];
+  enabledCal(cal);
+  ContactEstimator est;
+  est.configure(cal, fastParams());
+  est.captureBaseline(kNumFeet);  // out of range, must be a no-op
+  TEST_ASSERT_EQUAL_INT32(0, est.foot(0).pressure_delta);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_disabled_foot_stays_air);
@@ -247,5 +282,7 @@ int main(int, char**) {
   RUN_TEST(test_loaded_mask_multiple_feet);
   RUN_TEST(test_set_thresholds_changes_classification);
   RUN_TEST(test_set_thresholds_bad_leg_ignored);
+  RUN_TEST(test_capture_baseline_rezeroes_delta);
+  RUN_TEST(test_capture_baseline_bad_leg_ignored);
   return UNITY_END();
 }

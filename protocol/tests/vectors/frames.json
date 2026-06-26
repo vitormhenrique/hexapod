@@ -240,6 +240,34 @@
       {
         "name": "leveling_set_params",
         "request": "0002a5020102750206010101010206048813c8024003861b00"
+      },
+      {
+        "name": "i2c_scan",
+        "request": "0002a5020102760207010101010101034c8d00"
+      },
+      {
+        "name": "i2c_get_topology",
+        "request": "0002a502010277020801010101010103cb3b00"
+      },
+      {
+        "name": "sensor_get_status",
+        "request": "0002a502010278020901010101010103a92a00"
+      },
+      {
+        "name": "sensor_set_rate",
+        "request": "0002a502010279020a010101010202023203cbf100"
+      },
+      {
+        "name": "contact_calibrate",
+        "request": "0002a50201027a020b01010101020104028e5d00"
+      },
+      {
+        "name": "contact_calibrate_all",
+        "request": "0002a50201027a020c01010101020104ff97d200"
+      },
+      {
+        "name": "sensor_calibrate",
+        "request": "0002a50201027b020d010101010101030b9400"
       }
     ]
   },

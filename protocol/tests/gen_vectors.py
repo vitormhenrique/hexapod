@@ -254,7 +254,8 @@ def build_feature() -> dict:
 
 def build_sensor() -> dict:
     """Deterministic request frames for the sensor / contact / leveling group
-    (ubs.5.1 subset: CONTACT_*/LEVELING_* control).
+    (ubs.5.1 CONTACT_*/LEVELING_* control + ubs.5.2 I2C scan / topology /
+    sensor status / rate / calibrate).
 
     Responses reflect the live feature availability/reason the firmware
     publishes, which is not a static fixture, so only the request encoding is
@@ -287,6 +288,36 @@ def build_sensor() -> dict:
         {
             "name": "leveling_set_params",
             "request": api_mod.build_leveling_set_params(5000, 200, 64, seq=6).hex(),
+        },
+        {
+            "name": "i2c_scan",
+            "request": api_mod.build_i2c_scan(seq=7).hex(),
+        },
+        {
+            "name": "i2c_get_topology",
+            "request": api_mod.build_i2c_get_topology(seq=8).hex(),
+        },
+        {
+            "name": "sensor_get_status",
+            "request": api_mod.build_sensor_get_status(seq=9).hex(),
+        },
+        {
+            "name": "sensor_set_rate",
+            "request": api_mod.build_sensor_set_rate(50, seq=10).hex(),
+        },
+        {
+            "name": "contact_calibrate",
+            "request": api_mod.build_contact_calibrate(2, seq=11).hex(),
+        },
+        {
+            "name": "contact_calibrate_all",
+            "request": api_mod.build_contact_calibrate(
+                api_mod.SENSOR_CALIBRATE_ALL, seq=12
+            ).hex(),
+        },
+        {
+            "name": "sensor_calibrate",
+            "request": api_mod.build_sensor_calibrate(seq=13).hex(),
         },
     ]
     return {"cases": cases}
