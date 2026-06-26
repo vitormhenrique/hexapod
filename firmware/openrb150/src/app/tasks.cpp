@@ -293,8 +293,12 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       break;
     }
     case StreamId::ServoStatus: {
-      // count(1) then 13 bytes/servo: id, pos(4), vel(2), load(2), volt_mv(2),
-      // temp(1), err(1). 18 servos -> 235 bytes, within the 256 payload cap.
+      // count(1) then 14 bytes/servo: id, pos(4), vel(2), load(2), volt_mv(2),
+      // temp(1), err(1), torque_enable(1). 18 servos -> 253 bytes, within the
+      // 256 payload cap. Position is refreshed for all servos every cycle by the
+      // all-servo Sync Read; the detail fields (vel/load/volt/temp/torque) are
+      // filled by the dxlTask round-robin per-servo read (eax.6), so they are
+      // valid once each servo has been polled at least once.
       const uint8_t n = g_servoStatusCount;
       p[o++] = n;
       for (uint8_t i = 0; i < n; ++i) {
@@ -306,6 +310,7 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
         o += put16(&p[o], s.present_voltage_mv);
         p[o++] = static_cast<uint8_t>(s.present_temperature_c);
         p[o++] = s.hardware_error;
+        p[o++] = s.torque_enabled ? 1 : 0;
       }
       break;
     }
@@ -683,6 +688,11 @@ void runQueuedDxlJob() {
     case protocol::dxljob::Type::Scan: {
       const uint8_t found = g_dxlBus.scan(job.arg0, job.arg1);
       g_servoStatusCount = 0;  // status snapshot is stale after a rescan
+      // Clear the cached detail fields: indices now map to different servos, so
+      // the round-robin readStatus must repopulate them from scratch (eax.6).
+      for (uint8_t i = 0; i < dxl::DxlBus::kMaxServos; ++i) {
+        g_servoStatus[i] = dxl::ServoStatus{};
+      }
       data[len++] = found;
       for (uint8_t i = 0; i < found; ++i) {
         if (static_cast<uint8_t>(len + 6) > protocol::dxljob::kMaxResult) break;
@@ -927,6 +937,21 @@ void dxlTask(void*) {
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
       g_servoStatusCount = n;
+
+      // Round-robin one full per-servo read per cycle (eax.6). The all-servo
+      // Sync Read above carries Present Position only (the MX(2.0) 23-byte
+      // status block exceeds the DXL recv buffer), so the detail fields
+      // (velocity, load, voltage, temperature, torque-enable, hardware error)
+      // are gathered one servo at a time. syncReadStatus preserves these fields
+      // between cycles, so the servo_status stream converges over servoCount()
+      // cycles. Read-only and torque-off-safe; bounded to one servo per cycle.
+      static uint8_t rr_servo = 0;
+      const uint8_t cnt = g_dxlBus.servoCount();
+      if (rr_servo >= cnt) rr_servo = 0;
+      const uint8_t rr_id = g_dxlBus.profile(rr_servo).id;
+      g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
+      g_servoStatus[rr_servo].id = rr_id;  // readStatus does not set id
+      ++rr_servo;
     }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kDxl));
   }

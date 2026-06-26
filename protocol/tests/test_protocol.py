@@ -693,6 +693,18 @@ def test_telemetry_golden_decode(case):
             assert got.joint == want["joint"]
             assert got.angle_centideg == want["angle_centideg"]
             assert got.clamped == want["clamped"]
+    elif case["name"] == "servo_status":
+        assert isinstance(rec, telemetry.ServoStatusTelemetry)
+        assert len(rec.servos) == len(case["servos"])
+        for got, want in zip(rec.servos, case["servos"]):
+            assert got.id == want["id"]
+            assert got.position == want["position"]
+            assert got.velocity == want["velocity"]
+            assert got.load == want["load"]
+            assert got.voltage_mv == want["voltage_mv"]
+            assert got.temperature_c == want["temperature_c"]
+            assert got.hardware_error == want["hardware_error"]
+            assert got.torque_enabled == want["torque_enabled"]
 
 
 def test_decode_joint_state_fields():
@@ -739,6 +751,22 @@ def test_servo_goals_via_decode_stream():
     assert isinstance(rec, telemetry.ServoGoalsTelemetry)
     assert rec.goals[0].leg == 5 and rec.goals[0].angle_centideg == -1234
     assert rec.goals[0].clamped is True
+
+
+def test_decode_servo_status_includes_torque_enable():
+    # count(1) then 14 bytes/servo: id,pos(u32),vel(i16),load(i16),volt(u16),
+    # temp(i8),err(u8),torque(u8). Two servos: torque on/off.
+    payload = bytes([2])
+    payload += struct.pack("<BIhhHbBB", 1, 2048, 12, -34, 1200, 31, 0, 1)
+    payload += struct.pack("<BIhhHbBB", 7, 1700, -5, 0, 1180, 29, 0, 0)
+    rec = telemetry.decode_servo_status(payload)
+    assert len(rec.servos) == 2
+    assert rec.servos[0].id == 1 and rec.servos[0].torque_enabled is True
+    assert rec.servos[0].velocity == 12 and rec.servos[0].load == -34
+    assert rec.servos[0].temperature_c == 31
+    assert rec.servos[1].id == 7 and rec.servos[1].torque_enabled is False
+    # Defensive: a short final record is dropped, not an error.
+    assert telemetry.decode_servo_status(bytes([1, 0])).servos == []
 
 
 def test_telemetry_stream_count_includes_joint_state():

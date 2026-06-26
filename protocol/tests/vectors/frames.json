@@ -407,6 +407,33 @@
             "clamped": false
           }
         ]
+      },
+      {
+        "name": "servo_status",
+        "stream": "servo_status",
+        "payload": "0201000800000c00deffb0041f000107a4060000fbff00009c041d0000",
+        "servos": [
+          {
+            "id": 1,
+            "position": 2048,
+            "velocity": 12,
+            "load": -34,
+            "voltage_mv": 1200,
+            "temperature_c": 31,
+            "hardware_error": 0,
+            "torque_enabled": true
+          },
+          {
+            "id": 7,
+            "position": 1700,
+            "velocity": -5,
+            "load": 0,
+            "voltage_mv": 1180,
+            "temperature_c": 29,
+            "hardware_error": 0,
+            "torque_enabled": false
+          }
+        ]
       }
     ]
   },

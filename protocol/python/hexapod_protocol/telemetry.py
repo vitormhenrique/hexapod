@@ -138,6 +138,7 @@ class ServoStatus:
     voltage_mv: int
     temperature_c: int
     hardware_error: int
+    torque_enabled: bool = False
 
 
 @dataclass
@@ -274,7 +275,7 @@ def decode_servo_status(p: bytes) -> ServoStatusTelemetry:
     servos: list[ServoStatus] = []
     off = 1
     for _ in range(count):
-        if off + 13 > len(p):
+        if off + 14 > len(p):
             break
         sid = p[off]
         pos = _u32(p, off + 1)
@@ -284,8 +285,9 @@ def decode_servo_status(p: bytes) -> ServoStatusTelemetry:
         volt = _u16(p, off + 9)
         temp = struct.unpack_from("<b", p, off + 11)[0]
         err = p[off + 12]
-        servos.append(ServoStatus(sid, pos, vel, load, volt, temp, err))
-        off += 13
+        torque = bool(p[off + 13])
+        servos.append(ServoStatus(sid, pos, vel, load, volt, temp, err, torque))
+        off += 14
     return ServoStatusTelemetry(servos)
 
 

@@ -542,6 +542,52 @@ def build_telemetry() -> dict:
             "goals": goals,
         }
     )
+    # servo_status payload (eax.6): count(1) then 14 bytes/servo: id, pos(u32),
+    # vel(i16), load(i16), volt_mv(u16), temp(i8), err(u8), torque_enable(u8).
+    # Two servos: one torque-on (loaded), one torque-off (released).
+    servos = [
+        {
+            "id": 1,
+            "position": 2048,
+            "velocity": 12,
+            "load": -34,
+            "voltage_mv": 1200,
+            "temperature_c": 31,
+            "hardware_error": 0,
+            "torque_enabled": True,
+        },
+        {
+            "id": 7,
+            "position": 1700,
+            "velocity": -5,
+            "load": 0,
+            "voltage_mv": 1180,
+            "temperature_c": 29,
+            "hardware_error": 0,
+            "torque_enabled": False,
+        },
+    ]
+    spayload = bytearray([len(servos)])
+    for s in servos:
+        spayload += struct.pack(
+            "<BIhhHbBB",
+            s["id"],
+            s["position"],
+            s["velocity"],
+            s["load"],
+            s["voltage_mv"],
+            s["temperature_c"],
+            s["hardware_error"],
+            1 if s["torque_enabled"] else 0,
+        )
+    cases.append(
+        {
+            "name": "servo_status",
+            "stream": "servo_status",
+            "payload": _hex(bytes(spayload)),
+            "servos": servos,
+        }
+    )
     return {"cases": cases}
 
 

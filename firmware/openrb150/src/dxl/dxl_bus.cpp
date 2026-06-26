@@ -211,10 +211,14 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
   if (!ready_ || out == nullptr) {
     return 0;
   }
-  // Initialize outputs to a clean, not-ok state mapped to servo order.
+  // Refresh identity + mark each entry stale for this cycle, but PRESERVE the
+  // detail fields (velocity/load/voltage/temperature/torque/hardware_error)
+  // populated by the dxlTask round-robin readStatus (eax.6): this Sync Read
+  // only carries Present Position, so wiping the struct would zero the detail
+  // fields every cycle. A successful read below sets position + ok.
   for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
-    out[i] = ServoStatus{};
     out[i].id = servos_[i].id;
+    out[i].ok = false;
   }
 
   uint8_t fresh = 0;
