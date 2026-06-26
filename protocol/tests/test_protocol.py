@@ -716,3 +716,181 @@ def test_telemetry_stream_count_includes_joint_state():
         telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
     )
 
+
+# --------------------------------------------------------------------------- #
+# RobotConfig decoder + servo-map / tick<->angle helpers
+# --------------------------------------------------------------------------- #
+from hexapod_protocol import config as cfgmod  # noqa: E402
+
+CFG = VECTORS["config"]
+
+
+def test_config_payload_size_matches_vector():
+    assert cfgmod.CONFIG_PAYLOAD_SIZE == CFG["payload_size"]
+    assert len(bytes.fromhex(CFG["default_payload"])) == CFG["payload_size"]
+
+
+def test_default_config_encode_matches_golden():
+    # The host default + serializer must reproduce the firmware's exact bytes.
+    payload = cfgmod.encode_robot_config(cfgmod.default_robot_config())
+    assert payload.hex() == CFG["default_payload"]
+    assert crc16(payload) == CFG["default_payload_crc"]
+
+
+def test_decode_robot_config_golden_fields():
+    cfg = cfgmod.decode_robot_config(bytes.fromhex(CFG["default_payload"]))
+    assert cfg.schema_version == CFG["schema_version"]
+    assert cfg.robot_name == CFG["robot_name"]
+    assert cfg.feature_defaults == CFG["feature_defaults"]
+    assert cfg.links.coxa_cmm == CFG["links"]["coxa_cmm"]
+    assert cfg.links.femur_cmm == CFG["links"]["femur_cmm"]
+    assert cfg.links.tibia_cmm == CFG["links"]["tibia_cmm"]
+    assert cfg.gait.body_height_mm == CFG["gait"]["body_height_mm"]
+    assert cfg.gait.gait == CFG["gait"]["gait"]
+    assert len(cfg.servos) == cfgmod.NUM_SERVOS
+    assert len(cfg.legs) == cfgmod.NUM_LEGS
+    assert len(cfg.feet) == cfgmod.NUM_FOOT_SENSORS
+    for want in CFG["servos"]:
+        s = cfg.servos[want["index"]]
+        assert s.id == want["id"]
+        assert s.leg == want["leg"]
+        assert s.joint == want["joint"]
+        assert s.sign == want["sign"]
+        assert s.trim_ticks == want["trim_ticks"]
+        assert s.min_tick == want["min_tick"]
+        assert s.max_tick == want["max_tick"]
+
+
+def test_decode_robot_config_roundtrip():
+    cfg = cfgmod.default_robot_config()
+    again = cfgmod.decode_robot_config(cfgmod.encode_robot_config(cfg))
+    assert again == cfg
+
+
+def test_decode_robot_config_rejects_bad_length_and_schema():
+    with pytest.raises(cfgmod.ConfigDecodeError):
+        cfgmod.decode_robot_config(b"\x00" * (cfgmod.CONFIG_PAYLOAD_SIZE - 1))
+    payload = bytearray(cfgmod.encode_robot_config(cfgmod.default_robot_config()))
+    payload[0] = 0x09  # bogus schema version (low byte)
+    with pytest.raises(cfgmod.ConfigDecodeError):
+        cfgmod.decode_robot_config(bytes(payload))
+
+
+@pytest.mark.parametrize("case", CFG["tick_to_angle"])
+def test_tick_to_angle_golden(case):
+    cfg = cfgmod.default_robot_config()
+    smap = cfgmod.ServoMap(cfg)
+    ang = smap.tick_to_angle(case["leg"], case["joint"], case["tick"])
+    assert ang == pytest.approx(case["angle_rad"], abs=1e-9)
+    assert ang * cfgmod.RAD_TO_DEG == pytest.approx(case["angle_deg"], abs=1e-6)
+
+
+@pytest.mark.parametrize("case", CFG["angle_to_tick"])
+def test_angle_to_tick_golden(case):
+    cfg = cfgmod.default_robot_config()
+    smap = cfgmod.ServoMap(cfg)
+    cmd = smap.angle_to_tick(case["leg"], case["joint"], case["angle_deg"] * cfgmod.DEG_TO_RAD)
+    assert cmd.tick == case["tick"]
+    assert cmd.clamped_low == case["clamped_low"]
+    assert cmd.clamped_high == case["clamped_high"]
+
+
+def test_tick_angle_roundtrip_within_travel():
+    # Inside the configured travel window the conversion round-trips to the tick.
+    cfg = cfgmod.default_robot_config()
+    smap = cfgmod.ServoMap(cfg)
+    for tick in (1024, 1500, 2048, 2600, 3072):
+        ang = smap.tick_to_angle(0, 1, tick)
+        cmd = smap.angle_to_tick(0, 1, ang)
+        assert cmd.tick == tick
+        assert not cmd.clamped_low and not cmd.clamped_high
+
+
+def test_servo_map_lookup_and_unmapped():
+    cfg = cfgmod.default_robot_config()
+    smap = cfgmod.ServoMap(cfg)
+    assert smap.servo_for(0, 0).id == 1  # leg0 coxa
+    assert smap.servo_for_id(13).leg == 0 and smap.servo_for_id(13).joint == 2
+    assert smap.servo_for(9, 0) is None  # leg out of range
+    assert smap.tick_to_angle(9, 0, 2048) == 0.0
+    assert smap.angle_to_tick(9, 0, 0.5).unmapped
+
+
+def test_config_summary_decode():
+    payload = (
+        struct.pack("<HHH", cfgmod.SCHEMA_VERSION, cfgmod.CONFIG_PAYLOAD_SIZE, cfgmod.CFG_BLOCK_MAX)
+        + bytes([0x03])  # persistent + staged valid
+        + struct.pack("<I", cfgmod.FEAT_SENSOR_POLLING)
+        + b"HexNav".ljust(cfgmod.ROBOT_NAME_LEN, b"\x00")
+    )
+    summary = cfgmod.decode_config_summary(payload)
+    assert summary.schema_version == cfgmod.SCHEMA_VERSION
+    assert summary.payload_size == cfgmod.CONFIG_PAYLOAD_SIZE
+    assert summary.block_max == cfgmod.CFG_BLOCK_MAX
+    assert summary.persistent and summary.staged_valid
+    assert summary.feature_defaults == cfgmod.FEAT_SENSOR_POLLING
+    assert summary.robot_name == "HexNav"
+
+
+def test_config_block_reassembly():
+    # Window the default payload into CFG_BLOCK_MAX-sized CFG_GET_BLOCK responses
+    # and reassemble it back into the same RobotConfig.
+    payload = cfgmod.encode_robot_config(cfgmod.default_robot_config())
+    asm = cfgmod.ConfigBlockAssembler(len(payload))
+    off = 0
+    while off < len(payload):
+        n = min(cfgmod.CFG_BLOCK_MAX, len(payload) - off)
+        block_resp = struct.pack("<HH", off, n) + payload[off : off + n]
+        assert not asm.complete
+        asm.add_block_response(block_resp)
+        off += n
+    assert asm.complete
+    assert asm.payload() == payload
+    assert asm.decode() == cfgmod.default_robot_config()
+
+
+def test_config_block_decode_and_bounds():
+    off, data = cfgmod.decode_config_block(struct.pack("<HH", 4, 3) + b"\xaa\xbb\xcc")
+    assert off == 4 and data == b"\xaa\xbb\xcc"
+    with pytest.raises(cfgmod.ConfigDecodeError):
+        cfgmod.decode_config_block(b"\x00\x00")  # too short
+    asm = cfgmod.ConfigBlockAssembler(10)
+    with pytest.raises(cfgmod.ConfigDecodeError):
+        asm.add_block(8, b"\x00\x00\x00\x00")  # runs past the end
+
+
+def test_servo_status_fallback_matches_joint_state_shape():
+    # When the joint_state stream is unavailable, the host reproduces the same
+    # mapped angles from raw servo_status ticks via the config servo map.
+    cfg = cfgmod.default_robot_config()
+    status = telemetry.ServoStatusTelemetry(
+        servos=[
+            telemetry.ServoStatus(1, 2048, 0, 0, 0, 0, 0),  # leg0 coxa, center -> 0deg
+            telemetry.ServoStatus(7, 2389, 0, 0, 0, 0, 0),  # leg0 femur, +30deg
+            telemetry.ServoStatus(2, 1024, 0, 0, 0, 0, 0),  # leg1 coxa (sign -1)
+            telemetry.ServoStatus(200, 2048, 0, 0, 0, 0, 0),  # unmapped id -> skipped
+        ]
+    )
+    joints = cfgmod.servo_status_to_joint_angles(cfg, status)
+    assert len(joints) == 3  # unmapped servo dropped
+    assert joints[0].leg == 0 and joints[0].joint == 0 and joints[0].angle_centideg == 0
+    # leg0 femur is sign +1: a tick above center yields a positive angle.
+    assert joints[1].leg == 0 and joints[1].joint == 1
+    assert joints[1].angle_centideg == round(
+        cfgmod.tick_to_angle(cfg.servos[1], 2389) * cfgmod.RAD_TO_DEG * 100
+    )
+    # leg1 coxa has sign -1, so a tick below center yields a positive angle.
+    assert joints[2].leg == 1 and joints[2].joint == 0
+    assert joints[2].angle_centideg > 0
+
+
+def test_servo_status_fallback_clamps_out_of_range_ticks():
+    cfg = cfgmod.default_robot_config()
+    status = telemetry.ServoStatusTelemetry(
+        servos=[telemetry.ServoStatus(1, 99999, 0, 0, 0, 0, 0)]  # stale/wrapped value
+    )
+    joints = cfgmod.servo_status_to_joint_angles(cfg, status)
+    # Clamped to 4095 -> same as tick_to_angle(servo, 4095).
+    expected = round(cfgmod.tick_to_angle(cfg.servos[0], 4095) * cfgmod.RAD_TO_DEG * 100)
+    assert joints[0].angle_centideg == expected
+

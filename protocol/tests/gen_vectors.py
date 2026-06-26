@@ -19,6 +19,7 @@ sys.path.insert(0, str(ROOT / "protocol" / "python"))
 from hexapod_protocol import crc16, cobs_encode, Header, encode_frame  # noqa: E402
 from hexapod_protocol.framing import MsgType  # noqa: E402
 from hexapod_protocol import api as api_mod  # noqa: E402
+from hexapod_protocol import config as config_mod  # noqa: E402
 
 VECTORS_PATH = Path(__file__).parent / "vectors" / "frames.json"
 
@@ -153,6 +154,7 @@ def build() -> dict:
         "dxl": build_dxl(),
         "passive": build_passive(),
         "telemetry": build_telemetry(),
+        "config": build_config(),
     }
 
 def build_control() -> dict:
@@ -520,6 +522,88 @@ def build_telemetry() -> dict:
         },
     ]
     return {"cases": cases}
+
+
+def build_config() -> dict:
+    """Golden vectors for the persistent RobotConfig payload + tick<->angle math.
+
+    The serialized payload is produced firmware-side (serializeRobotConfig); the
+    host decoder must be its exact inverse. We pin the compiled-default config's
+    serialized bytes (and their CRC, which the firmware native test cross-checks
+    against its own serializer) plus a set of tick<->angle conversions so both
+    implementations agree on the servo-map arithmetic byte-for-byte.
+    """
+    cfg = config_mod.default_robot_config()
+    payload = config_mod.encode_robot_config(cfg)
+
+    # tick<->angle cases over a few default servos (sign +1 leg0, sign -1 leg1).
+    smap = config_mod.ServoMap(cfg)
+    tick_cases = []
+    for leg, joint, tick in [(0, 0, 2048), (0, 1, 2389), (1, 0, 2048), (1, 2, 1024), (4, 1, 3072)]:
+        s = smap.servo_for(leg, joint)
+        ang = config_mod.tick_to_angle(s, tick)
+        tick_cases.append(
+            {
+                "leg": leg,
+                "joint": joint,
+                "tick": tick,
+                "angle_rad": ang,
+                "angle_deg": ang * config_mod.RAD_TO_DEG,
+            }
+        )
+
+    angle_cases = []
+    for leg, joint, deg in [(0, 0, 0.0), (0, 1, 30.0), (1, 0, -45.0), (1, 2, 200.0), (4, 1, -200.0)]:
+        s = smap.servo_for(leg, joint)
+        cmd = config_mod.angle_to_tick(s, deg * config_mod.DEG_TO_RAD)
+        angle_cases.append(
+            {
+                "leg": leg,
+                "joint": joint,
+                "angle_deg": deg,
+                "tick": cmd.tick,
+                "clamped_low": cmd.clamped_low,
+                "clamped_high": cmd.clamped_high,
+            }
+        )
+
+    return {
+        "payload_size": config_mod.CONFIG_PAYLOAD_SIZE,
+        "default_payload": _hex(payload),
+        "default_payload_crc": crc16(payload),
+        "schema_version": cfg.schema_version,
+        "robot_name": cfg.robot_name,
+        "feature_defaults": cfg.feature_defaults,
+        "links": {
+            "coxa_cmm": cfg.links.coxa_cmm,
+            "femur_cmm": cfg.links.femur_cmm,
+            "tibia_cmm": cfg.links.tibia_cmm,
+        },
+        "gait": {
+            "body_height_mm": cfg.gait.body_height_mm,
+            "stride_len_mm": cfg.gait.stride_len_mm,
+            "step_height_mm": cfg.gait.step_height_mm,
+            "duty_x255": cfg.gait.duty_x255,
+            "speed_x255": cfg.gait.speed_x255,
+            "gait": cfg.gait.gait,
+        },
+        "servos": [
+            {
+                "index": i,
+                "id": s.id,
+                "leg": s.leg,
+                "joint": s.joint,
+                "sign": s.sign,
+                "trim_ticks": s.trim_ticks,
+                "min_tick": s.min_tick,
+                "max_tick": s.max_tick,
+            }
+            for i, s in enumerate(cfg.servos)
+            if i in (0, 1, 2, 15, 17)
+        ],
+        "tick_to_angle": tick_cases,
+        "angle_to_tick": angle_cases,
+    }
 
 
 def main() -> None:

@@ -384,5 +384,157 @@
         ]
       }
     ]
+  },
+  "config": {
+    "payload_size": 331,
+    "default_payload": "01004865784e617600000000000000000000e815fb19b60970fd7cfb5bffbc3490027cfb5bff44cbba0200005bffd8dc900284045bff6cee70fd84045bff941146fd00005bff28230100000100000004000c0700010100000004000c0d00020100000004000c020100ff00000004000c080101ff00000004000c0e0102ff00000004000c030200ff00000004000c090201ff00000004000c0f0202ff00000004000c040300ff00000004000c0a0301ff00000004000c100302ff00000004000c0504000100000004000c0b04010100000004000c1104020100000004000c0605000100000004000c0c05010100000004000c1205020100000004000c28003c001e0080800000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+    "default_payload_crc": 23403,
+    "schema_version": 1,
+    "robot_name": "HexNav",
+    "feature_defaults": 0,
+    "links": {
+      "coxa_cmm": 5608,
+      "femur_cmm": 6651,
+      "tibia_cmm": 2486
+    },
+    "gait": {
+      "body_height_mm": 40,
+      "stride_len_mm": 60,
+      "step_height_mm": 30,
+      "duty_x255": 128,
+      "speed_x255": 128,
+      "gait": 0
+    },
+    "servos": [
+      {
+        "index": 0,
+        "id": 1,
+        "leg": 0,
+        "joint": 0,
+        "sign": 1,
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
+      },
+      {
+        "index": 1,
+        "id": 7,
+        "leg": 0,
+        "joint": 1,
+        "sign": 1,
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
+      },
+      {
+        "index": 2,
+        "id": 13,
+        "leg": 0,
+        "joint": 2,
+        "sign": 1,
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
+      },
+      {
+        "index": 15,
+        "id": 6,
+        "leg": 5,
+        "joint": 0,
+        "sign": 1,
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
+      },
+      {
+        "index": 17,
+        "id": 18,
+        "leg": 5,
+        "joint": 2,
+        "sign": 1,
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
+      }
+    ],
+    "tick_to_angle": [
+      {
+        "leg": 0,
+        "joint": 0,
+        "tick": 2048,
+        "angle_rad": 0.0,
+        "angle_deg": 0.0
+      },
+      {
+        "leg": 0,
+        "joint": 1,
+        "tick": 2389,
+        "angle_rad": 0.5230874486690037,
+        "angle_deg": 29.970703125000004
+      },
+      {
+        "leg": 1,
+        "joint": 0,
+        "tick": 2048,
+        "angle_rad": -0.0,
+        "angle_deg": -0.0
+      },
+      {
+        "leg": 1,
+        "joint": 2,
+        "tick": 1024,
+        "angle_rad": 1.5707963267948966,
+        "angle_deg": 90.0
+      },
+      {
+        "leg": 4,
+        "joint": 1,
+        "tick": 3072,
+        "angle_rad": 1.5707963267948966,
+        "angle_deg": 90.0
+      }
+    ],
+    "angle_to_tick": [
+      {
+        "leg": 0,
+        "joint": 0,
+        "angle_deg": 0.0,
+        "tick": 2048,
+        "clamped_low": false,
+        "clamped_high": false
+      },
+      {
+        "leg": 0,
+        "joint": 1,
+        "angle_deg": 30.0,
+        "tick": 2389,
+        "clamped_low": false,
+        "clamped_high": false
+      },
+      {
+        "leg": 1,
+        "joint": 0,
+        "angle_deg": -45.0,
+        "tick": 2560,
+        "clamped_low": false,
+        "clamped_high": false
+      },
+      {
+        "leg": 1,
+        "joint": 2,
+        "angle_deg": 200.0,
+        "tick": 1024,
+        "clamped_low": true,
+        "clamped_high": false
+      },
+      {
+        "leg": 4,
+        "joint": 1,
+        "angle_deg": -200.0,
+        "tick": 1024,
+        "clamped_low": true,
+        "clamped_high": false
+      }
+    ]
   }
 }

@@ -7,6 +7,7 @@
 #include <unity.h>
 
 #include "../../src/config/config_schema.h"
+#include "../../src/protocol/crc16.h"
 
 using namespace config;
 
@@ -187,6 +188,22 @@ void test_validate_rejects_missing_joint_slot() {
   TEST_ASSERT_FALSE(validateRobotConfig(cfg));
 }
 
+// Cross-check: the serialized default-config bytes must match the host
+// reference byte-for-byte. The host generator (protocol/tests/gen_vectors.py)
+// emits frames.json["config"]["default_payload_crc"] over the same payload, and
+// the Python tests assert their encoder reproduces it; pinning the CRC here
+// guarantees the C++ serializer and the Python config decoder agree on the
+// exact wire layout the eax.4 host decoder consumes.
+void test_default_payload_crc_matches_host_vector() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  uint8_t buf[kConfigPayloadSize];
+  uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
+  TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
+  // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
+  TEST_ASSERT_EQUAL_UINT16(23403, protocol::crc16(buf, n));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_defaults_are_valid);
@@ -201,5 +218,6 @@ int main(int, char**) {
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
   RUN_TEST(test_validate_rejects_missing_joint_slot);
+  RUN_TEST(test_default_payload_crc_matches_host_vector);
   return UNITY_END();
 }
