@@ -358,5 +358,31 @@
         "request": "0002a502010283020401010101010103fcbc00"
       }
     ]
+  },
+  "telemetry": {
+    "cases": [
+      {
+        "name": "joint_state",
+        "stream": "joint_state",
+        "payload": "03000000000101b80b02026cee",
+        "joints": [
+          {
+            "leg": 0,
+            "joint": 0,
+            "angle_centideg": 0
+          },
+          {
+            "leg": 1,
+            "joint": 1,
+            "angle_centideg": 3000
+          },
+          {
+            "leg": 2,
+            "joint": 2,
+            "angle_centideg": -4500
+          }
+        ]
+      }
+    ]
   }
 }

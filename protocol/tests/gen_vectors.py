@@ -152,6 +152,7 @@ def build() -> dict:
         "maintenance": build_maintenance(),
         "dxl": build_dxl(),
         "passive": build_passive(),
+        "telemetry": build_telemetry(),
     }
 
 def build_control() -> dict:
@@ -486,6 +487,36 @@ def build_passive() -> dict:
         {
             "name": "passive_zero_reference",
             "request": api_mod.build_passive_zero_reference(seq=4).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
+def build_telemetry() -> dict:
+    """Deterministic telemetry frame payloads + their decoded fields.
+
+    Telemetry flows firmware -> host, so these vectors pin the *decoded* wire
+    layout (the host decoder must reproduce the expected fields from the bytes).
+    Only the joint_state stream (eax.1) is pinned here; it carries already-mapped
+    URDF-zero-relative joint angles in centidegrees so the host renders without
+    the servo map.
+    """
+    # joint_state payload: count(1) then leg(1), joint(1), angle_centideg(int16).
+    # Three joints: center (0.00 deg), +30.00 deg, -45.00 deg.
+    joints = [
+        {"leg": 0, "joint": 0, "angle_centideg": 0},
+        {"leg": 1, "joint": 1, "angle_centideg": 3000},
+        {"leg": 2, "joint": 2, "angle_centideg": -4500},
+    ]
+    payload = bytearray([len(joints)])
+    for j in joints:
+        payload += struct.pack("<BBh", j["leg"], j["joint"], j["angle_centideg"])
+    cases = [
+        {
+            "name": "joint_state",
+            "stream": "joint_state",
+            "payload": _hex(bytes(payload)),
+            "joints": joints,
         },
     ]
     return {"cases": cases}

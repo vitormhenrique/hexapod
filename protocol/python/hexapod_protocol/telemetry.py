@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 7
+NUM_STREAMS = 8
 
 
 class StreamId(IntEnum):
@@ -25,6 +25,7 @@ class StreamId(IntEnum):
     I2C_SENSORS_RAW = 4
     RC_INPUT = 5
     API_STATS = 6
+    JOINT_STATE = 7
 
 
 STREAM_NAMES = {
@@ -35,6 +36,7 @@ STREAM_NAMES = {
     StreamId.I2C_SENSORS_RAW: "i2c_sensors_raw",
     StreamId.RC_INPUT: "rc_input",
     StreamId.API_STATS: "api_stats",
+    StreamId.JOINT_STATE: "joint_state",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -184,6 +186,30 @@ class ApiStatsTelemetry:
     dropped_per_stream: list[int] = field(default_factory=list)
 
 
+# Joint roles (mirror config::JointRole: coxa/femur/tibia).
+JOINT_ROLE_NAMES = {0: "coxa", 1: "femur", 2: "tibia"}
+
+
+@dataclass
+class JointAngle:
+    leg: int
+    joint: int
+    angle_centideg: int
+
+    @property
+    def angle_deg(self) -> float:
+        return self.angle_centideg / 100.0
+
+    @property
+    def joint_name(self) -> str:
+        return JOINT_ROLE_NAMES.get(self.joint, f"0x{self.joint:02X}")
+
+
+@dataclass
+class JointStateTelemetry:
+    joints: list[JointAngle] = field(default_factory=list)
+
+
 def _u16(buf: bytes, off: int) -> int:
     return struct.unpack_from("<H", buf, off)[0]
 
@@ -297,6 +323,26 @@ def decode_api_stats(p: bytes) -> ApiStatsTelemetry:
     return ApiStatsTelemetry(tx, dropped)
 
 
+def decode_joint_state(p: bytes) -> JointStateTelemetry:
+    """Mapped per-joint present angles: count(1) then leg(1), joint(1),
+    angle_centideg(int16) per joint. Angles are already URDF-zero-relative
+    (the firmware applied the servo map), so no config is needed to render."""
+    if not p:
+        return JointStateTelemetry()
+    count = p[0]
+    joints: list[JointAngle] = []
+    off = 1
+    for _ in range(count):
+        if off + 4 > len(p):
+            break
+        leg = p[off]
+        joint = p[off + 1]
+        angle = struct.unpack_from("<h", p, off + 2)[0]
+        joints.append(JointAngle(leg, joint, angle))
+        off += 4
+    return JointStateTelemetry(joints)
+
+
 _DECODERS = {
     StreamId.HEALTH: decode_health,
     StreamId.CONTROL_STATE: decode_control_state,
@@ -305,6 +351,7 @@ _DECODERS = {
     StreamId.I2C_SENSORS_RAW: decode_i2c_sensors_raw,
     StreamId.RC_INPUT: decode_rc_input,
     StreamId.API_STATS: decode_api_stats,
+    StreamId.JOINT_STATE: decode_joint_state,
 }
 
 

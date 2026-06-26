@@ -2,12 +2,14 @@
 
 #include <Arduino.h>
 #include <FreeRTOS_SAMD21.h>
+#include <math.h>
 
 #include "../board/board.h"
 #include "../config/config_api.h"
 #include "../config/eeprom_24lc32.h"
 #include "../dxl/dxl_bus.h"
 #include "../dxl/dxl_params.h"
+#include "../dxl/servo_map.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
@@ -346,6 +348,39 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       for (uint8_t i = 0; i < protocol::kNumStreams; ++i) {
         o += put32(&p[o], g_subs.dropped(static_cast<StreamId>(i)));
       }
+      break;
+    }
+    case StreamId::JointState: {
+      // Mapped present joint angles, ready to render without the host needing
+      // the servo map (eax.1). count(1) then 4 bytes/joint: leg(1), joint(1),
+      // angle_centideg(int16). Angles come from the active config's servo map
+      // (sign/trim/center 2048, 4096 ticks/rev), so they read correctly in both
+      // active and passive (torque-off) modes from the present-position snapshot.
+      // 18 joints -> 1 + 18*4 = 73 bytes, within the 256 payload cap.
+      const dxl::ServoMap map(g_configApi.config());
+      const uint8_t n = g_servoStatusCount;
+      uint8_t* countp = &p[o++];
+      uint8_t emitted = 0;
+      for (uint8_t i = 0; i < n; ++i) {
+        const dxl::ServoStatus& s = g_servoStatus[i];
+        const config::ServoConfig* sc = map.servoForId(s.id);
+        if (sc == nullptr) continue;  // skip servos not in the map
+        // Single-turn present position; clamp into the device range so a
+        // multi-turn or stale read cannot wrap the angle.
+        int32_t raw = s.present_position;
+        if (raw < 0) raw = 0;
+        if (raw > config::kServoMaxTick) raw = config::kServoMaxTick;
+        const float rad =
+            map.tickToAngle(sc->leg, sc->joint, static_cast<uint16_t>(raw));
+        long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
+        if (centideg > 32767) centideg = 32767;
+        if (centideg < -32768) centideg = -32768;
+        p[o++] = sc->leg;
+        p[o++] = sc->joint;
+        o += put16(&p[o], static_cast<uint16_t>(static_cast<int16_t>(centideg)));
+        ++emitted;
+      }
+      *countp = emitted;
       break;
     }
   }

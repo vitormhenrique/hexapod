@@ -34,9 +34,10 @@ enum class StreamId : uint8_t {
   I2cSensorsRaw = 4,  // per-foot raw proximity/pressure
   RcInput = 5,        // normalized RC channels + flags
   ApiStats = 6,       // protocol rx/tx + drop counters
+  JointState = 7,     // mapped per-leg/joint present angle (centidegrees)
 };
 
-constexpr uint8_t kNumStreams = 7;
+constexpr uint8_t kNumStreams = 8;
 
 // Telemetry frame msg-id base: a telemetry frame for StreamId s uses header
 // msg_id = kTelemetryFrameMsgBase + s. Chosen above the command ranges

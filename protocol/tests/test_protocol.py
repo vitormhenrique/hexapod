@@ -666,3 +666,53 @@ def test_parse_passive_rate_result():
     bad = api.parse_passive_rate_result(bytes([api.PASSIVE_BAD_REQUEST]))
     assert bad.result == api.PASSIVE_BAD_REQUEST and not bad.ok
 
+
+# --------------------------------------------------------------------------- #
+# Telemetry stream decoders
+# --------------------------------------------------------------------------- #
+from hexapod_protocol import telemetry  # noqa: E402
+
+
+@pytest.mark.parametrize("case", VECTORS["telemetry"]["cases"])
+def test_telemetry_golden_decode(case):
+    # decode_stream must reproduce the expected fields from the golden payload.
+    sid = telemetry.stream_id_from_name(case["stream"])
+    rec = telemetry.decode_stream(int(sid), bytes.fromhex(case["payload"]))
+    if case["name"] == "joint_state":
+        assert isinstance(rec, telemetry.JointStateTelemetry)
+        assert len(rec.joints) == len(case["joints"])
+        for got, want in zip(rec.joints, case["joints"]):
+            assert got.leg == want["leg"]
+            assert got.joint == want["joint"]
+            assert got.angle_centideg == want["angle_centideg"]
+
+
+def test_decode_joint_state_fields():
+    # count(1) then leg, joint, angle_centideg(int16): center, +30deg, -45deg.
+    payload = bytes([3]) + struct.pack("<BBh", 0, 0, 0)
+    payload += struct.pack("<BBh", 1, 1, 3000)
+    payload += struct.pack("<BBh", 2, 2, -4500)
+    js = telemetry.decode_joint_state(payload)
+    assert len(js.joints) == 3
+    assert js.joints[0].angle_deg == 0.0 and js.joints[0].joint_name == "coxa"
+    assert js.joints[1].angle_deg == 30.0 and js.joints[1].joint_name == "femur"
+    assert js.joints[2].angle_deg == -45.0 and js.joints[2].joint_name == "tibia"
+    # Defensive: empty / short payloads yield a partial record, not an error.
+    assert telemetry.decode_joint_state(b"").joints == []
+    assert telemetry.decode_joint_state(bytes([2, 0, 0, 0])).joints == []
+
+
+def test_joint_state_via_decode_stream():
+    payload = bytes([1]) + struct.pack("<BBh", 5, 2, -1234)
+    rec = telemetry.decode_stream(int(telemetry.StreamId.JOINT_STATE), payload)
+    assert isinstance(rec, telemetry.JointStateTelemetry)
+    assert rec.joints[0].leg == 5 and rec.joints[0].angle_centideg == -1234
+
+
+def test_telemetry_stream_count_includes_joint_state():
+    # api_stats carries one dropped counter per stream; joint_state grows it to 8.
+    assert telemetry.NUM_STREAMS == 8
+    assert (
+        telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
+    )
+
