@@ -151,8 +151,8 @@ def build() -> dict:
         "sensor": build_sensor(),
         "maintenance": build_maintenance(),
         "dxl": build_dxl(),
+        "passive": build_passive(),
     }
-
 
 def build_control() -> dict:
     """Deterministic request frames for the safety control command group.
@@ -460,6 +460,35 @@ def build_api() -> dict:
         "status": API_STATUS,
         "cases": cases,
     }
+
+
+def build_passive() -> dict:
+    """Deterministic request frames for the passive pose streaming group
+    (PASSIVE_ENTER / EXIT / SET_STREAM_RATE / ZERO_REFERENCE).
+
+    Responses echo the live [result, state] the firmware publishes, which is not
+    a static fixture, so only the request encoding is pinned here. The firmware
+    native test (test_passive_api) covers the response/gating behavior.
+    """
+    cases = [
+        {
+            "name": "passive_enter",
+            "request": api_mod.build_passive_enter(seq=1).hex(),
+        },
+        {
+            "name": "passive_exit",
+            "request": api_mod.build_passive_exit(seq=2).hex(),
+        },
+        {
+            "name": "passive_set_stream_rate",
+            "request": api_mod.build_passive_set_stream_rate(100, seq=3).hex(),
+        },
+        {
+            "name": "passive_zero_reference",
+            "request": api_mod.build_passive_zero_reference(seq=4).hex(),
+        },
+    ]
+    return {"cases": cases}
 
 
 def main() -> None:

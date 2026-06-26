@@ -18,6 +18,7 @@
 #include "../protocol/maintenance_api.h"
 #include "../protocol/maintenance_target_api.h"
 #include "../protocol/motion_api.h"
+#include "../protocol/passive_api.h"
 #include "../protocol/sensor_api.h"
 #include "../protocol/telemetry.h"
 #include "../sensors/contact_estimator.h"
@@ -128,6 +129,20 @@ protocol::SensorApi g_sensorApi;
 // Single-writer (i2cTask) / multi-reader PODs, like g_footState.
 protocol::TopologySnapshot g_sensorTopoSnap;
 protocol::StatusSnapshot g_sensorStatusSnap;
+
+// Host passive pose streaming command surface (PASSIVE_ENTER/EXIT/
+// SET_STREAM_RATE/ZERO_REFERENCE). apiTask records the host's request here;
+// controlTask folds requested() into the safety FSM (only enters
+// PassivePoseStream once torque is confirmed off) and force-clears it on
+// E-stop / fault.
+protocol::PassiveApi g_passiveApi;
+
+// Torque-off confirmation published by dxlTask. The control task feeds this to
+// the safety FSM as StateInputs.torque_off so PassivePoseStream is only entered
+// when no servo is driven. Starts true (DXL power + torque are OFF at boot) and
+// is set true again after dxlTask disables torque; the goal-write/torque-enable
+// path (when wired) is the only place that clears it.
+volatile bool g_dxlTorqueOff = true;
 
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
@@ -349,7 +364,9 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
 //                        gait-engine consumption lands in ubs.5, so it reports
 //                        available for streaming but is not yet fed to the gait.
 //   * TerrainLeveling - depends on FootContact (ubs.5); reports DependencyOff.
-//   * PassivePose     - torque-off pose streaming lands in ubs.6; NotImplemented.
+//   * PassivePose     - torque-off pose streaming lands in ubs.6; available
+//                        once wired (the passive command group enters the
+//                        torque-off PassivePoseStream state).
 //   * JetsonControl   - Jetson bridge lands later; NotImplemented.
 void updateFeatureFlags(uint32_t /*now_ms*/) {
   using protocol::Feature;
@@ -383,9 +400,11 @@ void updateFeatureFlags(uint32_t /*now_ms*/) {
       Feature::TerrainLeveling, false,
       contact_on ? FeatureReason::NotImplemented : FeatureReason::DependencyOff);
 
-  // PassivePose / JetsonControl: not yet wired in this build.
-  g_featureApi.setAvailability(Feature::PassivePose, false,
-                               FeatureReason::NotImplemented);
+  // PassivePose: torque-off present-position streaming is wired (ubs.6). The
+  // passive command group + safety FSM own the actual mode; this just reports
+  // the capability as available so GET_CAPABILITIES / feature_state are honest.
+  g_featureApi.setAvailability(Feature::PassivePose, true, FeatureReason::None);
+  // JetsonControl: not yet wired in this build.
   g_featureApi.setAvailability(Feature::JetsonControl, false,
                                FeatureReason::NotImplemented);
 
@@ -450,8 +469,8 @@ void controlTask(void*) {
     const bool maint_held = g_maintApi.lockHeld(now_ms);
     si.mac_lock_held = si.mac_lock_held || maint_held;
     si.maintenance_request = maint_held;
-    si.passive_request = false;      // wired when PASSIVE_ENTER lands
-    si.torque_off = false;
+    si.passive_request = g_passiveApi.requested();
+    si.torque_off = g_dxlTorqueOff;
     si.contact_enabled = false;      // wired with the contact feature toggle
     si.contact_confident = false;
     // Honor a host CLEAR_FAULT pulse before advancing the machine.
@@ -465,9 +484,13 @@ void controlTask(void*) {
     // state so a stale Mac client cannot retain bench authority across a fault.
     if (g_safetyState >= static_cast<uint8_t>(safety::State::FaultSoft)) {
       g_maintApi.revoke();
+      g_passiveApi.clear();
     }
     // Publish the live state/fault so control-command responses can echo it.
     g_controlApi.setLiveState(g_safetyState, g_faultReason);
+    // Echo the live safety state to the passive handler so PASSIVE_ENTER can
+    // gate on a maintenance-safe state and responses echo it.
+    g_passiveApi.setLiveState(g_safetyState);
     // The motion gate is the conjunction of "the state allows movement" and
     // "a command source owns authority". dxlTask uses it to keep torque off and
     // suppress goal writes unless both hold. Goal generation (gait/IK) lands in
@@ -820,6 +843,11 @@ void dxlTask(void*) {
       g_dxlBus.setTorqueAll(false);
     }
     prev_authorized = authorized;
+    // Publish torque-off confirmation for the safety FSM (passive pose gating).
+    // Torque is off whenever no servo is driven: nothing discovered yet, or
+    // motion is not authorised this cycle (the goal-write/torque-enable path is
+    // gated by g_motionGate, so authorized==false => torque stays off).
+    g_dxlTorqueOff = (g_dxlBus.servoCount() == 0) || !authorized;
 
     // Publish a fresh present-position snapshot for all discovered servos in a
     // single Sync Read per control table. This is a no-op until a maintenance
@@ -919,10 +947,15 @@ void apiTask(void*) {
       g_maintApi.setNow(st.uptime_ms);
       g_maintApi.setLiveState(g_safetyState);
 
+      // Refresh the passive handler's live state so PASSIVE_ENTER gates on the
+      // current safety state (control task also keeps this current each cycle).
+      g_passiveApi.setLiveState(g_safetyState);
+
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
           &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
-          &g_maintTargetApi, &g_dxlJobApi, &g_featureApi, &g_sensorApi);
+          &g_maintTargetApi, &g_dxlJobApi, &g_featureApi, &g_sensorApi,
+          &g_passiveApi);
       if (n > 0) {
         Serial.write(out, n);
       }

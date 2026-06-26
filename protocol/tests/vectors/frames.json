@@ -338,5 +338,25 @@
         "request": "0002a502010269020a010101010209030506030264010104019bce00"
       }
     ]
+  },
+  "passive": {
+    "cases": [
+      {
+        "name": "passive_enter",
+        "request": "0002a5020102800201010101010101038d4500"
+      },
+      {
+        "name": "passive_exit",
+        "request": "0002a502010281020201010101010103bde200"
+      },
+      {
+        "name": "passive_set_stream_rate",
+        "request": "0002a5020102820203010101010202026403fa4000"
+      },
+      {
+        "name": "passive_zero_reference",
+        "request": "0002a502010283020401010101010103fcbc00"
+      }
+    ]
   }
 }

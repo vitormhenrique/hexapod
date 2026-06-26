@@ -8,6 +8,7 @@
 #include "maintenance_api.h"
 #include "maintenance_target_api.h"
 #include "motion_api.h"
+#include "passive_api.h"
 #include "sensor_api.h"
 #include "telemetry.h"
 
@@ -60,7 +61,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      SubscriptionManager* tel, ControlApi* ctrl,
                      MotionApi* motion, MaintenanceApi* maint,
                      MaintTargetApi* maint_target, DxlJobApi* dxl_jobs,
-                     FeatureApi* features, SensorApi* sensors) {
+                     FeatureApi* features, SensorApi* sensors,
+                     PassiveApi* passive) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -240,6 +242,21 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                             kMaxPayload, &sen_len, &sen_flags)) {
           payload_len = sen_len;
           flags = sen_flags;
+          break;
+        }
+      }
+      // Delegate the passive pose streaming group (PASSIVE_ENTER/EXIT/
+      // SET_STREAM_RATE/ZERO_REFERENCE) to the PassiveApi when present. Its ids
+      // occupy the 0x80-0x83 block.
+      if (passive != nullptr && req.msg_id >= kPassiveMsgFirst &&
+          req.msg_id <= kPassiveMsgLast) {
+        uint16_t pas_len = 0;
+        uint8_t pas_flags = 0;
+        if (passive->handle(req.msg_id, req_payload,
+                            static_cast<uint16_t>(req_len), payload,
+                            kMaxPayload, &pas_len, &pas_flags)) {
+          payload_len = pas_len;
+          flags = pas_flags;
           break;
         }
       }

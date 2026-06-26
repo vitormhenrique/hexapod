@@ -100,6 +100,14 @@ namespace protocol {
 class SensorApi;
 }
 
+// Forward declaration: the passive pose streaming command group (PASSIVE_ENTER
+// / EXIT / SET_STREAM_RATE / ZERO_REFERENCE) is handled by a portable
+// PassiveApi in protocol/passive_api.h. handleRequest delegates its 0x80-0x83
+// msg-id block to it when a non-null instance is supplied.
+namespace protocol {
+class PassiveApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -163,6 +171,11 @@ constexpr uint8_t kDxlMsgLast = 0x6F;
 constexpr uint8_t kSensorMsgFirst = 0x70;
 constexpr uint8_t kSensorMsgLast = 0x7F;
 
+// Passive pose streaming command msg-id block (0x80..0x83), from
+// protocol::passivemsg.
+constexpr uint8_t kPassiveMsgFirst = 0x80;
+constexpr uint8_t kPassiveMsgLast = 0x83;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Static description of this firmware build. Filled once at boot.
@@ -202,7 +215,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      MaintTargetApi* maint_target = nullptr,
                      DxlJobApi* dxl_jobs = nullptr,
                      FeatureApi* features = nullptr,
-                     SensorApi* sensors = nullptr);
+                     SensorApi* sensors = nullptr,
+                     PassiveApi* passive = nullptr);
 
 }  // namespace api
 }  // namespace protocol

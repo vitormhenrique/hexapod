@@ -203,6 +203,24 @@ void test_bad_request_on_short_payload() {
   TEST_ASSERT_EQUAL_UINT32(0, m.intent().seq);
 }
 
+void test_motion_rejected_in_passive_pose_stream() {
+  // While the live state is PassivePoseStream (9), gait/twist/pose commands are
+  // rejected (torque-off passive mode); STOP_MOTION stays honoured.
+  MotionApi m;
+  m.reset();
+  m.setLiveState(motionstate::kPassivePoseStream, false);
+  Header h;
+  uint8_t pl[kMaxPayload];
+  size_t n = 0;
+  const uint8_t g = motiongait::kTripod;
+  runMotion(m, motionmsg::kSetGait, 20, &g, 1, &h, pl, &n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MotionResult::Rejected), pl[0]);
+  TEST_ASSERT_EQUAL_UINT32(0, m.intent().seq);  // intent untouched
+  // STOP_MOTION is always honoured, even in passive streaming.
+  runMotion(m, motionmsg::kStopMotion, 21, nullptr, 0, &h, pl, &n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MotionResult::Ok), pl[0]);
+}
+
 void test_unknown_without_motion_is_error() {
   // Dispatcher with no MotionApi must answer motion ids with UnknownMsg.
   uint8_t req[kMaxWireFrame];
@@ -234,6 +252,7 @@ int main(int, char**) {
   RUN_TEST(test_set_body_twist_decodes_and_clamps);
   RUN_TEST(test_set_body_pose_decodes_and_clamps);
   RUN_TEST(test_stop_motion_zeros_twist_and_holds_stand);
+  RUN_TEST(test_motion_rejected_in_passive_pose_stream);
   RUN_TEST(test_bad_request_on_short_payload);
   RUN_TEST(test_unknown_without_motion_is_error);
   return UNITY_END();

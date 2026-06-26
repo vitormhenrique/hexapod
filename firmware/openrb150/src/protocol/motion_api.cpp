@@ -71,6 +71,14 @@ bool MotionApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
                        uint8_t* out_flags) {
   if (!motionmsg::isMotionMsg(msg_id)) return false;
 
+  // Reject gait/twist/pose changes while the robot is in torque-off passive
+  // pose streaming (AGENTS.md 5.5). STOP_MOTION stays honoured below.
+  if (live_state_ == motionstate::kPassivePoseStream &&
+      msg_id != motionmsg::kStopMotion) {
+    return writeResult(MotionResult::Rejected, out, out_cap, out_len,
+                       out_flags);
+  }
+
   switch (msg_id) {
     case motionmsg::kSetGait: {
       if (req_len < 1) {

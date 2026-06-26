@@ -634,3 +634,35 @@ def test_parse_dxl_write_register_result():
     )
     assert badres.code == api.DXL_CODE_VERIFY_FAILED
     assert not badres.write_register().verified
+
+
+_PASSIVE_BUILDERS = {
+    "passive_enter": lambda: api.build_passive_enter(seq=1),
+    "passive_exit": lambda: api.build_passive_exit(seq=2),
+    "passive_set_stream_rate": lambda: api.build_passive_set_stream_rate(100, seq=3),
+    "passive_zero_reference": lambda: api.build_passive_zero_reference(seq=4),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["passive"]["cases"])
+def test_passive_request_golden(case):
+    # The passive pose builders must reproduce the golden request bytes.
+    wire = _PASSIVE_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_parse_passive_result():
+    ok = api.parse_passive_result(bytes([api.PASSIVE_OK, 9]))
+    assert ok.ok and ok.state == 9
+    rej = api.parse_passive_result(bytes([api.PASSIVE_REJECTED, 4]))
+    assert rej.rejected and rej.state == 4
+    bad = api.parse_passive_result(bytes([api.PASSIVE_BAD_REQUEST]))
+    assert bad.result == api.PASSIVE_BAD_REQUEST and not bad.ok
+
+
+def test_parse_passive_rate_result():
+    ok = api.parse_passive_rate_result(struct.pack("<BBH", api.PASSIVE_OK, 9, 100))
+    assert ok.ok and ok.state == 9 and ok.rate_hz == 100
+    bad = api.parse_passive_rate_result(bytes([api.PASSIVE_BAD_REQUEST]))
+    assert bad.result == api.PASSIVE_BAD_REQUEST and not bad.ok
+

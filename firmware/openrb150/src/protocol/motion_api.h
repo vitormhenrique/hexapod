@@ -60,8 +60,7 @@ constexpr float kMaxPoseRotRad = 0.4363f;  // ~25 deg
 
 // Gait ids (mirror config::GaitId so this header stays free of the config
 // schema include).
-namespace motiongait {
-constexpr uint8_t kStand = 0;
+namespace motiongait {constexpr uint8_t kStand = 0;
 constexpr uint8_t kSit = 1;
 constexpr uint8_t kTripod = 2;
 constexpr uint8_t kRipple = 3;
@@ -69,6 +68,13 @@ constexpr uint8_t kWave = 4;
 constexpr uint8_t kCrawl = 5;
 constexpr uint8_t kCount = 6;
 }  // namespace motiongait
+
+// Live safety-state wire byte (mirror safety::State) in which gait/twist/pose
+// commands are rejected because the robot is in torque-off passive streaming.
+// STOP_MOTION is always still honoured.
+namespace motionstate {
+constexpr uint8_t kPassivePoseStream = 9;
+}  // namespace motionstate
 
 // Latest validated/clamped high-level motion intent. The control task reads a
 // copy each cycle. `seq` increments on every accepted command so a consumer can

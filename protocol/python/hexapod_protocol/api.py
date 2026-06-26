@@ -163,6 +163,23 @@ MSG_SENSOR_SET_RATE = 0x79
 MSG_CONTACT_CALIBRATE = 0x7A
 MSG_SENSOR_CALIBRATE = 0x7B
 
+# Passive pose streaming commands (mirror protocol::passivemsg, 0x80-0x83).
+MSG_PASSIVE_ENTER = 0x80
+MSG_PASSIVE_EXIT = 0x81
+MSG_PASSIVE_SET_STREAM_RATE = 0x82
+MSG_PASSIVE_ZERO_REFERENCE = 0x83
+
+# Passive response result byte (mirrors protocol::PassiveResult).
+PASSIVE_OK = 0
+PASSIVE_REJECTED = 1
+PASSIVE_BAD_REQUEST = 2
+
+# Present-position stream rate bounds (Hz) for PASSIVE_SET_STREAM_RATE
+# (mirror protocol::passiverate).
+PASSIVE_RATE_DEFAULT_HZ = 50
+PASSIVE_RATE_MIN_HZ = 1
+PASSIVE_RATE_MAX_HZ = 200
+
 # Sensor response result byte (mirrors protocol::SensorResult).
 SENSOR_OK = 0
 SENSOR_REJECTED = 1
@@ -1061,6 +1078,87 @@ def parse_sensor_calibrate_result(payload: bytes) -> SensorCalibrateResult:
         return SensorCalibrateResult(payload[0], payload[1])
     return SensorCalibrateResult(
         payload[0] if payload else SENSOR_BAD_REQUEST, 0
+    )
+
+
+# --- Passive pose streaming commands (ubs.6) ------------------------------
+
+
+def build_passive_enter(seq: int = 0) -> bytes:
+    """Build a PASSIVE_ENTER command. The firmware only enters torque-off
+    passive pose streaming from a maintenance-safe state (Disarmed /
+    MacMaintenance) and once torque is confirmed off.
+    """
+    return build_command(MSG_PASSIVE_ENTER, seq=seq)
+
+
+def build_passive_exit(seq: int = 0) -> bytes:
+    """Build a PASSIVE_EXIT command (drops the passive request)."""
+    return build_command(MSG_PASSIVE_EXIT, seq=seq)
+
+
+def build_passive_set_stream_rate(rate_hz: int, seq: int = 0) -> bytes:
+    """Build a PASSIVE_SET_STREAM_RATE command staging the present-position
+    stream rate (Hz). Only honoured while passive streaming is active.
+    """
+    payload = struct.pack("<H", rate_hz & 0xFFFF)
+    return build_command(MSG_PASSIVE_SET_STREAM_RATE, seq=seq, payload=payload)
+
+
+def build_passive_zero_reference(seq: int = 0) -> bytes:
+    """Build a PASSIVE_ZERO_REFERENCE command requesting a present-position
+    zero-reference capture. Only honoured while passive streaming is active.
+    """
+    return build_command(MSG_PASSIVE_ZERO_REFERENCE, seq=seq)
+
+
+@dataclass
+class PassiveResult:
+    """Response to PASSIVE_ENTER / PASSIVE_EXIT / PASSIVE_ZERO_REFERENCE
+    ([result, state])."""
+
+    result: int
+    state: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == PASSIVE_OK
+
+    @property
+    def rejected(self) -> bool:
+        return self.result == PASSIVE_REJECTED
+
+
+def parse_passive_result(payload: bytes) -> PassiveResult:
+    """Decode a passive enter/exit/zero response."""
+    if len(payload) >= 2:
+        return PassiveResult(payload[0], payload[1])
+    return PassiveResult(payload[0] if payload else PASSIVE_BAD_REQUEST, 0)
+
+
+@dataclass
+class PassiveRateResult:
+    """Response to PASSIVE_SET_STREAM_RATE ([result, state, rate_hz u16])."""
+
+    result: int
+    state: int
+    rate_hz: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == PASSIVE_OK
+
+
+def parse_passive_rate_result(payload: bytes) -> PassiveRateResult:
+    """Decode a PASSIVE_SET_STREAM_RATE response. A short payload is an error."""
+    if len(payload) >= 4:
+        return PassiveRateResult(
+            payload[0], payload[1], struct.unpack_from("<H", payload, 2)[0]
+        )
+    return PassiveRateResult(
+        payload[0] if payload else PASSIVE_BAD_REQUEST,
+        payload[1] if len(payload) >= 2 else 0,
+        0,
     )
 
 
