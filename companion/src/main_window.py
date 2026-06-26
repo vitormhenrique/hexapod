@@ -26,7 +26,7 @@ from hexapod_protocol import telemetry as tlm
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Hexapod Companion")
+        self.setWindowTitle("HexNav")
         self.resize(1180, 760)
         self.service = ConnectionService()
 

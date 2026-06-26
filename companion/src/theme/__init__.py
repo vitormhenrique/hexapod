@@ -109,7 +109,7 @@ QStackedWidget > QWidget {{
     font-size: 17px;
     font-weight: 800;
     letter-spacing: 2px;
-    padding: 20px 18px 6px 18px;
+    padding: 0;
 }}
 #NavSection {{
     color: {DRACULA.comment};

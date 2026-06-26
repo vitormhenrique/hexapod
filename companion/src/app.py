@@ -10,9 +10,14 @@ def main() -> int:
 
     from main_window import MainWindow
     from theme import apply_theme
+    from ui.app_icon import app_icon
 
     app = QApplication.instance() or QApplication(sys.argv)
-    app.setApplicationName("Hexapod Companion")
+    app.setApplicationName("HexNav")
+    app.setApplicationDisplayName("HexNav")
+    app.setOrganizationName("Hexapod")
+    app.setDesktopFileName("HexNav")
+    app.setWindowIcon(app_icon())
     apply_theme(app)
 
     window = MainWindow()

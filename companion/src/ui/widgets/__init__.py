@@ -161,9 +161,22 @@ class NavRail(QFrame):
         self._lay = QVBoxLayout(self)
         self._lay.setContentsMargins(0, 0, 0, 12)
         self._lay.setSpacing(0)
-        title = QLabel("HEXAPOD")
+
+        header = QWidget()
+        hrow = QHBoxLayout(header)
+        hrow.setContentsMargins(18, 20, 18, 6)
+        hrow.setSpacing(10)
+        from ui.app_icon import app_icon
+
+        logo = QLabel()
+        logo.setPixmap(app_icon().pixmap(26, 26))
+        title = QLabel("HEXNAV")
         title.setObjectName("NavRailTitle")
-        self._lay.addWidget(title)
+        hrow.addWidget(logo)
+        hrow.addWidget(title)
+        hrow.addStretch(1)
+        self._lay.addWidget(header)
+
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
         self._buttons: dict[str, QPushButton] = {}
