@@ -864,6 +864,17 @@ def test_decode_servo_status_includes_torque_enable():
     assert telemetry.decode_servo_status(bytes([1, 0])).servos == []
 
 
+def test_decode_hw_error_bits():
+    assert telemetry.decode_hw_error(0x00) == []
+    assert telemetry.decode_hw_error(0x01) == ["input voltage"]
+    assert telemetry.decode_hw_error(0x04) == ["overheating"]
+    assert telemetry.decode_hw_error(0x20) == ["overload"]
+    # Multiple bits, reported low bit first.
+    assert telemetry.decode_hw_error(0x21) == ["input voltage", "overload"]
+    # bit1 is unused on MX(2.0); it is ignored.
+    assert telemetry.decode_hw_error(0x02) == []
+
+
 def test_telemetry_stream_count_includes_joint_state():
     # api_stats carries one dropped counter per stream; joint_state, servo_goals,
     # and leg_state grow it to 10.

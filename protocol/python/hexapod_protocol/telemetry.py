@@ -148,6 +148,21 @@ class ServoStatusTelemetry:
     servos: list[ServoStatus] = field(default_factory=list)
 
 
+# DYNAMIXEL MX(2.0) Hardware Error Status bits (control-table addr 70).
+HW_ERROR_BITS = {
+    0: "input voltage",
+    2: "overheating",
+    3: "motor encoder",
+    4: "electrical shock",
+    5: "overload",
+}
+
+
+def decode_hw_error(err: int) -> list[str]:
+    """Return the names of the set hardware-error bits, low bit first."""
+    return [name for bit, name in sorted(HW_ERROR_BITS.items()) if err & (1 << bit)]
+
+
 @dataclass
 class FootContact:
     state: int

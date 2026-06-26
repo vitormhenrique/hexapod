@@ -532,8 +532,15 @@ class ServoTuningPage(BasePage):
 
     def build(self) -> None:
         self._rows: dict[int, int] = {}  # servo id -> table row
+        # Servo-map for id -> (leg, joint) so servo_goals targets can be matched.
+        from hexapod_protocol import config as cfg
+
+        self._servo_map = cfg.ServoMap(cfg.default_robot_config())
+        self._last_status: dict[int, object] = {}  # servo id -> ServoStatus
+        self._goal_ticks: dict[int, int] = {}  # servo id -> commanded target tick
 
         self.content.addWidget(self._status_table())
+        self.content.addWidget(self._detail_panel())
         self.content.addWidget(self._param_editor())
         self.content.addWidget(self._limits_editor())
         self.content.addWidget(self._expert_panel())
@@ -552,10 +559,18 @@ class ServoTuningPage(BasePage):
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setMinimumHeight(240)
+        self.table.itemSelectionChanged.connect(self._on_row_selected)
         lay.addWidget(self.table)
         return box
+
+    def _detail_panel(self) -> QWidget:
+        from ui.widgets import ServoDetailPanel
+
+        self.detail = ServoDetailPanel()
+        return self.detail
 
     def _param_editor(self) -> QGroupBox:
         box = QGroupBox("Logical parameter editor")
@@ -685,18 +700,27 @@ class ServoTuningPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         if connected:
             self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+            self.service.subscribe(int(tlm.StreamId.SERVO_GOALS), 20)
         else:
             self.table.setRowCount(0)
             self._rows.clear()
+            self._last_status.clear()
+            self._goal_ticks.clear()
+            self.detail.select_servo(None)
 
     def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.SERVO_GOALS):
+            self._on_servo_goals(record)
+            return
         if stream_id != int(tlm.StreamId.SERVO_STATUS):
             return
         for s in record.servos:
+            self._last_status[s.id] = s
             row = self._rows.get(s.id)
             if row is None:
                 row = self.table.rowCount()
                 self.table.insertRow(row)
+                self.table.setItem(row, 0, QTableWidgetItem(str(s.id)))
                 self._rows[s.id] = row
             values = [
                 str(s.id),
@@ -710,6 +734,36 @@ class ServoTuningPage(BasePage):
             ]
             for col, text in enumerate(values):
                 self.table.setItem(row, col, QTableWidgetItem(text))
+            self.detail.update_status(s)
+
+    def _on_servo_goals(self, record) -> None:
+        """Map each commanded (leg, joint) goal back to a servo id + target tick."""
+        for g in record.goals:
+            servo = self._servo_map.servo_for(g.leg, g.joint)
+            if servo is None:
+                continue
+            cmd = self._servo_map.angle_to_tick(g.leg, g.joint, g.angle_deg * 3.141592653589793 / 180.0)
+            self._goal_ticks[servo.id] = cmd.tick
+            if self.detail.servo_id == servo.id:
+                self.detail.set_target_tick(cmd.tick)
+
+    def _on_row_selected(self) -> None:
+        items = self.table.selectedItems()
+        if not items:
+            return
+        row = items[0].row()
+        id_item = self.table.item(row, 0)
+        if id_item is None:
+            return
+        servo_id = int(id_item.text())
+        self.detail.select_servo(servo_id)
+        self.detail.set_target_tick(self._goal_ticks.get(servo_id))
+        status = self._last_status.get(servo_id)
+        if status is not None:
+            self.detail.update_status(status)
+        # Torque limit isn't streamed; read it on demand when connected.
+        if self.service.is_connected:
+            self.service.dxl_get_param(servo_id, api.DXL_PARAM_TORQUE_LIMIT)
 
     # --- parameter editor -------------------------------------------------
 
@@ -807,6 +861,9 @@ class ServoTuningPage(BasePage):
                 self.param_current.setText(f"{pv.value}  (table {pv.table_kind})")
                 self.param_value.setValue(pv.value)
                 self.param_result.setText("read ok")
+                # Feed the per-servo detail panel when this is a torque-limit read.
+                if pv.param == api.DXL_PARAM_TORQUE_LIMIT:
+                    self.detail.set_torque_limit(pv.value)
             else:
                 self.param_result.setText(f"code {res.code}")
         elif kind == "set_param":

@@ -298,6 +298,7 @@ class EventStrip(QFrame):
 
 
 from ui.widgets.hexapod_view import HexapodView  # noqa: E402  (re-export)
+from ui.widgets.servo_detail import ServoDetailPanel  # noqa: E402  (re-export)
 
 __all__ = [
     "StatusBadge",
@@ -308,4 +309,5 @@ __all__ = [
     "NavRail",
     "EventStrip",
     "HexapodView",
+    "ServoDetailPanel",
 ]
