@@ -521,6 +521,27 @@ def build_telemetry() -> dict:
             "joints": joints,
         },
     ]
+    # servo_goals payload (eax.2): count(1) then leg(1), joint(1),
+    # angle_centideg(int16), flags(1). flags bit0 = clamped. Three goals: an
+    # unclamped center, a clamped +30.00 deg, and an unclamped -45.00 deg.
+    goals = [
+        {"leg": 0, "joint": 0, "angle_centideg": 0, "clamped": False},
+        {"leg": 1, "joint": 1, "angle_centideg": 3000, "clamped": True},
+        {"leg": 2, "joint": 2, "angle_centideg": -4500, "clamped": False},
+    ]
+    gpayload = bytearray([len(goals)])
+    for g in goals:
+        gpayload += struct.pack(
+            "<BBhB", g["leg"], g["joint"], g["angle_centideg"], 1 if g["clamped"] else 0
+        )
+    cases.append(
+        {
+            "name": "servo_goals",
+            "stream": "servo_goals",
+            "payload": _hex(bytes(gpayload)),
+            "goals": goals,
+        }
+    )
     return {"cases": cases}
 
 

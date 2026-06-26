@@ -685,6 +685,14 @@ def test_telemetry_golden_decode(case):
             assert got.leg == want["leg"]
             assert got.joint == want["joint"]
             assert got.angle_centideg == want["angle_centideg"]
+    elif case["name"] == "servo_goals":
+        assert isinstance(rec, telemetry.ServoGoalsTelemetry)
+        assert len(rec.goals) == len(case["goals"])
+        for got, want in zip(rec.goals, case["goals"]):
+            assert got.leg == want["leg"]
+            assert got.joint == want["joint"]
+            assert got.angle_centideg == want["angle_centideg"]
+            assert got.clamped == want["clamped"]
 
 
 def test_decode_joint_state_fields():
@@ -709,11 +717,39 @@ def test_joint_state_via_decode_stream():
     assert rec.joints[0].leg == 5 and rec.joints[0].angle_centideg == -1234
 
 
+def test_decode_servo_goals_fields():
+    # count(1) then leg, joint, angle_centideg(int16), flags(1).
+    payload = bytes([3]) + struct.pack("<BBhB", 0, 0, 0, 0)
+    payload += struct.pack("<BBhB", 1, 1, 3000, 1)
+    payload += struct.pack("<BBhB", 2, 2, -4500, 0)
+    sg = telemetry.decode_servo_goals(payload)
+    assert len(sg.goals) == 3
+    assert sg.goals[0].angle_deg == 0.0 and not sg.goals[0].clamped
+    assert sg.goals[1].angle_deg == 30.0 and sg.goals[1].clamped
+    assert sg.goals[1].joint_name == "femur"
+    assert sg.goals[2].angle_deg == -45.0 and not sg.goals[2].clamped
+    # Defensive: empty / short payloads yield a partial record, not an error.
+    assert telemetry.decode_servo_goals(b"").goals == []
+    assert telemetry.decode_servo_goals(bytes([2, 0, 0, 0, 0])).goals == []
+
+
+def test_servo_goals_via_decode_stream():
+    payload = bytes([1]) + struct.pack("<BBhB", 5, 2, -1234, 1)
+    rec = telemetry.decode_stream(int(telemetry.StreamId.SERVO_GOALS), payload)
+    assert isinstance(rec, telemetry.ServoGoalsTelemetry)
+    assert rec.goals[0].leg == 5 and rec.goals[0].angle_centideg == -1234
+    assert rec.goals[0].clamped is True
+
+
 def test_telemetry_stream_count_includes_joint_state():
-    # api_stats carries one dropped counter per stream; joint_state grows it to 8.
-    assert telemetry.NUM_STREAMS == 8
+    # api_stats carries one dropped counter per stream; joint_state + servo_goals
+    # grow it to 9.
+    assert telemetry.NUM_STREAMS == 9
     assert (
         telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
+    )
+    assert (
+        telemetry.stream_id_from_name("servo_goals") == telemetry.StreamId.SERVO_GOALS
     )
 
 

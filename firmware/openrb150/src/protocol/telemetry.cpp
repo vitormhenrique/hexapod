@@ -16,6 +16,7 @@ constexpr uint16_t kMaxRate[kNumStreams] = {
     50,   // RcInput
     10,   // ApiStats
     50,   // JointState
+    50,   // ServoGoals
 };
 
 inline uint16_t readU16(const uint8_t* p) {

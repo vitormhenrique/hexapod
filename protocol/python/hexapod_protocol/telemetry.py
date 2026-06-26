@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 8
+NUM_STREAMS = 9
 
 
 class StreamId(IntEnum):
@@ -26,6 +26,7 @@ class StreamId(IntEnum):
     RC_INPUT = 5
     API_STATS = 6
     JOINT_STATE = 7
+    SERVO_GOALS = 8
 
 
 STREAM_NAMES = {
@@ -37,6 +38,7 @@ STREAM_NAMES = {
     StreamId.RC_INPUT: "rc_input",
     StreamId.API_STATS: "api_stats",
     StreamId.JOINT_STATE: "joint_state",
+    StreamId.SERVO_GOALS: "servo_goals",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -210,6 +212,29 @@ class JointStateTelemetry:
     joints: list[JointAngle] = field(default_factory=list)
 
 
+@dataclass
+class ServoGoal:
+    """One commanded joint goal (after IK + servo-map clamping)."""
+
+    leg: int
+    joint: int
+    angle_centideg: int
+    clamped: bool
+
+    @property
+    def angle_deg(self) -> float:
+        return self.angle_centideg / 100.0
+
+    @property
+    def joint_name(self) -> str:
+        return JOINT_ROLE_NAMES.get(self.joint, f"0x{self.joint:02X}")
+
+
+@dataclass
+class ServoGoalsTelemetry:
+    goals: list[ServoGoal] = field(default_factory=list)
+
+
 def _u16(buf: bytes, off: int) -> int:
     return struct.unpack_from("<H", buf, off)[0]
 
@@ -343,6 +368,28 @@ def decode_joint_state(p: bytes) -> JointStateTelemetry:
     return JointStateTelemetry(joints)
 
 
+def decode_servo_goals(p: bytes) -> ServoGoalsTelemetry:
+    """Per-joint commanded goals (eax.2): count(1) then leg(1), joint(1),
+    angle_centideg(int16), flags(1) per joint. flags bit0 = clamped (the goal
+    was saturated against the configured servo travel). Angles are already
+    URDF-zero-relative, so they overlay directly on the joint_state pose."""
+    if not p:
+        return ServoGoalsTelemetry()
+    count = p[0]
+    goals: list[ServoGoal] = []
+    off = 1
+    for _ in range(count):
+        if off + 5 > len(p):
+            break
+        leg = p[off]
+        joint = p[off + 1]
+        angle = struct.unpack_from("<h", p, off + 2)[0]
+        flags = p[off + 4]
+        goals.append(ServoGoal(leg, joint, angle, bool(flags & 0x01)))
+        off += 5
+    return ServoGoalsTelemetry(goals)
+
+
 _DECODERS = {
     StreamId.HEALTH: decode_health,
     StreamId.CONTROL_STATE: decode_control_state,
@@ -352,6 +399,7 @@ _DECODERS = {
     StreamId.RC_INPUT: decode_rc_input,
     StreamId.API_STATS: decode_api_stats,
     StreamId.JOINT_STATE: decode_joint_state,
+    StreamId.SERVO_GOALS: decode_servo_goals,
 }
 
 

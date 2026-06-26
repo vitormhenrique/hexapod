@@ -215,6 +215,7 @@ void test_joint_target_matches_library_and_stores() {
   const MaintTargetSet& t = api_obj.target();
   TEST_ASSERT_TRUE(t.set[leg][joint]);
   TEST_ASSERT_EQUAL_UINT16(want.tick, t.tick[leg][joint]);
+  TEST_ASSERT_FALSE(t.clamped[leg][joint]);  // within travel -> not clamped
 }
 
 void test_joint_target_clamps_high() {
@@ -240,6 +241,9 @@ void test_joint_target_clamps_high() {
   TEST_ASSERT_TRUE(rp[2] != 0 || rp[3] != 0);
   const uint16_t tick = readU16(&rp[4]);
   TEST_ASSERT_TRUE(tick == 1024 || tick == 3072);
+  // The saturated goal is flagged in the stored set so servo_goals can show it.
+  const MaintTargetSet& t = api_obj.target();
+  TEST_ASSERT_TRUE(t.clamped[0][0]);
 }
 
 void test_rejected_when_not_in_maintenance() {

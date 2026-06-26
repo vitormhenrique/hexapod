@@ -67,6 +67,10 @@ struct MaintTargetSet {
   uint32_t seq = 0;
   uint16_t tick[config::kNumLegs][config::kJointsPerLeg];
   bool set[config::kNumLegs][config::kJointsPerLeg];
+  // True when the stored goal tick was saturated against the configured servo
+  // travel (clamp_low or clamp_high). Surfaced on the servo_goals stream so the
+  // host can flag a commanded joint that hit its limit.
+  bool clamped[config::kNumLegs][config::kJointsPerLeg];
 };
 
 class MaintTargetApi {

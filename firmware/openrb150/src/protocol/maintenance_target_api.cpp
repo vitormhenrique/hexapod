@@ -33,6 +33,7 @@ void MaintTargetApi::reset() {
     for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
       target_.tick[leg][j] = config::kServoCenterTick;
       target_.set[leg][j] = false;
+      target_.clamped[leg][j] = false;
     }
   }
 }
@@ -100,6 +101,7 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
         for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
           target_.tick[leg][j] = jc[j].tick;
           target_.set[leg][j] = true;
+          target_.clamped[leg][j] = jc[j].clamped_low || jc[j].clamped_high;
         }
         ++target_.seq;
       }
@@ -147,6 +149,7 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
 
       target_.tick[leg][joint] = jc.tick;
       target_.set[leg][joint] = true;
+      target_.clamped[leg][joint] = jc.clamped_low || jc.clamped_high;
       ++target_.seq;
 
       // [result, state, clamp_low, clamp_high, tick(u16)] = 6 bytes.

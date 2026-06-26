@@ -382,6 +382,31 @@
             "angle_centideg": -4500
           }
         ]
+      },
+      {
+        "name": "servo_goals",
+        "stream": "servo_goals",
+        "payload": "0300000000000101b80b0102026cee00",
+        "goals": [
+          {
+            "leg": 0,
+            "joint": 0,
+            "angle_centideg": 0,
+            "clamped": false
+          },
+          {
+            "leg": 1,
+            "joint": 1,
+            "angle_centideg": 3000,
+            "clamped": true
+          },
+          {
+            "leg": 2,
+            "joint": 2,
+            "angle_centideg": -4500,
+            "clamped": false
+          }
+        ]
       }
     ]
   },

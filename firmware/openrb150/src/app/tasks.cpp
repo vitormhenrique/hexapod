@@ -383,6 +383,38 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       *countp = emitted;
       break;
     }
+    case StreamId::ServoGoals: {
+      // Per-joint commanded goal after IK + servo-map clamping (eax.2). Lets the
+      // host overlay commanded vs present pose in the animation. count(1) then
+      // 5 bytes/joint: leg(1), joint(1), angle_centideg(int16), flags(1). flags
+      // bit0 = clamped (goal saturated against configured servo travel). Only
+      // joints with a stored, mapped command are emitted, so until a maintenance
+      // target is set the payload is just a zero count (the gait goal-write path
+      // is the future source; today the maintenance target set is authoritative).
+      // 18 joints -> 1 + 18*5 = 91 bytes, within the 256 payload cap.
+      const dxl::ServoMap map(g_configApi.config());
+      const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
+      uint8_t* countp = &p[o++];
+      uint8_t emitted = 0;
+      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+        for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
+          if (!tgt.set[leg][j]) continue;
+          if (map.servoFor(leg, j) == nullptr) continue;  // skip unmapped slots
+          const float rad = map.tickToAngle(leg, j, tgt.tick[leg][j]);
+          long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
+          if (centideg > 32767) centideg = 32767;
+          if (centideg < -32768) centideg = -32768;
+          p[o++] = leg;
+          p[o++] = j;
+          o += put16(&p[o],
+                     static_cast<uint16_t>(static_cast<int16_t>(centideg)));
+          p[o++] = tgt.clamped[leg][j] ? 0x01 : 0x00;
+          ++emitted;
+        }
+      }
+      *countp = emitted;
+      break;
+    }
   }
   return o;
 }

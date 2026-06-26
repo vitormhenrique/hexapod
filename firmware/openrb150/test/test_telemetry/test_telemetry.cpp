@@ -207,6 +207,17 @@ void test_joint_state_stream_is_subscribable() {
   TEST_ASSERT_TRUE(m.shouldEmit(StreamId::JointState, 0));  // primes + emits
 }
 
+void test_servo_goals_stream_is_subscribable() {
+  // The commanded-goal stream (eax.2) is stream id 8, appended without
+  // renumbering, and caps at 50 Hz like the other servo-rate streams.
+  SubscriptionManager m;
+  TEST_ASSERT_EQUAL_UINT16(50, SubscriptionManager::maxRateHz(StreamId::ServoGoals));
+  const uint16_t eff = m.subscribe(StreamId::ServoGoals, 200);  // clamps to max
+  TEST_ASSERT_EQUAL_UINT16(50, eff);
+  TEST_ASSERT_TRUE(m.enabled(StreamId::ServoGoals));
+  TEST_ASSERT_TRUE(m.shouldEmit(StreamId::ServoGoals, 0));  // primes + emits
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_subscribe_sets_enabled_and_rate);
@@ -225,5 +236,6 @@ int main(int, char**) {
   RUN_TEST(test_handle_get_stream_stats);
   RUN_TEST(test_handle_rejects_non_telemetry_msg);
   RUN_TEST(test_joint_state_stream_is_subscribable);
+  RUN_TEST(test_servo_goals_stream_is_subscribable);
   return UNITY_END();
 }
