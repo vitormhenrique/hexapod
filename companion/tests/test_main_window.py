@@ -62,3 +62,22 @@ def test_safety_bar_estop_triggers_service(qtbot, monkeypatch) -> None:
     monkeypatch.setattr(window.service, "emergency_stop", lambda: fired.append(True))
     window.safety_bar.estop.click()
     assert fired == [True]
+
+
+def test_app_main_entry_point_launches_headless(monkeypatch) -> None:
+    """Exercise the hexapod-companion entry point end-to-end without blocking.
+
+    ``app.main`` builds the QApplication, applies the theme, shows the window and
+    calls ``app.exec``; stubbing ``exec`` lets the full launch path run headless.
+    """
+    import app as app_module
+
+    executed = []
+    monkeypatch.setattr(
+        "PySide6.QtWidgets.QApplication.exec",
+        lambda self: executed.append(True) or 0,
+    )
+
+    rc = app_module.main()
+    assert rc == 0
+    assert executed == [True]

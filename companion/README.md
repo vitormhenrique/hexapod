@@ -58,9 +58,12 @@ src/
   transport/        frame extractor, serial link, threaded protocol client
   data/             session logger + raw replay
   theme/            Dracula palette + Qt stylesheet
+  models/           hexapod pose model (forward kinematics for the viewer)
   services/         Qt bridge over the protocol client (signals)
-  ui/widgets/       nav rail, safety bar, event strip, emergency stop
-  ui/pages/         connect, overview, mode & safety, diagnostics
+  ui/widgets/       nav rail, safety bar, event strip, emergency stop,
+                    status badges, servo table/detail, hexapod view
+  ui/pages/         connect, overview, mode & safety, foot contact,
+                    passive pose, servo tuning, model viewer, diagnostics
   app.py            PySide6 entry point  (hexapod-companion)
   main_window.py    nav rail + safety bar + pages + event strip shell
   cli.py            Typer CLI            (hexapod-cli)
