@@ -15,6 +15,7 @@ from ui.pages import (
     ConnectPage,
     DiagnosticsPage,
     ModeSafetyPage,
+    ModelViewerPage,
     OverviewPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
@@ -41,6 +42,8 @@ class MainWindow(QMainWindow):
         self.nav.add_item("connect", "Connect")
         self.nav.add_item("overview", "Overview")
         self.nav.add_item("mode_safety", "Mode & Safety")
+        self.nav.add_section("Visualize")
+        self.nav.add_item("model", "Model Viewer")
         self.nav.add_section("Diagnose")
         self.nav.add_item("diagnostics", "Diagnostics")
         self.nav.finish()
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
             ("connect", ConnectPage(self.service)),
             ("overview", OverviewPage(self.service)),
             ("mode_safety", ModeSafetyPage(self.service)),
+            ("model", ModelViewerPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),
         ):
             self._pages[key] = self.stack.addWidget(page)

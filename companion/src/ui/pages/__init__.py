@@ -305,3 +305,62 @@ class DiagnosticsPage(BasePage):
 
     def _on_event(self, kind: str, detail: str) -> None:
         self.feed.appendPlainText(f"-- [{kind}] {detail}")
+
+
+class ModelViewerPage(BasePage):
+    title = "Model Viewer"
+    subtitle = "Live animated hexapod pose from joint telemetry (servo-map fallback)."
+    max_width = 1400
+
+    # Prefer joint_state; fall back to servo_status only when joint_state stalls.
+    _JOINT_STATE_TIMEOUT_MS = 750
+
+    def build(self) -> None:
+        from models import HexapodPoseModel
+        from hexapod_protocol import config as cfg
+        from ui.widgets import HexapodView
+
+        self._model = HexapodPoseModel(cfg.default_robot_config())
+        self._last_joint_state_ms = 0
+
+        self.source_badge = StatusBadge("Pose source")
+        self.source_badge.set("waiting", "idle")
+        self.content.addWidget(self.source_badge)
+
+        self.view = HexapodView()
+        self.view.setMinimumHeight(520)
+        self.view.set_legs(self._model.legs())
+        self.content.addWidget(self.view)
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+
+    def _now_ms(self) -> int:
+        import time
+
+        return int(time.monotonic() * 1000)
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            # Ask the firmware for joint poses; servo_status is the fallback feed.
+            self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+        else:
+            self.source_badge.set("disconnected", "idle")
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.JOINT_STATE):
+            self._last_joint_state_ms = self._now_ms()
+            self._model.update_from_joint_state(record)
+            self.source_badge.set("joint_state", "ok")
+            self.view.set_legs(self._model.legs())
+        elif stream_id == int(tlm.StreamId.SERVO_STATUS):
+            # Only drive the pose from ticks when joint_state is absent/stale.
+            stale = (
+                self._now_ms() - self._last_joint_state_ms
+                > self._JOINT_STATE_TIMEOUT_MS
+            )
+            if stale:
+                self._model.update_from_servo_status(record)
+                self.source_badge.set("servo_status (fallback)", "warn")
+                self.view.set_legs(self._model.legs())

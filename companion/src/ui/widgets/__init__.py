@@ -182,3 +182,15 @@ class EventStrip(QFrame):
         self._events.appendleft(f"{ts}  [{kind}] {detail}")
         self._label.setText(self._events[0])
         self._label.setStyleSheet(f"color: {color};")
+
+
+from ui.widgets.hexapod_view import HexapodView  # noqa: E402  (re-export)
+
+__all__ = [
+    "StatusBadge",
+    "EmergencyStopButton",
+    "SafetyBar",
+    "NavRail",
+    "EventStrip",
+    "HexapodView",
+]
