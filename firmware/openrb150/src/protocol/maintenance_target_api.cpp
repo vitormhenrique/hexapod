@@ -35,6 +35,12 @@ void MaintTargetApi::reset() {
       target_.set[leg][j] = false;
       target_.clamped[leg][j] = false;
     }
+    target_.foot_x_mm[leg] = 0;
+    target_.foot_y_mm[leg] = 0;
+    target_.foot_z_mm[leg] = 0;
+    target_.leg_target_set[leg] = false;
+    target_.leg_reachable[leg] = false;
+    target_.leg_clamped[leg] = false;
   }
 }
 
@@ -94,6 +100,17 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
         if (jc[j].clamped_low) clamp_low |= static_cast<uint8_t>(1u << j);
         if (jc[j].clamped_high) clamp_high |= static_cast<uint8_t>(1u << j);
       }
+
+      // Record the attempted foot target + IK verdict for the leg_state stream
+      // (eax.3) on EVERY attempt so the host can animate the commanded foot and
+      // flag unreachable poses. This is visualization-only and does not commit
+      // joint motion.
+      target_.foot_x_mm[leg] = static_cast<int16_t>(readI16(&req[1]));
+      target_.foot_y_mm[leg] = static_cast<int16_t>(readI16(&req[3]));
+      target_.foot_z_mm[leg] = static_cast<int16_t>(readI16(&req[5]));
+      target_.leg_target_set[leg] = true;
+      target_.leg_reachable[leg] = ik.reachable;
+      target_.leg_clamped[leg] = (clamp_low | clamp_high) != 0;
 
       // Store only a reachable solution so the leg never lunges to a saturated
       // boundary pose; an unreachable target is reported but left uncommitted.

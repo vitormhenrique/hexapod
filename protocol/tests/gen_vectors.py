@@ -626,6 +626,47 @@ def build_telemetry() -> dict:
             "servos": servos,
         }
     )
+    # leg_state payload (eax.3): count(1) then 8 bytes/leg: leg(1), foot_x(i16),
+    # foot_y(i16), foot_z(i16, mm body frame), flags(1). flags bit0 = reachable,
+    # bit1 = clamped. Two legs: a reachable/unclamped target and an unreachable
+    # one (so the host can flag a foot that left the workspace).
+    legs = [
+        {
+            "leg": 0,
+            "foot_x_mm": 127,
+            "foot_y_mm": 0,
+            "foot_z_mm": -45,
+            "reachable": True,
+            "clamped": False,
+        },
+        {
+            "leg": 3,
+            "foot_x_mm": 400,
+            "foot_y_mm": -20,
+            "foot_z_mm": 30,
+            "reachable": False,
+            "clamped": True,
+        },
+    ]
+    lpayload = bytearray([len(legs)])
+    for leg in legs:
+        flags = (0x01 if leg["reachable"] else 0) | (0x02 if leg["clamped"] else 0)
+        lpayload += struct.pack(
+            "<BhhhB",
+            leg["leg"],
+            leg["foot_x_mm"],
+            leg["foot_y_mm"],
+            leg["foot_z_mm"],
+            flags,
+        )
+    cases.append(
+        {
+            "name": "leg_state",
+            "stream": "leg_state",
+            "payload": _hex(bytes(lpayload)),
+            "legs": legs,
+        }
+    )
     return {"cases": cases}
 
 

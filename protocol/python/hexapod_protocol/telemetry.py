@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 9
+NUM_STREAMS = 10
 
 
 class StreamId(IntEnum):
@@ -27,6 +27,7 @@ class StreamId(IntEnum):
     API_STATS = 6
     JOINT_STATE = 7
     SERVO_GOALS = 8
+    LEG_STATE = 9
 
 
 STREAM_NAMES = {
@@ -39,6 +40,7 @@ STREAM_NAMES = {
     StreamId.API_STATS: "api_stats",
     StreamId.JOINT_STATE: "joint_state",
     StreamId.SERVO_GOALS: "servo_goals",
+    StreamId.LEG_STATE: "leg_state",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -236,6 +238,23 @@ class ServoGoalsTelemetry:
     goals: list[ServoGoal] = field(default_factory=list)
 
 
+@dataclass
+class LegTarget:
+    """One commanded foot target (mm, body frame) and its IK verdict (eax.3)."""
+
+    leg: int
+    foot_x_mm: int
+    foot_y_mm: int
+    foot_z_mm: int
+    reachable: bool
+    clamped: bool
+
+
+@dataclass
+class LegStateTelemetry:
+    legs: list[LegTarget] = field(default_factory=list)
+
+
 def _u16(buf: bytes, off: int) -> int:
     return struct.unpack_from("<H", buf, off)[0]
 
@@ -392,6 +411,31 @@ def decode_servo_goals(p: bytes) -> ServoGoalsTelemetry:
     return ServoGoalsTelemetry(goals)
 
 
+def decode_leg_state(p: bytes) -> LegStateTelemetry:
+    """Per-leg commanded foot target (eax.3): count(1) then leg(1),
+    foot_x(int16), foot_y(int16), foot_z(int16, mm body frame), flags(1) per
+    leg. flags bit0 = reachable, bit1 = clamped (a joint hit its travel). Only
+    legs with a recorded SET_LEG_TARGET attempt are present."""
+    if not p:
+        return LegStateTelemetry()
+    count = p[0]
+    legs: list[LegTarget] = []
+    off = 1
+    for _ in range(count):
+        if off + 8 > len(p):
+            break
+        leg = p[off]
+        x = struct.unpack_from("<h", p, off + 1)[0]
+        y = struct.unpack_from("<h", p, off + 3)[0]
+        z = struct.unpack_from("<h", p, off + 5)[0]
+        flags = p[off + 7]
+        legs.append(
+            LegTarget(leg, x, y, z, bool(flags & 0x01), bool(flags & 0x02))
+        )
+        off += 8
+    return LegStateTelemetry(legs)
+
+
 _DECODERS = {
     StreamId.HEALTH: decode_health,
     StreamId.CONTROL_STATE: decode_control_state,
@@ -402,6 +446,7 @@ _DECODERS = {
     StreamId.API_STATS: decode_api_stats,
     StreamId.JOINT_STATE: decode_joint_state,
     StreamId.SERVO_GOALS: decode_servo_goals,
+    StreamId.LEG_STATE: decode_leg_state,
 }
 
 

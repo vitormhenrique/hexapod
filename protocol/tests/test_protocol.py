@@ -765,6 +765,16 @@ def test_telemetry_golden_decode(case):
             assert got.temperature_c == want["temperature_c"]
             assert got.hardware_error == want["hardware_error"]
             assert got.torque_enabled == want["torque_enabled"]
+    elif case["name"] == "leg_state":
+        assert isinstance(rec, telemetry.LegStateTelemetry)
+        assert len(rec.legs) == len(case["legs"])
+        for got, want in zip(rec.legs, case["legs"]):
+            assert got.leg == want["leg"]
+            assert got.foot_x_mm == want["foot_x_mm"]
+            assert got.foot_y_mm == want["foot_y_mm"]
+            assert got.foot_z_mm == want["foot_z_mm"]
+            assert got.reachable == want["reachable"]
+            assert got.clamped == want["clamped"]
 
 
 def test_decode_joint_state_fields():
@@ -813,6 +823,31 @@ def test_servo_goals_via_decode_stream():
     assert rec.goals[0].clamped is True
 
 
+def test_decode_leg_state_fields():
+    # count(1) then leg, foot_x/y/z(int16), flags(1): reachable+unclamped,
+    # then unreachable+clamped.
+    payload = bytes([2]) + struct.pack("<BhhhB", 0, 127, 0, -45, 0x01)
+    payload += struct.pack("<BhhhB", 3, 400, -20, 30, 0x02)
+    ls = telemetry.decode_leg_state(payload)
+    assert len(ls.legs) == 2
+    assert ls.legs[0].leg == 0 and ls.legs[0].foot_x_mm == 127
+    assert ls.legs[0].foot_z_mm == -45
+    assert ls.legs[0].reachable and not ls.legs[0].clamped
+    assert ls.legs[1].leg == 3 and ls.legs[1].foot_y_mm == -20
+    assert not ls.legs[1].reachable and ls.legs[1].clamped
+    # Defensive: empty / short payloads yield a partial record, not an error.
+    assert telemetry.decode_leg_state(b"").legs == []
+    assert telemetry.decode_leg_state(bytes([2, 0, 0, 0])).legs == []
+
+
+def test_leg_state_via_decode_stream():
+    payload = bytes([1]) + struct.pack("<BhhhB", 4, -100, 50, -33, 0x03)
+    rec = telemetry.decode_stream(int(telemetry.StreamId.LEG_STATE), payload)
+    assert isinstance(rec, telemetry.LegStateTelemetry)
+    assert rec.legs[0].leg == 4 and rec.legs[0].foot_x_mm == -100
+    assert rec.legs[0].reachable and rec.legs[0].clamped
+
+
 def test_decode_servo_status_includes_torque_enable():
     # count(1) then 14 bytes/servo: id,pos(u32),vel(i16),load(i16),volt(u16),
     # temp(i8),err(u8),torque(u8). Two servos: torque on/off.
@@ -830,15 +865,16 @@ def test_decode_servo_status_includes_torque_enable():
 
 
 def test_telemetry_stream_count_includes_joint_state():
-    # api_stats carries one dropped counter per stream; joint_state + servo_goals
-    # grow it to 9.
-    assert telemetry.NUM_STREAMS == 9
+    # api_stats carries one dropped counter per stream; joint_state, servo_goals,
+    # and leg_state grow it to 10.
+    assert telemetry.NUM_STREAMS == 10
     assert (
         telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
     )
     assert (
         telemetry.stream_id_from_name("servo_goals") == telemetry.StreamId.SERVO_GOALS
     )
+    assert telemetry.stream_id_from_name("leg_state") == telemetry.StreamId.LEG_STATE
 
 
 # --------------------------------------------------------------------------- #

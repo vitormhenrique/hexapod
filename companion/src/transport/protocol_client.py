@@ -372,6 +372,17 @@ class ProtocolClient:
             time.sleep(poll_interval)
         return result
 
+    def dxl_scan(
+        self, first_id: int = 1, last_id: int = 252
+    ) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_scan(first_id, last_id))
+
+    def dxl_ping(self, servo_id: int) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_ping(servo_id))
+
+    def dxl_torque(self, on: bool) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_torque(on))
+
     def dxl_get_param(self, servo_id: int, param: int) -> Optional[api.DxlJobResult]:
         return self.dxl_run(api.build_dxl_get_param(servo_id, param))
 

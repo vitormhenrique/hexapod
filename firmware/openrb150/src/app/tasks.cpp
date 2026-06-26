@@ -420,6 +420,32 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       *countp = emitted;
       break;
     }
+    case StreamId::LegState: {
+      // Per-leg commanded foot target + IK verdict (eax.3). Lets the animation
+      // draw the commanded foot positions and flag unreachable poses. count(1)
+      // then 8 bytes/leg: leg(1), foot_x(i16), foot_y(i16), foot_z(i16, mm body
+      // frame), flags(1). flags bit0 = reachable, bit1 = clamped (a joint hit
+      // its configured travel). Only legs with a recorded SET_LEG_TARGET attempt
+      // are emitted, so until a leg target is sent the payload is a zero count.
+      // 6 legs -> 1 + 6*8 = 49 bytes, within the 256 payload cap.
+      const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
+      uint8_t* countp = &p[o++];
+      uint8_t emitted = 0;
+      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+        if (!tgt.leg_target_set[leg]) continue;
+        p[o++] = leg;
+        o += put16(&p[o], static_cast<uint16_t>(tgt.foot_x_mm[leg]));
+        o += put16(&p[o], static_cast<uint16_t>(tgt.foot_y_mm[leg]));
+        o += put16(&p[o], static_cast<uint16_t>(tgt.foot_z_mm[leg]));
+        uint8_t flags = 0;
+        if (tgt.leg_reachable[leg]) flags |= 0x01;
+        if (tgt.leg_clamped[leg]) flags |= 0x02;
+        p[o++] = flags;
+        ++emitted;
+      }
+      *countp = emitted;
+      break;
+    }
   }
   return o;
 }

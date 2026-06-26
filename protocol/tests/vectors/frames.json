@@ -434,6 +434,29 @@
             "torque_enabled": false
           }
         ]
+      },
+      {
+        "name": "leg_state",
+        "stream": "leg_state",
+        "payload": "02007f000000d3ff01039001ecff1e0002",
+        "legs": [
+          {
+            "leg": 0,
+            "foot_x_mm": 127,
+            "foot_y_mm": 0,
+            "foot_z_mm": -45,
+            "reachable": true,
+            "clamped": false
+          },
+          {
+            "leg": 3,
+            "foot_x_mm": 400,
+            "foot_y_mm": -20,
+            "foot_z_mm": 30,
+            "reachable": false,
+            "clamped": true
+          }
+        ]
       }
     ]
   },
