@@ -48,6 +48,43 @@ class StatusBadge(QWidget):
         self._dot.setStyleSheet(f"color: {status_color(level)}; font-size: 11px;")
 
 
+class StatCard(QFrame):
+    """A larger stat tile (caption + big value + status dot) that fills its cell.
+
+    Shares the ``set(value, level)`` API with :class:`StatusBadge` so it is a
+    drop-in for dashboard grids that should use the available space.
+    """
+
+    def __init__(self, caption: str, parent=None) -> None:
+        super().__init__(parent)
+        self.setObjectName("StatCard")
+        self.setMinimumHeight(84)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(6)
+
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        self._dot = QLabel("\u25cf")
+        self._dot.setStyleSheet(f"color: {DRACULA.comment}; font-size: 11px;")
+        self._dot.setFixedWidth(12)
+        self._caption = QLabel(caption.upper())
+        self._caption.setObjectName("StatCaption")
+        top.addWidget(self._dot)
+        top.addWidget(self._caption)
+        top.addStretch(1)
+        lay.addLayout(top)
+
+        self._value = QLabel("--")
+        self._value.setObjectName("StatValue")
+        lay.addWidget(self._value)
+        lay.addStretch(1)
+
+    def set(self, value: str, level: str = "idle") -> None:
+        self._value.setText(value)
+        self._dot.setStyleSheet(f"color: {status_color(level)}; font-size: 11px;")
+
+
 def _badge_separator() -> QFrame:
     sep = QFrame()
     sep.setObjectName("BadgeSep")
@@ -188,6 +225,7 @@ from ui.widgets.hexapod_view import HexapodView  # noqa: E402  (re-export)
 
 __all__ = [
     "StatusBadge",
+    "StatCard",
     "EmergencyStopButton",
     "SafetyBar",
     "NavRail",

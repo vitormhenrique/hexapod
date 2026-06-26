@@ -21,15 +21,20 @@ from hexapod_protocol import telemetry as tlm
 
 from services import ConnectionService
 from theme import DRACULA
-from ui.widgets import StatusBadge
+from ui.widgets import StatCard, StatusBadge
 
 
 class BasePage(QWidget):
-    """Common page chrome: scrollable, centered, padded title + content area."""
+    """Common page chrome: scrollable, full-width, padded title + content area.
+
+    Content spans the full page width. Set ``fill = True`` on a subclass to let
+    its content area expand and use all vertical space (for pages whose main
+    widget is a plot/table/feed); otherwise content stays top-aligned.
+    """
 
     title = "Page"
     subtitle = ""
-    max_width = 1040
+    fill = False
 
     def __init__(self, service: ConnectionService, parent=None) -> None:
         super().__init__(parent)
@@ -47,21 +52,12 @@ class BasePage(QWidget):
 
         canvas = QWidget()
         scroll.setWidget(canvas)
-        center = QHBoxLayout(canvas)
-        center.setContentsMargins(36, 30, 36, 30)
-        center.addStretch(1)
-
-        column = QWidget()
-        column.setMaximumWidth(self.max_width)
-        center.addWidget(column, 1)
-        center.addStretch(1)
-
-        col = QVBoxLayout(column)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(20)
+        col = QVBoxLayout(canvas)
+        col.setContentsMargins(32, 26, 32, 26)
+        col.setSpacing(18)
 
         header = QVBoxLayout()
-        header.setSpacing(4)
+        header.setSpacing(3)
         t = QLabel(self.title)
         t.setObjectName("PageTitle")
         header.addWidget(t)
@@ -72,9 +68,10 @@ class BasePage(QWidget):
         col.addLayout(header)
 
         self.content = QVBoxLayout()
-        self.content.setSpacing(18)
-        col.addLayout(self.content)
-        col.addStretch(1)
+        self.content.setSpacing(16)
+        col.addLayout(self.content, 1 if self.fill else 0)
+        if not self.fill:
+            col.addStretch(1)
         self.build()
 
     def build(self) -> None:  # override
@@ -113,7 +110,6 @@ class ConnectPage(BasePage):
         btnrow.addWidget(self.disconnect_btn)
         btnrow.addStretch(1)
         form.addRow("", self._wrap(btnrow))
-        self.content.addWidget(box)
 
         info = QGroupBox("Firmware")
         ilay = QFormLayout(info)
@@ -130,7 +126,13 @@ class ConnectPage(BasePage):
         ilay.addRow("Firmware", self.fw_lbl)
         ilay.addRow("Protocol", self.proto_lbl)
         ilay.addRow("Feature bits", self.caps_lbl)
-        self.content.addWidget(info)
+
+        # Place the two cards side by side so they use the horizontal space.
+        row = QHBoxLayout()
+        row.setSpacing(16)
+        row.addWidget(box, 1)
+        row.addWidget(info, 1)
+        self.content.addLayout(row)
 
         self.service.connected.connect(self._on_connected)
         self.service.hello_received.connect(self._on_hello)
@@ -177,15 +179,16 @@ class OverviewPage(BasePage):
     def build(self) -> None:
         grid_box = QGroupBox("Robot state")
         grid = QGridLayout(grid_box)
-        grid.setHorizontalSpacing(28)
-        grid.setVerticalSpacing(18)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(16)
+        grid.setContentsMargins(6, 8, 6, 6)
         self.badges = {
-            "state": StatusBadge("SAFETY STATE"),
-            "fault": StatusBadge("FAULT"),
-            "source": StatusBadge("CMD SOURCE"),
-            "gate": StatusBadge("MOTION GATE"),
-            "battery": StatusBadge("BATTERY"),
-            "uptime": StatusBadge("UPTIME"),
+            "state": StatCard("Safety state"),
+            "fault": StatCard("Fault"),
+            "source": StatCard("Command source"),
+            "gate": StatCard("Motion gate"),
+            "battery": StatCard("Battery"),
+            "uptime": StatCard("Uptime"),
         }
         for i, b in enumerate(self.badges.values()):
             grid.addWidget(b, i // 3, i % 3)
@@ -288,14 +291,14 @@ class ModeSafetyPage(BasePage):
 class DiagnosticsPage(BasePage):
     title = "Diagnostics"
     subtitle = "Raw telemetry feed and protocol stats."
+    fill = True
 
     def build(self) -> None:
         self.feed = QPlainTextEdit()
         self.feed.setReadOnly(True)
         self.feed.setMaximumBlockCount(500)
-        self.feed.setMinimumHeight(420)
         self.feed.setObjectName("MonoLabel")
-        self.content.addWidget(self.feed)
+        self.content.addWidget(self.feed, 1)
         self.service.telemetry.connect(self._on_telemetry)
         self.service.event.connect(self._on_event)
 
@@ -310,7 +313,7 @@ class DiagnosticsPage(BasePage):
 class ModelViewerPage(BasePage):
     title = "Model Viewer"
     subtitle = "Live animated hexapod pose from joint telemetry (servo-map fallback)."
-    max_width = 1400
+    fill = True
 
     # Prefer joint_state; fall back to servo_status only when joint_state stalls.
     _JOINT_STATE_TIMEOUT_MS = 750
@@ -328,9 +331,8 @@ class ModelViewerPage(BasePage):
         self.content.addWidget(self.source_badge)
 
         self.view = HexapodView()
-        self.view.setMinimumHeight(520)
         self.view.set_legs(self._model.legs())
-        self.content.addWidget(self.view)
+        self.content.addWidget(self.view, 1)
 
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)

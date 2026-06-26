@@ -155,25 +155,42 @@ QGroupBox {{
     background-color: {DRACULA.surface_alt};
     border: 1px solid {DRACULA.border_soft};
     border-radius: 12px;
-    margin-top: 16px;
-    padding: 20px 18px 18px 18px;
+    margin-top: 22px;
+    padding: 22px 18px 18px 18px;
     font-size: 13px;
     font-weight: 700;
 }}
 QGroupBox::title {{
     subcontrol-origin: margin;
     subcontrol-position: top left;
-    left: 16px;
-    top: 2px;
-    padding: 0 6px;
-    color: {DRACULA.purple};
+    left: 4px;
+    top: 0px;
+    padding: 0 2px;
+    color: {DRACULA.comment};
+    font-size: 11px;
     font-weight: 700;
-    letter-spacing: 0.3px;
+    letter-spacing: 1.2px;
 }}
 #Card {{
     background-color: {DRACULA.surface_alt};
     border: 1px solid {DRACULA.border_soft};
     border-radius: 12px;
+}}
+#StatCard {{
+    background-color: {DRACULA.input_bg};
+    border: 1px solid {DRACULA.border_soft};
+    border-radius: 10px;
+}}
+#StatCaption {{
+    color: {DRACULA.comment};
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}}
+#StatValue {{
+    color: {DRACULA.foreground};
+    font-size: 22px;
+    font-weight: 700;
 }}
 
 /* --- Buttons --- */
