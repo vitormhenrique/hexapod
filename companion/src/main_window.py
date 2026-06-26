@@ -14,9 +14,11 @@ from services import ConnectionService
 from ui.pages import (
     ConnectPage,
     DiagnosticsPage,
+    FootContactPage,
     ModeSafetyPage,
     ModelViewerPage,
     OverviewPage,
+    PassivePosePage,
     ServoTuningPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
@@ -43,6 +45,8 @@ class MainWindow(QMainWindow):
         self.nav.add_item("connect", "Connect")
         self.nav.add_item("overview", "Overview")
         self.nav.add_item("mode_safety", "Mode & Safety")
+        self.nav.add_item("foot_contact", "Foot Contact")
+        self.nav.add_item("passive_pose", "Passive Pose")
         self.nav.add_section("Tune")
         self.nav.add_item("servo_tuning", "Servo & DXL")
         self.nav.add_section("Visualize")
@@ -77,6 +81,8 @@ class MainWindow(QMainWindow):
             ("connect", ConnectPage(self.service)),
             ("overview", OverviewPage(self.service)),
             ("mode_safety", ModeSafetyPage(self.service)),
+            ("foot_contact", FootContactPage(self.service)),
+            ("passive_pose", PassivePosePage(self.service)),
             ("servo_tuning", ServoTuningPage(self.service)),
             ("model", ModelViewerPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),

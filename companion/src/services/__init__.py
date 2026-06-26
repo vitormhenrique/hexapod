@@ -33,6 +33,11 @@ class ConnectionService(QObject):
     feature_list = Signal(object)  # api.FeatureList
     maint_result = Signal(object)  # api.MaintResultMsg
     dxl_result = Signal(str, object)  # kind, api.DxlJobResult (None on failure)
+    sensor_feature_result = Signal(str, object)  # kind, api.SensorFeatureResult
+    contact_threshold_result = Signal(object)  # api.ContactThresholdResult
+    sensor_calibrate_result = Signal(object)  # api.SensorCalibrateResult
+    passive_result = Signal(str, object)  # kind, api.PassiveResult
+    passive_rate_result = Signal(object)  # api.PassiveRateResult
 
     def __init__(self) -> None:
         super().__init__()
@@ -164,10 +169,98 @@ class ConnectionService(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     def passive_enter(self) -> None:
-        self._run_in_worker(lambda c: c.passive_enter())
+        self._run_passive("enter", lambda c: c.passive_enter())
 
     def passive_exit(self) -> None:
-        self._run_in_worker(lambda c: c.passive_exit())
+        self._run_passive("exit", lambda c: c.passive_exit())
+
+    def passive_zero_reference(self) -> None:
+        self._run_passive("zero", lambda c: c.passive_zero_reference())
+
+    def passive_set_stream_rate(self, rate_hz: int) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit("passive: not connected")
+            return
+
+        def worker() -> None:
+            res = client.passive_set_stream_rate(rate_hz)
+            if res is None:
+                self.error.emit("passive rate: no response")
+            else:
+                self.passive_rate_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _run_passive(self, kind: str, call) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit(f"passive {kind}: not connected")
+            return
+
+        def worker() -> None:
+            res = call(client)
+            if res is None:
+                self.error.emit(f"passive {kind}: no response")
+            else:
+                self.passive_result.emit(kind, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # --- contact / leveling / sensor calibration -------------------------
+
+    def set_contact(self, enable: bool) -> None:
+        self._run_sensor_feature("contact", lambda c: c.contact_enable(enable))
+
+    def set_leveling(self, enable: bool) -> None:
+        self._run_sensor_feature("leveling", lambda c: c.leveling_enable(enable))
+
+    def _run_sensor_feature(self, kind: str, call) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit(f"{kind}: not connected")
+            return
+
+        def worker() -> None:
+            res = call(client)
+            if res is None:
+                self.error.emit(f"{kind}: no response")
+            else:
+                self.sensor_feature_result.emit(kind, res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_contact_thresholds(
+        self, foot: int, near: int, touch: int, load: int
+    ) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit("thresholds: not connected")
+            return
+
+        def worker() -> None:
+            res = client.contact_set_thresholds(foot, near, touch, load)
+            if res is None:
+                self.error.emit("thresholds: no response")
+            else:
+                self.contact_threshold_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def calibrate_contact(self, foot: int = api.SENSOR_CALIBRATE_ALL) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit("calibrate: not connected")
+            return
+
+        def worker() -> None:
+            res = client.contact_calibrate(foot)
+            if res is None:
+                self.error.emit("calibrate: no response")
+            else:
+                self.sensor_calibrate_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def refresh_features(self) -> None:
         """Request the live feature-flag table; emit it via ``feature_list``."""

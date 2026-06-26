@@ -854,6 +854,383 @@ class ServoTuningPage(BasePage):
         )
 
 
+class FootContactPage(BasePage):
+    title = "Foot Contact & Leveling"
+    subtitle = (
+        "Per-leg touchdown state, live proximity/pressure, threshold tuning, "
+        "and contact/leveling enable with reasons."
+    )
+
+    COLUMNS = ["Leg", "State", "Conf", "Δpressure", "Proximity", "Pressure"]
+
+    REASON_NAMES = {
+        api.FEATURE_REASON_NONE: "NONE",
+        api.FEATURE_REASON_HARDWARE_MISSING: "hardware missing",
+        api.FEATURE_REASON_NOT_CALIBRATED: "not calibrated",
+        api.FEATURE_REASON_UNSAFE_STATE: "unsafe state",
+        api.FEATURE_REASON_STALE_DATA: "stale data",
+        api.FEATURE_REASON_DEPENDENCY_OFF: "dependency off",
+        api.FEATURE_REASON_NOT_IMPLEMENTED: "not implemented",
+    }
+
+    def build(self) -> None:
+        self.content.addWidget(self._contact_table())
+        self.content.addWidget(self._feature_controls())
+        self.content.addWidget(self._threshold_editor())
+        self.content.addWidget(self._calibrate_controls())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+        self.service.sensor_feature_result.connect(self._on_feature_result)
+        self.service.contact_threshold_result.connect(self._on_threshold_result)
+        self.service.sensor_calibrate_result.connect(self._on_calibrate_result)
+
+    # --- groups -----------------------------------------------------------
+
+    def _contact_table(self) -> QGroupBox:
+        box = QGroupBox("Per-leg contact state")
+        lay = QVBoxLayout(box)
+        self.table = QTableWidget(tlm.NUM_FEET, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for foot in range(tlm.NUM_FEET):
+            self.table.setItem(foot, 0, QTableWidgetItem(f"Leg {foot}"))
+            for col in range(1, len(self.COLUMNS)):
+                self.table.setItem(foot, col, QTableWidgetItem("--"))
+        self.table.setMinimumHeight(220)
+        lay.addWidget(self.table)
+        return box
+
+    def _feature_controls(self) -> QGroupBox:
+        box = QGroupBox("Contact & terrain leveling")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        crow = QHBoxLayout()
+        self.contact_on = QPushButton("Enable contact")
+        self.contact_on.setProperty("accent", True)
+        self.contact_on.clicked.connect(lambda: self.service.set_contact(True))
+        self.contact_off = QPushButton("Disable contact")
+        self.contact_off.clicked.connect(lambda: self.service.set_contact(False))
+        crow.addWidget(self.contact_on)
+        crow.addWidget(self.contact_off)
+        crow.addStretch(1)
+        form.addRow("Foot contact", self._wrap(crow))
+        self.contact_result = QLabel("--")
+        self.contact_result.setObjectName("MonoLabel")
+        form.addRow("", self.contact_result)
+
+        lrow = QHBoxLayout()
+        self.level_on = QPushButton("Enable leveling")
+        self.level_on.setProperty("accent", True)
+        self.level_on.clicked.connect(lambda: self.service.set_leveling(True))
+        self.level_off = QPushButton("Disable leveling")
+        self.level_off.clicked.connect(lambda: self.service.set_leveling(False))
+        lrow.addWidget(self.level_on)
+        lrow.addWidget(self.level_off)
+        lrow.addStretch(1)
+        form.addRow("Terrain leveling", self._wrap(lrow))
+        self.level_result = QLabel("--")
+        self.level_result.setObjectName("MonoLabel")
+        form.addRow("", self.level_result)
+        return box
+
+    def _threshold_editor(self) -> QGroupBox:
+        box = QGroupBox("Contact thresholds")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        self.thr_foot = QSpinBox()
+        self.thr_foot.setRange(0, tlm.NUM_FEET - 1)
+        form.addRow("Leg", self.thr_foot)
+
+        self.thr_near = QSpinBox()
+        self.thr_near.setRange(0, 0xFFFF)
+        form.addRow("Near (proximity)", self.thr_near)
+        self.thr_touch = QSpinBox()
+        self.thr_touch.setRange(0, 0xFFFF)
+        form.addRow("Touch (Δpressure)", self.thr_touch)
+        self.thr_load = QSpinBox()
+        self.thr_load.setRange(0, 0xFFFF)
+        form.addRow("Load (Δpressure)", self.thr_load)
+
+        write = QPushButton("Stage & write thresholds")
+        write.setProperty("accent", True)
+        write.clicked.connect(self._write_thresholds)
+        form.addRow("", write)
+
+        self.thr_result = QLabel("--")
+        self.thr_result.setObjectName("MonoLabel")
+        form.addRow("Result", self.thr_result)
+        return box
+
+    def _calibrate_controls(self) -> QGroupBox:
+        box = QGroupBox("Baseline calibration")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        self.cal_foot = QComboBox()
+        self.cal_foot.addItem("All feet", api.SENSOR_CALIBRATE_ALL)
+        for foot in range(tlm.NUM_FEET):
+            self.cal_foot.addItem(f"Leg {foot}", foot)
+        form.addRow("Target", self.cal_foot)
+
+        cal = QPushButton("Re-zero pressure baseline")
+        cal.clicked.connect(self._calibrate)
+        form.addRow("", cal)
+
+        self.cal_result = QLabel("Feet must be at rest before calibrating.")
+        self.cal_result.setObjectName("MonoLabel")
+        form.addRow("Result", self.cal_result)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- actions ----------------------------------------------------------
+
+    def _write_thresholds(self) -> None:
+        self.thr_result.setText("writing…")
+        self.service.set_contact_thresholds(
+            self.thr_foot.value(),
+            self.thr_near.value(),
+            self.thr_touch.value(),
+            self.thr_load.value(),
+        )
+
+    def _calibrate(self) -> None:
+        target = self.cal_foot.currentData()
+        name = self.cal_foot.currentText()
+        if not self._confirm(
+            "Calibrate contact baseline",
+            f"Re-zero the pressure baseline for {name}? The selected foot/feet "
+            "must be unloaded and at rest.",
+        ):
+            return
+        self.cal_result.setText("calibrating…")
+        self.service.calibrate_contact(target)
+
+    # --- telemetry & results ---------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.CONTACT_STATE), 20)
+            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
+        else:
+            for foot in range(tlm.NUM_FEET):
+                for col in range(1, len(self.COLUMNS)):
+                    self.table.item(foot, col).setText("--")
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.CONTACT_STATE):
+            for foot, fc in enumerate(record.feet):
+                if foot >= tlm.NUM_FEET:
+                    break
+                self.table.item(foot, 1).setText(fc.state_name)
+                self.table.item(foot, 2).setText(str(fc.confidence))
+                self.table.item(foot, 3).setText(str(fc.pressure_delta))
+        elif stream_id == int(tlm.StreamId.I2C_SENSORS_RAW):
+            for foot, fr in enumerate(record.feet):
+                if foot >= tlm.NUM_FEET:
+                    break
+                self.table.item(foot, 4).setText(str(fr.proximity))
+                self.table.item(foot, 5).setText(str(fr.pressure_raw))
+
+    def _format_feature(self, res) -> str:
+        reason = self.REASON_NAMES.get(res.reason, str(res.reason))
+        verdict = "ok" if res.ok else ("rejected" if res.rejected else "error")
+        return (
+            f"{verdict}: available={res.available} enabled={res.enabled} "
+            f"reason={reason}"
+        )
+
+    def _on_feature_result(self, kind: str, res) -> None:
+        label = self.contact_result if kind == "contact" else self.level_result
+        label.setText(self._format_feature(res))
+
+    def _on_threshold_result(self, res) -> None:
+        if res.ok:
+            self.thr_result.setText(
+                f"leg {res.foot}: near={res.near} touch={res.touch} load={res.load}"
+            )
+        else:
+            self.thr_result.setText(f"rejected (code {res.result})")
+
+    def _on_calibrate_result(self, res) -> None:
+        if res.ok:
+            self.cal_result.setText(f"calibrated (mask 0x{res.mask:02X})")
+        else:
+            self.cal_result.setText(f"rejected (code {res.result})")
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QMessageBox.question(
+                self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            == QMessageBox.Yes
+        )
+
+
+class PassivePosePage(BasePage):
+    title = "Passive Pose & Stream"
+    subtitle = (
+        "Torque-off passive streaming: hand-pose the robot and watch joint "
+        "angles update live for calibration and URDF capture."
+    )
+
+    COLUMNS = ["Leg", "Joint", "Angle"]
+
+    def build(self) -> None:
+        self._rows: dict[tuple[int, int], int] = {}  # (leg, joint) -> row
+
+        self.content.addWidget(self._mode_controls())
+        self.content.addWidget(self._stream_controls())
+        self.content.addWidget(self._joint_table())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+        self.service.passive_result.connect(self._on_passive_result)
+        self.service.passive_rate_result.connect(self._on_rate_result)
+
+    # --- groups -----------------------------------------------------------
+
+    def _mode_controls(self) -> QGroupBox:
+        box = QGroupBox("Passive mode (all servo torque off)")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        row = QHBoxLayout()
+        self.enter_btn = QPushButton("Enter passive")
+        self.enter_btn.setProperty("accent", True)
+        self.enter_btn.clicked.connect(self._enter)
+        self.exit_btn = QPushButton("Exit passive")
+        self.exit_btn.clicked.connect(lambda: self.service.passive_exit())
+        row.addWidget(self.enter_btn)
+        row.addWidget(self.exit_btn)
+        row.addStretch(1)
+        form.addRow("", self._wrap(row))
+
+        self.mode_badge = StatusBadge("Passive state")
+        self.mode_badge.set("unknown", "idle")
+        form.addRow("Status", self.mode_badge)
+        self.mode_result = QLabel("--")
+        self.mode_result.setObjectName("MonoLabel")
+        form.addRow("Last result", self.mode_result)
+        return box
+
+    def _stream_controls(self) -> QGroupBox:
+        box = QGroupBox("Stream control")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        rrow = QHBoxLayout()
+        self.rate_spin = QSpinBox()
+        self.rate_spin.setRange(1, 200)
+        self.rate_spin.setValue(50)
+        self.rate_spin.setSuffix(" Hz")
+        apply_rate = QPushButton("Apply rate")
+        apply_rate.clicked.connect(
+            lambda: self.service.passive_set_stream_rate(self.rate_spin.value())
+        )
+        rrow.addWidget(self.rate_spin)
+        rrow.addWidget(apply_rate)
+        rrow.addStretch(1)
+        form.addRow("Stream rate", self._wrap(rrow))
+
+        zero = QPushButton("Capture zero reference")
+        zero.clicked.connect(lambda: self.service.passive_zero_reference())
+        form.addRow("", zero)
+        self.rate_result = QLabel("--")
+        self.rate_result.setObjectName("MonoLabel")
+        form.addRow("Result", self.rate_result)
+        return box
+
+    def _joint_table(self) -> QGroupBox:
+        box = QGroupBox("Live joint angles (present position)")
+        lay = QVBoxLayout(box)
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setMinimumHeight(280)
+        lay.addWidget(self.table)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- actions ----------------------------------------------------------
+
+    def _enter(self) -> None:
+        if not self._confirm(
+            "Enter passive pose mode",
+            "This disables torque on all servos so the robot can be moved by "
+            "hand. The robot will go limp — support it before continuing.",
+        ):
+            return
+        self.mode_result.setText("entering…")
+        self.service.passive_enter()
+
+    # --- telemetry & results ---------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+        else:
+            self.table.setRowCount(0)
+            self._rows.clear()
+            self.mode_badge.set("disconnected", "idle")
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id != int(tlm.StreamId.JOINT_STATE):
+            return
+        for j in record.joints:
+            key = (j.leg, j.joint)
+            row = self._rows.get(key)
+            if row is None:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self._rows[key] = row
+                self.table.setItem(row, 0, QTableWidgetItem(f"Leg {j.leg}"))
+                self.table.setItem(row, 1, QTableWidgetItem(j.joint_name))
+                self.table.setItem(row, 2, QTableWidgetItem("--"))
+            self.table.item(row, 2).setText(f"{j.angle_deg:.2f}\u00b0")
+
+    def _on_passive_result(self, kind: str, res) -> None:
+        verdict = "ok" if res.ok else ("rejected" if res.rejected else "error")
+        self.mode_result.setText(f"{kind}: {verdict} (state {res.state})")
+        if kind == "enter" and res.ok:
+            self.mode_badge.set("passive (torque off)", "warn")
+        elif kind == "exit" and res.ok:
+            self.mode_badge.set("inactive", "ok")
+
+    def _on_rate_result(self, res) -> None:
+        if res.ok:
+            self.rate_result.setText(f"stream rate {res.rate_hz} Hz")
+        else:
+            self.rate_result.setText(f"rejected (code {res.result})")
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QMessageBox.question(
+                self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            == QMessageBox.Yes
+        )
+
+
 class DiagnosticsPage(BasePage):
     title = "Diagnostics"
     subtitle = "Raw telemetry feed and protocol stats."

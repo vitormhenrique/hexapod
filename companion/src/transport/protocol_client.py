@@ -287,6 +287,36 @@ class ProtocolClient:
         r = self._send_built(frame)
         return api.parse_sensor_feature_result(r.payload) if r else None
 
+    def contact_set_thresholds(
+        self, foot: int, near: int, touch: int, load: int
+    ) -> Optional[api.ContactThresholdResult]:
+        r = self._send_built(
+            api.build_contact_set_thresholds(foot, near, touch, load)
+        )
+        return api.parse_contact_threshold_result(r.payload) if r else None
+
+    def leveling_set_params(
+        self, max_tilt_mdeg: int, rate_mdeg_s: int, response_x255: int
+    ) -> Optional[api.LevelingParamsResult]:
+        r = self._send_built(
+            api.build_leveling_set_params(max_tilt_mdeg, rate_mdeg_s, response_x255)
+        )
+        return api.parse_leveling_params_result(r.payload) if r else None
+
+    def contact_calibrate(
+        self, foot: int = api.SENSOR_CALIBRATE_ALL
+    ) -> Optional[api.SensorCalibrateResult]:
+        r = self._send_built(api.build_contact_calibrate(foot))
+        return api.parse_sensor_calibrate_result(r.payload) if r else None
+
+    def sensor_calibrate(self) -> Optional[api.SensorCalibrateResult]:
+        r = self._send_built(api.build_sensor_calibrate())
+        return api.parse_sensor_calibrate_result(r.payload) if r else None
+
+    def sensor_set_rate(self, rate_hz: int) -> Optional[api.SensorRateResult]:
+        r = self._send_built(api.build_sensor_set_rate(rate_hz))
+        return api.parse_sensor_rate_result(r.payload) if r else None
+
     # Passive pose streaming.
     def passive_enter(self) -> Optional[api.PassiveResult]:
         r = self._send_built(api.build_passive_enter())
@@ -299,6 +329,10 @@ class ProtocolClient:
     def passive_set_stream_rate(self, rate_hz: int) -> Optional[api.PassiveRateResult]:
         r = self._send_built(api.build_passive_set_stream_rate(rate_hz))
         return api.parse_passive_rate_result(r.payload) if r else None
+
+    def passive_zero_reference(self) -> Optional[api.PassiveResult]:
+        r = self._send_built(api.build_passive_zero_reference())
+        return api.parse_passive_result(r.payload) if r else None
 
     # Maintenance lock.
     def enter_maintenance(self) -> Optional[api.MaintResultMsg]:
