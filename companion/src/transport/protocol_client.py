@@ -353,6 +353,28 @@ class ProtocolClient:
             api.build_dxl_set_servo_limits(servo_id, min_tick, max_tick)
         )
 
+    def dxl_get_servo_profile(self, servo_id: int) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_get_servo_profile(servo_id))
+
+    def dxl_read_register(
+        self, servo_id: int, address: int, length: int
+    ) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_read_register(servo_id, address, length))
+
+    def dxl_write_register(
+        self,
+        servo_id: int,
+        address: int,
+        length: int,
+        value: int,
+        is_eeprom: bool = False,
+    ) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(
+            api.build_dxl_write_register(
+                servo_id, address, length, value, is_eeprom=is_eeprom
+            )
+        )
+
     # --- reader loop ------------------------------------------------------
 
     def _read_loop(self) -> None:

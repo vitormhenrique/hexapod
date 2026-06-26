@@ -4,16 +4,21 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -482,6 +487,371 @@ class ModeSafetyPage(BasePage):
             self.service.subscribe(sid, rate)
         else:
             self.service.unsubscribe(sid)
+
+
+class ServoTuningPage(BasePage):
+    title = "Servo Monitor & DXL Tuning"
+    subtitle = (
+        "Live per-servo status and safe logical-parameter writes "
+        "(staged, verified, read-back)."
+    )
+
+    # Logical parameters surfaced in the editor combo (label, DXL_PARAM_* id).
+    # Limit pairs are handled by the dedicated limits group below.
+    PARAMS = [
+        ("Return delay time", api.DXL_PARAM_RETURN_DELAY_TIME),
+        ("Temperature limit", api.DXL_PARAM_TEMPERATURE_LIMIT),
+        ("Min voltage limit", api.DXL_PARAM_MIN_VOLTAGE_LIMIT),
+        ("Max voltage limit", api.DXL_PARAM_MAX_VOLTAGE_LIMIT),
+        ("Max torque", api.DXL_PARAM_MAX_TORQUE),
+        ("Status return level", api.DXL_PARAM_STATUS_RETURN_LEVEL),
+        ("PID P gain", api.DXL_PARAM_PID_P),
+        ("PID I gain", api.DXL_PARAM_PID_I),
+        ("PID D gain", api.DXL_PARAM_PID_D),
+        ("Moving speed", api.DXL_PARAM_MOVING_SPEED),
+        ("Torque limit", api.DXL_PARAM_TORQUE_LIMIT),
+        ("Goal acceleration", api.DXL_PARAM_GOAL_ACCELERATION),
+        ("Profile velocity", api.DXL_PARAM_PROFILE_VELOCITY),
+        ("Profile acceleration", api.DXL_PARAM_PROFILE_ACCELERATION),
+        ("Bus watchdog", api.DXL_PARAM_BUS_WATCHDOG),
+    ]
+
+    # EEPROM-region params need a torque-off write; warn before committing.
+    EEPROM_PARAMS = {
+        api.DXL_PARAM_RETURN_DELAY_TIME,
+        api.DXL_PARAM_TEMPERATURE_LIMIT,
+        api.DXL_PARAM_MIN_VOLTAGE_LIMIT,
+        api.DXL_PARAM_MAX_VOLTAGE_LIMIT,
+        api.DXL_PARAM_MAX_TORQUE,
+        api.DXL_PARAM_STATUS_RETURN_LEVEL,
+    }
+
+    COLUMNS = ["ID", "Position", "Velocity", "Load", "Voltage", "Temp", "Error", "Torque"]
+    INT32_MIN = -(2**31)
+    INT32_MAX = 2**31 - 1
+
+    def build(self) -> None:
+        self._rows: dict[int, int] = {}  # servo id -> table row
+
+        self.content.addWidget(self._status_table())
+        self.content.addWidget(self._param_editor())
+        self.content.addWidget(self._limits_editor())
+        self.content.addWidget(self._expert_panel())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+        self.service.dxl_result.connect(self._on_dxl_result)
+
+    # --- groups -----------------------------------------------------------
+
+    def _status_table(self) -> QGroupBox:
+        box = QGroupBox("Live servo status")
+        lay = QVBoxLayout(box)
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setMinimumHeight(240)
+        lay.addWidget(self.table)
+        return box
+
+    def _param_editor(self) -> QGroupBox:
+        box = QGroupBox("Logical parameter editor")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        self.param_servo = QSpinBox()
+        self.param_servo.setRange(1, 253)
+        form.addRow("Servo ID", self.param_servo)
+
+        self.param_combo = QComboBox()
+        for label, pid in self.PARAMS:
+            self.param_combo.addItem(label, pid)
+        form.addRow("Parameter", self.param_combo)
+
+        read = QPushButton("Read")
+        read.clicked.connect(self._read_param)
+        self.param_current = QLabel("--")
+        self.param_current.setObjectName("MonoLabel")
+        rrow = QHBoxLayout()
+        rrow.addWidget(read)
+        rrow.addWidget(self.param_current, 1)
+        form.addRow("Current", self._wrap(rrow))
+
+        self.param_value = QSpinBox()
+        self.param_value.setRange(self.INT32_MIN, self.INT32_MAX)
+        form.addRow("New value", self.param_value)
+
+        write = QPushButton("Stage & write")
+        write.setProperty("accent", True)
+        write.clicked.connect(self._write_param)
+        form.addRow("", write)
+
+        self.param_result = QLabel("--")
+        self.param_result.setObjectName("MonoLabel")
+        form.addRow("Result", self.param_result)
+        return box
+
+    def _limits_editor(self) -> QGroupBox:
+        box = QGroupBox("Servo position limits (legacy CW/CCW or MX2.0 min/max)")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        self.limit_servo = QSpinBox()
+        self.limit_servo.setRange(1, 253)
+        form.addRow("Servo ID", self.limit_servo)
+
+        self.limit_min = QSpinBox()
+        self.limit_min.setRange(0, 4095)
+        self.limit_max = QSpinBox()
+        self.limit_max.setRange(0, 4095)
+        self.limit_max.setValue(4095)
+        mrow = QHBoxLayout()
+        mrow.addWidget(QLabel("min"))
+        mrow.addWidget(self.limit_min)
+        mrow.addWidget(QLabel("max"))
+        mrow.addWidget(self.limit_max)
+        mrow.addStretch(1)
+        form.addRow("Limits (ticks)", self._wrap(mrow))
+
+        write = QPushButton("Write limits")
+        write.setProperty("accent", True)
+        write.clicked.connect(self._write_limits)
+        form.addRow("", write)
+
+        self.limit_result = QLabel("--")
+        self.limit_result.setObjectName("MonoLabel")
+        form.addRow("Result", self.limit_result)
+        return box
+
+    def _expert_panel(self) -> QGroupBox:
+        box = QGroupBox("Expert: raw register access")
+        outer = QVBoxLayout(box)
+        self.expert_gate = QCheckBox(
+            "Enable raw register read/write (bypasses logical table — dangerous)"
+        )
+        self.expert_gate.toggled.connect(self._toggle_expert)
+        outer.addWidget(self.expert_gate)
+
+        self.expert_body = QWidget()
+        form = QFormLayout(self.expert_body)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        self.reg_servo = QSpinBox()
+        self.reg_servo.setRange(1, 253)
+        form.addRow("Servo ID", self.reg_servo)
+        self.reg_addr = QSpinBox()
+        self.reg_addr.setRange(0, 0xFFFF)
+        form.addRow("Address", self.reg_addr)
+        self.reg_len = QComboBox()
+        for n in (1, 2, 4):
+            self.reg_len.addItem(f"{n} byte(s)", n)
+        form.addRow("Length", self.reg_len)
+        self.reg_value = QSpinBox()
+        self.reg_value.setRange(self.INT32_MIN, self.INT32_MAX)
+        form.addRow("Value", self.reg_value)
+        self.reg_eeprom = QCheckBox("EEPROM region (torque-off write)")
+        form.addRow("", self.reg_eeprom)
+
+        read = QPushButton("Read register")
+        read.clicked.connect(self._read_register)
+        write = QPushButton("Write register")
+        write.clicked.connect(self._write_register)
+        brow = QHBoxLayout()
+        brow.addWidget(read)
+        brow.addWidget(write)
+        brow.addStretch(1)
+        form.addRow("", self._wrap(brow))
+
+        self.reg_result = QLabel("--")
+        self.reg_result.setObjectName("MonoLabel")
+        form.addRow("Result", self.reg_result)
+
+        self.expert_body.setVisible(False)
+        outer.addWidget(self.expert_body)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- live status ------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+        else:
+            self.table.setRowCount(0)
+            self._rows.clear()
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id != int(tlm.StreamId.SERVO_STATUS):
+            return
+        for s in record.servos:
+            row = self._rows.get(s.id)
+            if row is None:
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self._rows[s.id] = row
+            values = [
+                str(s.id),
+                str(s.position),
+                str(s.velocity),
+                str(s.load),
+                f"{s.voltage_mv / 1000:.1f} V",
+                f"{s.temperature_c} \u00b0C",
+                f"0x{s.hardware_error:02X}",
+                "ON" if s.torque_enabled else "off",
+            ]
+            for col, text in enumerate(values):
+                self.table.setItem(row, col, QTableWidgetItem(text))
+
+    # --- parameter editor -------------------------------------------------
+
+    def _read_param(self) -> None:
+        self.param_result.setText("reading…")
+        self.service.dxl_get_param(
+            self.param_servo.value(), self.param_combo.currentData()
+        )
+
+    def _write_param(self) -> None:
+        pid = self.param_combo.currentData()
+        eeprom = pid in self.EEPROM_PARAMS
+        warn = (
+            "This parameter lives in servo EEPROM and requires torque-off; "
+            "the firmware will disable torque to write it.\n\n"
+            if eeprom
+            else ""
+        )
+        if not self._confirm(
+            "Write servo parameter",
+            f"{warn}Write {self.param_combo.currentText()} = "
+            f"{self.param_value.value()} to servo {self.param_servo.value()}?",
+        ):
+            return
+        self.param_result.setText("writing…")
+        self.service.dxl_set_param(
+            self.param_servo.value(), pid, self.param_value.value()
+        )
+
+    def _write_limits(self) -> None:
+        lo, hi = self.limit_min.value(), self.limit_max.value()
+        if lo >= hi:
+            self.limit_result.setText("min must be < max")
+            return
+        if not self._confirm(
+            "Write servo limits",
+            f"Write position limits [{lo}, {hi}] to servo "
+            f"{self.limit_servo.value()}? Torque will be disabled to write EEPROM.",
+        ):
+            return
+        self.limit_result.setText("writing…")
+        self.service.dxl_set_servo_limits(self.limit_servo.value(), lo, hi)
+
+    # --- expert raw register ---------------------------------------------
+
+    def _toggle_expert(self, on: bool) -> None:
+        if on and not self._confirm(
+            "Enable expert raw register access",
+            "Raw register writes bypass the logical parameter table and can "
+            "brick a servo. Continue?",
+        ):
+            self.expert_gate.setChecked(False)
+            return
+        self.expert_body.setVisible(on)
+
+    def _read_register(self) -> None:
+        self.reg_result.setText("reading…")
+        self.service.dxl_read_register(
+            self.reg_servo.value(), self.reg_addr.value(), self.reg_len.currentData()
+        )
+
+    def _write_register(self) -> None:
+        if not self._confirm(
+            "Write raw register",
+            f"Write {self.reg_value.value()} to address {self.reg_addr.value()} "
+            f"on servo {self.reg_servo.value()}?",
+        ):
+            return
+        self.reg_result.setText("writing…")
+        self.service.dxl_write_register(
+            self.reg_servo.value(),
+            self.reg_addr.value(),
+            self.reg_len.currentData(),
+            self.reg_value.value(),
+            self.reg_eeprom.isChecked(),
+        )
+
+    # --- result routing ---------------------------------------------------
+
+    def _on_dxl_result(self, kind: str, res) -> None:
+        if res is None:
+            target = {
+                "get_param": self.param_result,
+                "set_param": self.param_result,
+                "set_limits": self.limit_result,
+                "read_register": self.reg_result,
+                "write_register": self.reg_result,
+            }.get(kind)
+            if target is not None:
+                target.setText("failed (rejected or timed out)")
+            return
+        if kind == "get_param":
+            pv = res.param()
+            if pv is not None:
+                self.param_current.setText(f"{pv.value}  (table {pv.table_kind})")
+                self.param_value.setValue(pv.value)
+                self.param_result.setText("read ok")
+            else:
+                self.param_result.setText(f"code {res.code}")
+        elif kind == "set_param":
+            sp = res.set_param()
+            if sp is not None:
+                self.param_result.setText(
+                    f"wrote {sp.written}, read-back {sp.readback}, "
+                    f"verified={sp.verified}"
+                )
+            else:
+                self.param_result.setText(f"code {res.code}")
+        elif kind == "set_limits":
+            sl = res.servo_limits()
+            if sl is not None:
+                self.limit_result.setText(
+                    f"table {sl.table_kind}: [{sl.min_tick}, {sl.max_tick}] "
+                    f"verified={sl.verified}"
+                )
+            else:
+                self.limit_result.setText(f"code {res.code}")
+        elif kind == "read_register":
+            rv = res.read_register()
+            if rv is not None:
+                self.reg_result.setText(
+                    f"addr {rv.address} len {rv.length} = {rv.value}"
+                )
+            else:
+                self.reg_result.setText(f"code {res.code}")
+        elif kind == "write_register":
+            wr = res.write_register()
+            if wr is not None:
+                self.reg_result.setText(
+                    f"wrote {wr.written}, read-back {wr.readback}, "
+                    f"verified={wr.verified}"
+                )
+            else:
+                self.reg_result.setText(f"code {res.code}")
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QMessageBox.question(
+                self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            == QMessageBox.Yes
+        )
 
 
 class DiagnosticsPage(BasePage):

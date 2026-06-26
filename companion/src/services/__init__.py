@@ -32,6 +32,7 @@ class ConnectionService(QObject):
     feature_result = Signal(object)  # api.FeatureSetResult
     feature_list = Signal(object)  # api.FeatureList
     maint_result = Signal(object)  # api.MaintResultMsg
+    dxl_result = Signal(str, object)  # kind, api.DxlJobResult (None on failure)
 
     def __init__(self) -> None:
         super().__init__()
@@ -227,6 +228,49 @@ class ConnectionService(QObject):
     @property
     def client(self) -> Optional[ProtocolClient]:
         return self._client
+
+    # --- DXL maintenance jobs (submit+poll on a worker thread) -----------
+
+    def _run_dxl(self, kind: str, call) -> None:
+        """Run a blocking DXL job (submit + poll) off the GUI thread."""
+        client = self._client
+        if client is None:
+            self.error.emit(f"{kind}: not connected")
+            return
+
+        def worker() -> None:
+            res = call(client)
+            if res is None:
+                self.error.emit(f"{kind}: no result (rejected or timed out)")
+            self.dxl_result.emit(kind, res)
+
+        threading.Thread(target=worker, name=f"hexapod-dxl-{kind}", daemon=True).start()
+
+    def dxl_get_param(self, servo_id: int, param: int) -> None:
+        self._run_dxl("get_param", lambda c: c.dxl_get_param(servo_id, param))
+
+    def dxl_set_param(self, servo_id: int, param: int, value: int) -> None:
+        self._run_dxl("set_param", lambda c: c.dxl_set_param(servo_id, param, value))
+
+    def dxl_set_servo_limits(self, servo_id: int, min_tick: int, max_tick: int) -> None:
+        self._run_dxl(
+            "set_limits", lambda c: c.dxl_set_servo_limits(servo_id, min_tick, max_tick)
+        )
+
+    def dxl_read_register(self, servo_id: int, address: int, length: int) -> None:
+        self._run_dxl(
+            "read_register", lambda c: c.dxl_read_register(servo_id, address, length)
+        )
+
+    def dxl_write_register(
+        self, servo_id: int, address: int, length: int, value: int, is_eeprom: bool
+    ) -> None:
+        self._run_dxl(
+            "write_register",
+            lambda c: c.dxl_write_register(
+                servo_id, address, length, value, is_eeprom=is_eeprom
+            ),
+        )
 
     # --- command plumbing -------------------------------------------------
 

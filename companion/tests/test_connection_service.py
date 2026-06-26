@@ -81,3 +81,26 @@ def test_command_when_disconnected_emits_error(qtbot) -> None:
         service.clear_fault()
     (msg,) = blocker.args
     assert "not connected" in msg
+
+
+def test_dxl_get_param_emits_decoded_result(qtbot) -> None:
+    import struct
+
+    def submit(_p):
+        return bytes([api.DXL_SUBMIT_ACCEPTED, 5, api.DXL_SLOT_PENDING]), False
+
+    def get_result(_p):
+        blob = bytes([api.DXL_PARAM_TORQUE_LIMIT, 1, 4]) + struct.pack("<i", 700)
+        return bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(blob)]) + blob, False
+
+    service, client = _service_with_client(
+        {api.MSG_DXL_GET_PARAM: submit, api.MSG_DXL_GET_RESULT: get_result}
+    )
+    try:
+        with qtbot.waitSignal(service.dxl_result, timeout=2000) as blocker:
+            service.dxl_get_param(1, api.DXL_PARAM_TORQUE_LIMIT)
+        kind, res = blocker.args
+        assert kind == "get_param"
+        assert res is not None and res.param().value == 700
+    finally:
+        client.stop()

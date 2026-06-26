@@ -17,6 +17,7 @@ from ui.pages import (
     ModeSafetyPage,
     ModelViewerPage,
     OverviewPage,
+    ServoTuningPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
 
@@ -42,6 +43,8 @@ class MainWindow(QMainWindow):
         self.nav.add_item("connect", "Connect")
         self.nav.add_item("overview", "Overview")
         self.nav.add_item("mode_safety", "Mode & Safety")
+        self.nav.add_section("Tune")
+        self.nav.add_item("servo_tuning", "Servo & DXL")
         self.nav.add_section("Visualize")
         self.nav.add_item("model", "Model Viewer")
         self.nav.add_section("Diagnose")
@@ -74,6 +77,7 @@ class MainWindow(QMainWindow):
             ("connect", ConnectPage(self.service)),
             ("overview", OverviewPage(self.service)),
             ("mode_safety", ModeSafetyPage(self.service)),
+            ("servo_tuning", ServoTuningPage(self.service)),
             ("model", ModelViewerPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),
         ):
