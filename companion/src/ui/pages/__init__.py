@@ -516,6 +516,180 @@ class ModeSafetyPage(BasePage):
             self.service.unsubscribe(sid)
 
 
+class GaitLabPage(BasePage):
+    title = "Gait Lab"
+    subtitle = "Select a gait, tune gait parameters, and command safe body motion."
+
+    # (label, GAIT_* id). Stand/Sit are postures; the rest are walking gaits.
+    GAITS = [
+        ("Stand", api.GAIT_STAND),
+        ("Sit", api.GAIT_SIT),
+        ("Tripod", api.GAIT_TRIPOD),
+        ("Ripple", api.GAIT_RIPPLE),
+        ("Wave", api.GAIT_WAVE),
+        ("Crawl", api.GAIT_CRAWL),
+    ]
+
+    def build(self) -> None:
+        self.content.addWidget(self._arming_banner())
+        self.content.addWidget(self._gait_select())
+        self.content.addWidget(self._gait_params())
+        self.content.addWidget(self._body_twist())
+
+        # Always-available stop + emergency stop row.
+        safety = QGroupBox("Stop")
+        slay = QHBoxLayout(safety)
+        stop = QPushButton("Stop motion (hold Stand)")
+        stop.clicked.connect(self.service.stop_motion)
+        estop = QPushButton("\u23fb  EMERGENCY STOP")
+        estop.setObjectName("EmergencyStop")
+        estop.clicked.connect(self.service.emergency_stop)
+        slay.addWidget(stop)
+        slay.addWidget(estop)
+        slay.addStretch(1)
+        self.content.addWidget(safety)
+
+        self.service.connected.connect(self._on_connected)
+        self.service.motion_result.connect(self._on_motion_result)
+        self.service.telemetry.connect(self._on_telemetry)
+
+    # --- groups -----------------------------------------------------------
+
+    def _arming_banner(self) -> QGroupBox:
+        box = QGroupBox("Command authority")
+        lay = QVBoxLayout(box)
+        self.authority_lbl = QLabel(
+            "Connect and arm the robot (RC arm switch required) before commanding "
+            "motion. The firmware rejects motion commands unless the motion gate "
+            "is OPEN."
+        )
+        self.authority_lbl.setWordWrap(True)
+        self.authority_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+        self.gate_badge = StatusBadge("motion gate")
+        self.gate_badge.set("unknown", "idle")
+        lay.addWidget(self.gate_badge)
+        lay.addWidget(self.authority_lbl)
+        return box
+
+    def _gait_select(self) -> QGroupBox:
+        box = QGroupBox("Gait selection")
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        self._gait_buttons = {}
+        for i, (label, gait) in enumerate(self.GAITS):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _=False, g=gait: self.service.set_gait(g))
+            grid.addWidget(btn, i // 3, i % 3)
+            self._gait_buttons[gait] = btn
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        return box
+
+    def _gait_params(self) -> QGroupBox:
+        box = QGroupBox("Gait parameters")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        # (attr, label, min, max, default) — defaults mirror firmware gait config.
+        self._param_spins = {}
+        for attr, label, lo, hi, default in (
+            ("body_height", "Body height (mm)", 0, 120, 40),
+            ("stride_len", "Stride length (mm)", 0, 160, 60),
+            ("step_height", "Step height (mm)", 0, 80, 30),
+            ("duty", "Duty cycle (0-255)", 0, 255, 128),
+            ("speed", "Speed (0-255)", 0, 255, 128),
+        ):
+            spin = QSpinBox()
+            spin.setRange(lo, hi)
+            spin.setValue(default)
+            self._param_spins[attr] = spin
+            form.addRow(label, spin)
+        send = QPushButton("Apply gait parameters")
+        send.clicked.connect(self._send_gait_params)
+        form.addRow("", send)
+        return box
+
+    def _body_twist(self) -> QGroupBox:
+        box = QGroupBox("Body twist (normalised -100..100 %)")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        self._twist_spins = {}
+        for attr, label in (
+            ("vx", "Forward"),
+            ("vy", "Left"),
+            ("wz", "Yaw (CCW)"),
+        ):
+            spin = QSpinBox()
+            spin.setRange(-100, 100)
+            spin.setValue(0)
+            self._twist_spins[attr] = spin
+            form.addRow(label, spin)
+        row = QHBoxLayout()
+        send = QPushButton("Send twist")
+        send.clicked.connect(self._send_twist)
+        zero = QPushButton("Zero")
+        zero.clicked.connect(self._zero_twist)
+        row.addWidget(send)
+        row.addWidget(zero)
+        row.addStretch(1)
+        form.addRow("", self._wrap(row))
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- actions ----------------------------------------------------------
+
+    def _send_gait_params(self) -> None:
+        self.service.set_gait_params(
+            self._param_spins["body_height"].value(),
+            self._param_spins["stride_len"].value(),
+            self._param_spins["step_height"].value(),
+            self._param_spins["duty"].value(),
+            self._param_spins["speed"].value(),
+        )
+
+    def _send_twist(self) -> None:
+        self.service.set_body_twist(
+            self._twist_spins["vx"].value() / 100.0,
+            self._twist_spins["vy"].value() / 100.0,
+            self._twist_spins["wz"].value() / 100.0,
+        )
+
+    def _zero_twist(self) -> None:
+        for spin in self._twist_spins.values():
+            spin.setValue(0)
+        self.service.set_body_twist(0.0, 0.0, 0.0)
+
+    # --- reactions --------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.CONTROL_STATE), 10)
+        else:
+            self.gate_badge.set("unknown", "idle")
+
+    def _on_motion_result(self, kind: str, res) -> None:
+        state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
+        verdict = "accepted" if res.ok else f"rejected ({res.result})"
+        gate = "gate OPEN" if res.motion_allowed else "gate CLOSED"
+        self.authority_lbl.setText(f"{kind}: {verdict} — state {state}, {gate}")
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.CONTROL_STATE):
+            self.gate_badge.set(
+                "OPEN" if record.motion_gate else "CLOSED",
+                "ok" if record.motion_gate else "warn",
+            )
+            for gait, btn in self._gait_buttons.items():
+                btn.setChecked(False)
+
+
 class ServoTuningPage(BasePage):
     title = "Servo Monitor & DXL Tuning"
     subtitle = (

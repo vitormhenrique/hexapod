@@ -30,12 +30,13 @@ def test_app_shell_launches_with_estop_on_all_pages(qtbot) -> None:
     qtbot.addWidget(window)
     window.show()
 
-    # All eight pages are registered in the stack.
-    assert window.stack.count() == 8
+    # All nine pages are registered in the stack.
+    assert window.stack.count() == 9
     assert set(window._pages) == {
         "connect",
         "overview",
         "mode_safety",
+        "gait_lab",
         "foot_contact",
         "passive_pose",
         "servo_tuning",

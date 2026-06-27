@@ -149,6 +149,38 @@ class ConnectionService(QObject):
     def set_gait(self, gait: int) -> None:
         self._run_motion("set_gait", lambda c: c.set_gait(gait))
 
+    def set_gait_params(
+        self,
+        body_height_mm: int,
+        stride_len_mm: int,
+        step_height_mm: int,
+        duty_x255: int,
+        speed_x255: int,
+    ) -> None:
+        self._run_motion(
+            "set_gait_params",
+            lambda c: c.set_gait_params(
+                body_height_mm, stride_len_mm, step_height_mm, duty_x255, speed_x255
+            ),
+        )
+
+    def set_body_twist(self, vx: float, vy: float, wz: float) -> None:
+        self._run_motion("set_body_twist", lambda c: c.set_body_twist(vx, vy, wz))
+
+    def set_body_pose(
+        self,
+        x_mm: float,
+        y_mm: float,
+        z_mm: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> None:
+        self._run_motion(
+            "set_body_pose",
+            lambda c: c.set_body_pose(x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg),
+        )
+
     def stop_motion(self) -> None:
         self._run_motion("stop_motion", lambda c: c.stop_motion())
 
