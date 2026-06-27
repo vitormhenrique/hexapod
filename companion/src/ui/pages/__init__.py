@@ -196,10 +196,12 @@ class OverviewPage(BasePage):
             "gate": StatCard("Motion gate"),
             "battery": StatCard("Battery"),
             "uptime": StatCard("Uptime"),
+            "dxl": StatCard("DXL bus"),
+            "i2c": StatCard("I2C sensors"),
         }
         for i, b in enumerate(self.badges.values()):
-            grid.addWidget(b, i // 3, i % 3)
-        for c in range(3):
+            grid.addWidget(b, i // 4, i % 4)
+        for c in range(4):
             grid.setColumnStretch(c, 1)
         self.content.addWidget(grid_box)
 
@@ -209,8 +211,21 @@ class OverviewPage(BasePage):
         self.hint.setStyleSheet(f"color: {DRACULA.comment};")
         self.content.addWidget(self.hint)
 
+        self.service.connected.connect(self._on_connected)
         self.service.status_received.connect(self._on_status)
         self.service.telemetry.connect(self._on_telemetry)
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            # Subscribe to the streams that drive the overview badges so the
+            # page is self-sufficient (state/source plus DXL and I2C health).
+            self.service.subscribe(int(tlm.StreamId.CONTROL_STATE), 10)
+            self.service.subscribe(int(tlm.StreamId.HEALTH), 2)
+            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 5)
+            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 5)
+        else:
+            for b in self.badges.values():
+                b.set("--", "idle")
 
     def _on_status(self, st) -> None:
         self.badges["state"].set(
@@ -221,6 +236,13 @@ class OverviewPage(BasePage):
             f"{st.battery_mv} mV", "ok" if st.battery_mv > 10000 else "warn"
         )
         self.badges["uptime"].set(f"{st.uptime_ms // 1000} s", "info")
+        # DXL bus health: power state + watchdog misses from the status frame.
+        if not st.dxl_power:
+            self.badges["dxl"].set("power off", "idle")
+        elif st.watchdog_missed:
+            self.badges["dxl"].set(f"wd miss {st.watchdog_missed}", "warn")
+        else:
+            self.badges["dxl"].set("power on", "ok")
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id == int(tlm.StreamId.CONTROL_STATE):
@@ -243,6 +265,11 @@ class OverviewPage(BasePage):
             self.badges["battery"].set(
                 f"{record.battery_mv} mV", "ok" if record.battery_mv > 10000 else "warn"
             )
+        elif stream_id == int(tlm.StreamId.SERVO_STATUS):
+            # Live servo frames confirm the DYNAMIXEL bus is responding.
+            self.badges["dxl"].set(f"{len(record.servos)} servos", "ok")
+        elif stream_id == int(tlm.StreamId.I2C_SENSORS_RAW):
+            self.badges["i2c"].set(f"{len(record.feet)} sensors", "ok")
 
 
 class ModeSafetyPage(BasePage):

@@ -66,6 +66,8 @@ def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
     service.status_received.emit(st)
     assert "11800 mV" in page.badges["battery"]._value.text()
     assert page.badges["uptime"]._value.text() == "5 s"
+    # DXL bus health derives from the status power flag + watchdog misses.
+    assert page.badges["dxl"]._value.text() == "power on"
 
     cs = tlm.ControlStateTelemetry(
         command_source=1,
@@ -78,6 +80,48 @@ def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
     service.telemetry.emit(int(tlm.StreamId.CONTROL_STATE), cs)
     assert page.badges["source"]._value.text() == "RC"
     assert page.badges["gate"]._value.text() == "OPEN"
+
+    # DXL/I2C health badges populate from live servo + sensor telemetry.
+    servos = tlm.ServoStatusTelemetry(
+        servos=[
+            tlm.ServoStatus(
+                id=1,
+                position=2048,
+                velocity=0,
+                load=0,
+                voltage_mv=12000,
+                temperature_c=30,
+                hardware_error=0,
+            )
+        ]
+    )
+    service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), servos)
+    assert page.badges["dxl"]._value.text() == "1 servos"
+
+    i2c = tlm.I2cSensorsRawTelemetry(
+        feet=[tlm.FootRaw(proximity=10, pressure_raw=100)]
+    )
+    service.telemetry.emit(int(tlm.StreamId.I2C_SENSORS_RAW), i2c)
+    assert page.badges["i2c"]._value.text() == "1 sensors"
+
+
+def test_overview_page_dxl_badge_reflects_power_off(qtbot) -> None:
+    from ui.pages import OverviewPage
+
+    service = _service()
+    page = OverviewPage(service)
+    qtbot.addWidget(page)
+
+    st = api.StatusInfo(
+        uptime_ms=10,
+        state=2,
+        dxl_power=False,
+        dxl_power_control=True,
+        battery_mv=11800,
+        watchdog_missed=0,
+    )
+    service.status_received.emit(st)
+    assert page.badges["dxl"]._value.text() == "power off"
 
 
 def test_mode_safety_page_constructs(qtbot) -> None:
