@@ -16,11 +16,12 @@ inline float clampf(float v, float lo, float hi) {
 
 }  // namespace
 
-LegIk::LegIk(float l1_mm, float l2_mm, float l3_mm)
+LegIk::LegIk(float l1_mm, float l2_mm, float l3_mm, float home_radius_mm,
+             float home_foot_z_mm)
     : l1_(l1_mm), l2_(l2_mm), l3_(l3_mm), femur_rest_(0.0f), tibia_rest_(0.0f) {
-  // Compute the raw planar angles at the documented home foot so solve() can
+  // Compute the raw planar angles at the configured home foot so solve() can
   // report URDF-zero-relative angles (home -> 0,0,0).
-  const IkResult home = solveRaw(kHomeRadiusMm, 0.0f, kHomeFootZMm);
+  const IkResult home = solveRaw(home_radius_mm, 0.0f, home_foot_z_mm);
   femur_rest_ = home.femur;
   tibia_rest_ = home.tibia;
 }

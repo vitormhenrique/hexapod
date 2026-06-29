@@ -21,11 +21,11 @@ from dataclasses import dataclass, field
 from hexapod_protocol import config as cfg
 from hexapod_protocol import telemetry as tlm
 
-# Coxa joint axis lift above the mount (mirror gait::kCoxaLiftMm).
+# Reference stance/coxa geometry, used as a fallback when a config omits the
+# persisted BodyGeometry block (firmware lmt.11). Mirror gait::kCoxaLiftMm and
+# gait::kHomeRadiusMm / kHomeFootZMm. All-zero joint angles -> the home foot in
+# the coxa frame.
 COXA_LIFT_MM = 21.0
-
-# Home foot pose baked into the IK rest offset (mirror gait::kHomeRadiusMm /
-# kHomeFootZMm). All-zero joint angles -> this foot in the coxa frame.
 HOME_RADIUS_MM = 127.0
 HOME_FOOT_Z_MM = -44.55
 
@@ -67,12 +67,19 @@ class _LegFk:
     angles (as carried by ``joint_state``) feed straight in.
     """
 
-    def __init__(self, l1_mm: float, l2_mm: float, l3_mm: float) -> None:
+    def __init__(
+        self,
+        l1_mm: float,
+        l2_mm: float,
+        l3_mm: float,
+        home_radius_mm: float = HOME_RADIUS_MM,
+        home_foot_z_mm: float = HOME_FOOT_Z_MM,
+    ) -> None:
         self.l1 = l1_mm
         self.l2 = l2_mm
         self.l3 = l3_mm
         self._femur_rest, self._tibia_rest = self._solve_raw_planar(
-            HOME_RADIUS_MM, HOME_FOOT_Z_MM
+            home_radius_mm, home_foot_z_mm
         )
 
     def _solve_raw_planar(self, horiz: float, dz: float) -> tuple[float, float]:
@@ -139,10 +146,24 @@ class HexapodPoseModel:
 
     def __init__(self, config: cfg.RobotConfig) -> None:
         self._cfg = config
+        # Stance/coxa geometry comes from the persisted config (firmware lmt.11).
+        # A zero home radius means the config predates / omits the geometry
+        # block, so fall back to the documented reference nominals.
+        geom = config.geometry
+        if geom.home_radius_cmm:
+            home_radius_mm = geom.home_radius_cmm / 100.0
+            home_foot_z_mm = geom.home_foot_z_cmm / 100.0
+            coxa_lift_mm = geom.coxa_lift_cmm / 100.0
+        else:
+            home_radius_mm = HOME_RADIUS_MM
+            home_foot_z_mm = HOME_FOOT_Z_MM
+            coxa_lift_mm = COXA_LIFT_MM
         self._fk = _LegFk(
             config.links.coxa_cmm / 100.0,
             config.links.femur_cmm / 100.0,
             config.links.tibia_cmm / 100.0,
+            home_radius_mm,
+            home_foot_z_mm,
         )
         self._xforms: list[_LegXform] = []
         for leg in config.legs:
@@ -152,7 +173,7 @@ class HexapodPoseModel:
                 _LegXform(
                     hip_x_mm=leg.mount_x_dmm / 10.0,
                     hip_y_mm=leg.mount_y_dmm / 10.0,
-                    z_off_mm=leg.mount_z_dmm / 10.0 + COXA_LIFT_MM,
+                    z_off_mm=leg.mount_z_dmm / 10.0 + coxa_lift_mm,
                     cos_a=math.cos(a),
                     sin_a=math.sin(a),
                 )

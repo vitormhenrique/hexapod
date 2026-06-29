@@ -28,7 +28,7 @@ JOINTS_PER_LEG = 3
 NUM_SERVOS = NUM_LEGS * JOINTS_PER_LEG  # 18
 NUM_FOOT_SENSORS = 6
 ROBOT_NAME_LEN = 16  # incl. NUL terminator
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SERVO_CENTER_TICK = 2048
 SERVO_MAX_TICK = 4095
@@ -45,12 +45,13 @@ CONFIG_PAYLOAD_SIZE = (
     2  # schema_version
     + ROBOT_NAME_LEN  # robot_name
     + 3 * 2  # links (3 x uint16)
+    + (2 + 2 + 2)  # body geometry (u16 radius, i16 z, u16 lift)
     + NUM_LEGS * (4 * 2)  # legs (4 x int16 each)
     + NUM_SERVOS * (1 + 1 + 1 + 1 + 2 + 2 + 2)  # servos (10 bytes each)
     + (2 + 2 + 2 + 1 + 1 + 1)  # gait (9 bytes)
     + NUM_FOOT_SENSORS * (4 + 2 + 2 + 2 + 1)  # feet (11 bytes each)
     + 4  # feature_defaults
-)  # == 331
+)  # == 337
 
 # Gait ids (mirror config::GaitId).
 GAIT_NAMES = {0: "stand", 1: "sit", 2: "tripod", 3: "ripple", 4: "wave", 5: "crawl"}
@@ -74,6 +75,13 @@ class LinkLengths:
     coxa_cmm: int = 0  # 0.01 mm
     femur_cmm: int = 0  # 0.01 mm
     tibia_cmm: int = 0  # 0.01 mm
+
+
+@dataclass
+class BodyGeometry:
+    home_radius_cmm: int = 0  # 0.01 mm, neutral foot radial distance
+    home_foot_z_cmm: int = 0  # 0.01 mm, neutral foot height (negative = down)
+    coxa_lift_cmm: int = 0  # 0.01 mm, coxa axis lift above the body mount
 
 
 @dataclass
@@ -127,6 +135,7 @@ class RobotConfig:
     schema_version: int = SCHEMA_VERSION
     robot_name: str = ""
     links: LinkLengths = field(default_factory=LinkLengths)
+    geometry: BodyGeometry = field(default_factory=BodyGeometry)
     legs: list[LegGeometry] = field(default_factory=list)
     servos: list[ServoConfig] = field(default_factory=list)
     gait: GaitDefaults = field(default_factory=GaitDefaults)
@@ -183,6 +192,9 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     links = LinkLengths(*struct.unpack_from("<HHH", payload, o))
     o += 6
 
+    geometry = BodyGeometry(*struct.unpack_from("<HhH", payload, o))
+    o += 6
+
     legs: list[LegGeometry] = []
     for _ in range(NUM_LEGS):
         legs.append(LegGeometry(*struct.unpack_from("<hhhh", payload, o)))
@@ -211,6 +223,7 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
         schema_version=schema_version,
         robot_name=robot_name,
         links=links,
+        geometry=geometry,
         legs=legs,
         servos=servos,
         gait=gait_defaults,
@@ -230,6 +243,9 @@ def encode_robot_config(cfg: RobotConfig) -> bytes:
     name = cfg.robot_name.encode("ascii")[: ROBOT_NAME_LEN - 1]
     out += name + b"\x00" * (ROBOT_NAME_LEN - len(name))
     out += struct.pack("<HHH", cfg.links.coxa_cmm, cfg.links.femur_cmm, cfg.links.tibia_cmm)
+    out += struct.pack(
+        "<HhH", cfg.geometry.home_radius_cmm, cfg.geometry.home_foot_z_cmm, cfg.geometry.coxa_lift_cmm
+    )
     for leg in cfg.legs:
         out += struct.pack(
             "<hhhh", leg.mount_x_dmm, leg.mount_y_dmm, leg.mount_z_dmm, leg.mount_yaw_cdeg
@@ -269,6 +285,9 @@ def default_robot_config() -> RobotConfig:
     """Compiled SAFE defaults, mirroring ``defaultRobotConfig`` (HexNav)."""
     cfg = RobotConfig(schema_version=SCHEMA_VERSION, robot_name="HexNav")
     cfg.links = LinkLengths(coxa_cmm=5608, femur_cmm=6651, tibia_cmm=2486)
+    # Reference stance geometry (0.01 mm); mirrors gait::kHomeRadiusMm 127.0,
+    # kHomeFootZMm -44.55, kCoxaLiftMm 21.0.
+    cfg.geometry = BodyGeometry(home_radius_cmm=12700, home_foot_z_cmm=-4455, coxa_lift_cmm=2100)
     cfg.legs = [LegGeometry(*seed) for seed in _LEG_SEEDS]
     cfg.servos = []
     for i in range(NUM_SERVOS):

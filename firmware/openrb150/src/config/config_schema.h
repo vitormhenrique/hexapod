@@ -45,7 +45,8 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 
 // Schema version for the serialized payload. Bump on any layout change so the
 // loader can reject configs it does not understand and fall back to defaults.
-constexpr uint16_t kSchemaVersion = 1;
+// v2 (lmt.11): added the BodyGeometry block (home stance + coxa lift).
+constexpr uint16_t kSchemaVersion = 2;
 
 // MX-28: 4096 ticks/rev, center 180deg = tick 2048.
 constexpr uint16_t kServoCenterTick = 2048;
@@ -119,6 +120,20 @@ struct LinkLengths {
   uint16_t tibia_cmm = 0;  // 0.01 mm  (L_TIBIA, calibrate toe offset on hw)
 };
 
+// Stance/coxa geometry calibration shared by all six legs (HexNav IK ref
+// sections 4/5/12). Persisted so the values measured on the assembled robot can
+// override the compiled reference model -- the default neutral stance sits near
+// the two-link reach boundary, so small measured offsets matter for HIL.
+//   * home_radius / home_foot_z place the neutral foot in the coxa frame; the
+//     leg IK bakes them into its rest offset (home pose -> all-zero angles).
+//   * coxa_lift is the coxa joint axis height above the leg's body mount.
+// Stored in hundredths of a millimetre; home_foot_z is signed (foot below hip).
+struct BodyGeometry {
+  uint16_t home_radius_cmm = 0;  // 0.01 mm, neutral foot radial distance
+  int16_t home_foot_z_cmm = 0;   // 0.01 mm, neutral foot height (negative = down)
+  uint16_t coxa_lift_cmm = 0;    // 0.01 mm, coxa axis lift above the body mount
+};
+
 // One servo's logical mapping + travel limits. `sign` is +1 or -1 (HexNav IK
 // ref section 7). `trim_ticks` is a signed mechanical-zero offset added to the
 // 180deg center. min/max ticks clamp the goal position after IK.
@@ -159,6 +174,7 @@ struct RobotConfig {
   uint16_t schema_version = kSchemaVersion;
   char robot_name[kRobotNameLen] = {0};
   LinkLengths links;
+  BodyGeometry geometry;
   LegGeometry legs[kNumLegs];
   ServoConfig servos[kNumServos];
   GaitDefaults gait;
@@ -181,6 +197,7 @@ constexpr uint16_t kConfigPayloadSize =
     2                                  // schema_version
     + kRobotNameLen                    // robot_name
     + 3 * 2                            // links (3 x uint16)
+    + (2 + 2 + 2)                      // body geometry (u16 radius, i16 z, u16 lift)
     + kNumLegs * (4 * 2)               // legs (4 x int16 each)
     + kNumServos * (1 + 1 + 1 + 1 + 2 + 2 + 2)  // servos (10 bytes each)
     + (2 + 2 + 2 + 1 + 1 + 1)          // gait (9 bytes)
@@ -206,8 +223,8 @@ uint16_t serializeRobotConfig(const RobotConfig& cfg, uint8_t* out,
 bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out);
 
 // Validate a config's invariants (unique servo ids, in-range legs/joints/ticks,
-// non-zero link lengths and body height, sane signs). Returns true if safe to
-// use. Does NOT mutate `cfg`.
+// non-zero link lengths and body height, non-zero home stance radius, sane
+// signs). Returns true if safe to use. Does NOT mutate `cfg`.
 bool validateRobotConfig(const RobotConfig& cfg);
 
 }  // namespace config

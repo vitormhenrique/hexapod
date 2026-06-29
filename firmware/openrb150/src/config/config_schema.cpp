@@ -92,6 +92,15 @@ void defaultRobotConfig(RobotConfig& cfg) {
   cfg.links.femur_cmm = 6651;  // L_FEMUR 66.51 mm
   cfg.links.tibia_cmm = 2486;  // L_TIBIA 24.86 mm (calibrate toe on hw)
 
+  // Stance/coxa geometry (0.01 mm). Reference model values; mirror the gait
+  // layer's compiled nominals (gait::kHomeRadiusMm 127.0, kHomeFootZMm -44.55,
+  // kCoxaLiftMm 21.0) so a freshly-defaulted config reproduces the documented
+  // home pose. config_schema sits below the gait layer, so the numbers are
+  // mirrored here rather than included.
+  cfg.geometry.home_radius_cmm = 12700;  // 127.00 mm
+  cfg.geometry.home_foot_z_cmm = -4455;  // -44.55 mm
+  cfg.geometry.coxa_lift_cmm = 2100;     // 21.00 mm
+
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     cfg.legs[leg].mount_x_dmm = kLegSeeds[leg].x_dmm;
     cfg.legs[leg].mount_y_dmm = kLegSeeds[leg].y_dmm;
@@ -148,6 +157,10 @@ uint16_t serializeRobotConfig(const RobotConfig& cfg, uint8_t* out,
   putU16(out, o, cfg.links.femur_cmm);
   putU16(out, o, cfg.links.tibia_cmm);
 
+  putU16(out, o, cfg.geometry.home_radius_cmm);
+  putI16(out, o, cfg.geometry.home_foot_z_cmm);
+  putU16(out, o, cfg.geometry.coxa_lift_cmm);
+
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     putI16(out, o, cfg.legs[leg].mount_x_dmm);
     putI16(out, o, cfg.legs[leg].mount_y_dmm);
@@ -202,6 +215,10 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
   out.links.femur_cmm = getU16(in, o);
   out.links.tibia_cmm = getU16(in, o);
 
+  out.geometry.home_radius_cmm = getU16(in, o);
+  out.geometry.home_foot_z_cmm = getI16(in, o);
+  out.geometry.coxa_lift_cmm = getU16(in, o);
+
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     out.legs[leg].mount_x_dmm = getI16(in, o);
     out.legs[leg].mount_y_dmm = getI16(in, o);
@@ -248,6 +265,11 @@ bool validateRobotConfig(const RobotConfig& cfg) {
       cfg.links.tibia_cmm == 0) {
     return false;
   }
+
+  // The home stance radius must be non-zero -- it places the neutral foot and
+  // seeds the leg IK rest offset; a zero radius is a degenerate stance. The
+  // foot-Z and coxa lift may legitimately be zero, so they are unconstrained.
+  if (cfg.geometry.home_radius_cmm == 0) return false;
 
   // Gait selection must be a known gait, and the persisted gait defaults must
   // sit inside the gait engine's safe envelope -- not merely be clampable to it.

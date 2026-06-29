@@ -297,8 +297,9 @@ void test_commit_rejected_when_staging_invalid() {
   ConfigApi api(persist);
 
   // Corrupt a servo id to 0 (invalid). Servo block starts after:
-  // schema(2)+name(16)+links(6)+legs(6*8=48) = 72; first servo id byte at 72.
-  const uint16_t servo_id_off = 2 + 16 + 6 + kNumLegs * 8;
+  // schema(2)+name(16)+links(6)+geometry(6)+legs(6*8=48) = 78; first servo id
+  // byte at 78.
+  const uint16_t servo_id_off = 2 + 16 + 6 + 6 + kNumLegs * 8;
   uint8_t req[4 + 1];
   req[0] = servo_id_off & 0xFF;
   req[1] = servo_id_off >> 8;

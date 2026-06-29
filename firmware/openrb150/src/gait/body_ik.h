@@ -34,7 +34,10 @@
 
 namespace gait {
 
-// Coxa joint axis lift above the mount (IK ref section 4/13, COXA_Z_OFF).
+// Coxa joint axis lift above the mount (IK ref section 4/13, COXA_Z_OFF). This
+// is the documented reference nominal; the runtime value comes from the
+// persisted config (config::BodyGeometry::coxa_lift_cmm), whose compiled default
+// mirrors this constant.
 constexpr float kCoxaLiftMm = 21.0f;
 
 // 6-DOF body pose relative to the neutral stance. Translation in mm, rotation

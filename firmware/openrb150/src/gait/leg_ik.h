@@ -40,9 +40,14 @@ struct IkResult {
 class LegIk {
  public:
   // Link lengths in millimetres (L1 hip->femur radial offset, L2 femur, L3
-  // tibia-to-foot). Computes the home rest offsets so solve() returns
-  // URDF-zero-relative angles.
-  LegIk(float l1_mm, float l2_mm, float l3_mm);
+  // tibia-to-foot). `home_radius_mm`/`home_foot_z_mm` are the neutral foot
+  // position in the coxa frame; the rest offsets are computed from them so
+  // solve() returns URDF-zero-relative angles (home -> 0). They default to the
+  // documented reference stance and are overridden by the persisted robot
+  // config (config::BodyGeometry) on real hardware.
+  LegIk(float l1_mm, float l2_mm, float l3_mm,
+        float home_radius_mm = kHomeRadiusMm,
+        float home_foot_z_mm = kHomeFootZMm);
 
   // Solve for a foot target (mm) in the coxa frame. Always returns angles
   // (clamped/saturated when out of reach); `reachable` is false if the target

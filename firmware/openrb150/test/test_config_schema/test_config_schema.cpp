@@ -57,6 +57,10 @@ void test_default_geometry() {
   TEST_ASSERT_EQUAL_UINT16(5608, cfg.links.coxa_cmm);
   TEST_ASSERT_EQUAL_UINT16(6651, cfg.links.femur_cmm);
   TEST_ASSERT_EQUAL_UINT16(2486, cfg.links.tibia_cmm);
+  // Stance/coxa geometry mirrors the gait-layer reference nominals (lmt.11).
+  TEST_ASSERT_EQUAL_UINT16(12700, cfg.geometry.home_radius_cmm);
+  TEST_ASSERT_EQUAL_INT16(-4455, cfg.geometry.home_foot_z_cmm);
+  TEST_ASSERT_EQUAL_UINT16(2100, cfg.geometry.coxa_lift_cmm);
   // Leg 1 rear-left mount.
   TEST_ASSERT_EQUAL_INT16(-656, cfg.legs[0].mount_x_dmm);
   TEST_ASSERT_EQUAL_INT16(-1156, cfg.legs[0].mount_y_dmm);
@@ -104,6 +108,9 @@ void test_round_trip_preserves_fields() {
   cfg.servos[7].min_tick = 900;
   cfg.servos[7].max_tick = 3100;
   cfg.gait.stride_len_mm = 75;
+  cfg.geometry.home_radius_cmm = 13050;
+  cfg.geometry.home_foot_z_cmm = -5012;
+  cfg.geometry.coxa_lift_cmm = 2375;
   cfg.feet[2].pressure_baseline = -123456;
   cfg.feet[2].near_thresh = 300;
   cfg.feet[2].touch_thresh = 4200;
@@ -123,6 +130,9 @@ void test_round_trip_preserves_fields() {
   TEST_ASSERT_EQUAL_UINT16(900, got.servos[7].min_tick);
   TEST_ASSERT_EQUAL_UINT16(3100, got.servos[7].max_tick);
   TEST_ASSERT_EQUAL_UINT16(75, got.gait.stride_len_mm);
+  TEST_ASSERT_EQUAL_UINT16(13050, got.geometry.home_radius_cmm);
+  TEST_ASSERT_EQUAL_INT16(-5012, got.geometry.home_foot_z_cmm);
+  TEST_ASSERT_EQUAL_UINT16(2375, got.geometry.coxa_lift_cmm);
   TEST_ASSERT_EQUAL_INT32(-123456, got.feet[2].pressure_baseline);
   TEST_ASSERT_EQUAL_UINT16(4200, got.feet[2].touch_thresh);
   TEST_ASSERT_EQUAL_UINT8(1, got.feet[2].enabled);
@@ -179,6 +189,15 @@ void test_validate_rejects_bad_ranges() {
 
   defaultRobotConfig(cfg);
   cfg.gait.body_height_mm = 0;  // zero ride height
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+}
+
+// lmt.11: a zero home stance radius is a degenerate stance (the IK rest offset
+// and neutral foot collapse onto the coxa axis) and must be rejected.
+void test_validate_rejects_zero_home_radius() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  cfg.geometry.home_radius_cmm = 0;
   TEST_ASSERT_FALSE(validateRobotConfig(cfg));
 }
 
@@ -279,7 +298,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(37274, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(32283, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {
@@ -295,6 +314,7 @@ int main(int, char**) {
   RUN_TEST(test_deserialize_rejects_bad_version);
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
+  RUN_TEST(test_validate_rejects_zero_home_radius);
   RUN_TEST(test_validate_rejects_missing_joint_slot);
   RUN_TEST(test_validate_rejects_unsafe_gait_and_features);
   RUN_TEST(test_validate_rejects_bad_foot_calibration);

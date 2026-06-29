@@ -17,13 +17,16 @@ constexpr float kCentiDegToRad = (kPi / 180.0f) / 100.0f;  // 0.01 deg -> rad
 BodyKinematics::BodyKinematics(const config::RobotConfig& cfg)
     : ik_(cfg.links.coxa_cmm / 100.0f,    // 0.01 mm -> mm
           cfg.links.femur_cmm / 100.0f,
-          cfg.links.tibia_cmm / 100.0f) {
+          cfg.links.tibia_cmm / 100.0f,
+          cfg.geometry.home_radius_cmm / 100.0f,
+          cfg.geometry.home_foot_z_cmm / 100.0f) {
+  const float coxa_lift_mm = cfg.geometry.coxa_lift_cmm / 100.0f;
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
     const config::LegGeometry& g = cfg.legs[leg];
     LegXform& x = legs_[leg];
     x.hip_x_mm = g.mount_x_dmm / 10.0f;  // 0.1 mm -> mm
     x.hip_y_mm = g.mount_y_dmm / 10.0f;
-    x.z_off_mm = g.mount_z_dmm / 10.0f + kCoxaLiftMm;
+    x.z_off_mm = g.mount_z_dmm / 10.0f + coxa_lift_mm;
     const float yaw_rad = g.mount_yaw_cdeg * kCentiDegToRad;
     const float a = -(yaw_rad + kHalfPi);  // rotate B-vector into coxa frame
     x.cos_a = cosf(a);

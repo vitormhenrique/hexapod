@@ -148,3 +148,27 @@ def test_out_of_range_indices_are_ignored() -> None:
 def test_home_constants_exposed() -> None:
     assert HOME_RADIUS_MM == 127.0
     assert HOME_FOOT_Z_MM == -44.55
+
+
+def test_calibrated_geometry_shifts_hip_lift() -> None:
+    # A persisted coxa lift (firmware lmt.11) overrides the nominal constant in
+    # the rendered model: hip Z = mount Z + the configured lift.
+    config = cfg.default_robot_config()
+    config.geometry.coxa_lift_cmm += 1000  # +10.00 mm
+    m = HexapodPoseModel(config)
+    for i, leg in enumerate(config.legs):
+        hip = m.leg(i).hip
+        assert math.isclose(hip.z, leg.mount_z_dmm / 10.0 + 31.0, abs_tol=1e-6)
+
+
+def test_zero_geometry_config_falls_back_to_nominals() -> None:
+    # A config with an empty BodyGeometry (home_radius 0) renders exactly like
+    # the default reference stance via the nominal-constant fallback.
+    ref = HexapodPoseModel(cfg.default_robot_config())
+    bare = cfg.default_robot_config()
+    bare.geometry = cfg.BodyGeometry()  # all zeros -> fallback to constants
+    m = HexapodPoseModel(bare)
+    for i in range(ref.num_legs):
+        assert math.isclose(m.leg(i).foot.x, ref.leg(i).foot.x, abs_tol=1e-9)
+        assert math.isclose(m.leg(i).foot.z, ref.leg(i).foot.z, abs_tol=1e-9)
+        assert math.isclose(m.leg(i).hip.z, ref.leg(i).hip.z, abs_tol=1e-9)

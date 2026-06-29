@@ -103,6 +103,29 @@ void test_unreachable_still_returns_clamped_angles() {
   TEST_ASSERT_FALSE(isnan(r.tibia));
 }
 
+// lmt.11: the home-pose ctor params seed the rest offset. A LegIk built with a
+// lowered home foot maps that lowered foot (not the default home) to zero, and
+// the default home foot then reads non-zero -- proving the configured stance,
+// not a compiled constant, drives the zero reference.
+void test_leg_ik_home_params_shift_rest_offset() {
+  LegIk def(kL1, kL2, kL3);  // default home (kHomeRadiusMm, kHomeFootZMm)
+  LegIk low(kL1, kL2, kL3, kHomeRadiusMm, kHomeFootZMm - 10.0f);  // home 10 mm down
+
+  // Default maps the documented home foot to ~zero.
+  IkResult d = def.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, d.femur);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, d.tibia);
+
+  // The lowered-home solver reads the SAME foot as non-zero (its zero moved).
+  IkResult l = low.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm);
+  TEST_ASSERT_TRUE(fabsf(l.femur) > 1e-3f || fabsf(l.tibia) > 1e-3f);
+
+  // ...and maps ITS configured home (10 mm lower) to ~zero.
+  IkResult l0 = low.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm - 10.0f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, l0.femur);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, l0.tibia);
+}
+
 // ---- BodyKinematics ------------------------------------------------------
 
 void test_body_to_coxa_maps_home_to_radial() {
@@ -196,6 +219,30 @@ void test_solve_body_invalid_leg() {
   TEST_ASSERT_EQUAL_FLOAT(0.0f, cz);
 }
 
+// lmt.11: BodyKinematics reads the stance/coxa geometry from the persisted
+// config, not compiled constants. Raising the configured coxa lift drops the
+// home foot's coxa-frame Z by the same amount; the radial X/Y are unaffected.
+void test_body_geometry_from_config_coxa_lift() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics base(cfg);
+
+  const uint8_t leg = 2;  // mid-right
+  float x0, y0, z0;
+  base.footBodyToCoxa(leg, kHomeFootB[leg].x, kHomeFootB[leg].y,
+                      kHomeFootB[leg].z, x0, y0, z0);
+
+  cfg.geometry.coxa_lift_cmm += 1000;  // +10.00 mm
+  BodyKinematics lifted(cfg);
+  float x1, y1, z1;
+  lifted.footBodyToCoxa(leg, kHomeFootB[leg].x, kHomeFootB[leg].y,
+                        kHomeFootB[leg].z, x1, y1, z1);
+
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, z0 - 10.0f, z1);  // foot 10 mm lower in coxa Z
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, x0, x1);          // radial unchanged
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, y0, y1);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_home_foot_maps_to_zero_angles);
@@ -205,6 +252,7 @@ int main(int, char**) {
   RUN_TEST(test_edge_too_far_is_unreachable);
   RUN_TEST(test_edge_too_close_is_unreachable);
   RUN_TEST(test_unreachable_still_returns_clamped_angles);
+  RUN_TEST(test_leg_ik_home_params_shift_rest_offset);
   RUN_TEST(test_body_to_coxa_maps_home_to_radial);
   RUN_TEST(test_solve_body_home_is_near_zero_all_legs);
   RUN_TEST(test_apply_body_pose_identity);
@@ -212,5 +260,6 @@ int main(int, char**) {
   RUN_TEST(test_apply_body_pose_translation);
   RUN_TEST(test_body_pose_raise_lowers_foot_in_coxa_frame);
   RUN_TEST(test_solve_body_invalid_leg);
+  RUN_TEST(test_body_geometry_from_config_coxa_lift);
   return UNITY_END();
 }
