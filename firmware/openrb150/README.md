@@ -14,6 +14,7 @@ Deterministic safety + motion controller for the hexapod, running on a ROBOTIS
 | --- | --- | --- |
 | `openrb150` (default) | custom `boards/openrb150.json` + `variants/OpenRB-150` | **All real firmware work.** Correct pin map: `Serial1`=DXL bus, `Serial2`=CRSF, DXL power FET, LEDs, battery ADC. |
 | `mkrzero` | stock MKR Zero | Toolchain-only fallback. WRONG serial / DXL-power pins. |
+| `native` | host (no board) | **Host unit tests only.** Builds the portable `src/` logic (protocol, IK, gait, config, safety) against Unity on the host; run with `pio test -e native`. |
 
 ## Commands
 
@@ -21,8 +22,11 @@ Deterministic safety + motion controller for the hexapod, running on a ROBOTIS
 # Build (default env = openrb150)
 pio run
 
-# Local check: compile both envs to confirm toolchain + variant are healthy
+# Local check: compile both target envs to confirm toolchain + variant are healthy
 pio run -e openrb150 -e mkrzero
+
+# Run host unit tests (Unity, no hardware)
+pio test -e native
 
 # Flash the OpenRB-150 over USB
 pio run -e openrb150 -t upload
@@ -50,13 +54,22 @@ If `pio` is not on PATH, use the bundled binary: `~/.platformio/penv/bin/pio`.
 
 ```text
 firmware/openrb150/
-  platformio.ini            PlatformIO config (openrb150 + mkrzero envs)
+  platformio.ini            PlatformIO config (openrb150 + mkrzero + native envs)
   boards/openrb150.json     custom board definition
   variants/OpenRB-150/      exact OpenRB-150 pin map + linker scripts
   doc/                      board notes (read mkrzero-vs-openrb150.md)
   src/
-    board/                  board pin map + HAL / safe boot
-    main.cpp                entry point
+    main.cpp                entry point: board init + RTOS task launch
+    app/                    FreeRTOS task setup + scheduling (control/dxl/rc/api/i2c/health)
+    board/                  board pin map + HAL, safe boot, battery ADC scaling
+    config/                 24LC32 EEPROM driver, transactional config store, schema, config API
+    dxl/                    DYNAMIXEL bus, model/table detection, sync write, params, servo map
+    gait/                   leg IK, body IK, gait engine, full gait pipeline
+    input/                  CRSF (ExpressLRS) parser + channel normalization
+    protocol/               USB API: COBS/CRC framing, frame reader, dispatch, per-group handlers, telemetry
+    safety/                 safety state machine, watchdog, command arbiter, system state
+    sensors/                I2C bus/topology, TCA9548A discovery, finger contact sensor, contact estimator
+  test/                     host Unity unit tests (one dir per module, built by the `native` env)
 ```
 
 ## Intentionally not implemented (`#NOTIMPLEMENTED`)
