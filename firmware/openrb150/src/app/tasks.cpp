@@ -169,6 +169,14 @@ protocol::PassiveApi g_passiveApi;
 // path (when wired) is the only place that clears it.
 volatile bool g_dxlTorqueOff = true;
 
+// Hard DXL fault published by dxlTask (lmt.5). Set when a servo reports a
+// hardware error bit (MX 2.0 Hardware Error Status) or the bus stops answering
+// the present-status Sync Read for a sustained window. The control task feeds
+// this to the safety FSM as StateInputs.dxl_hard_fault, which latches FaultHard
+// until an operator CLEAR_FAULT and the underlying condition both clear. Starts
+// false; only meaningful once a maintenance scan has populated the servo table.
+volatile bool g_dxlHardFault = false;
+
 // CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
 constexpr uint32_t kCrsfBaud = 420000;
 
@@ -618,13 +626,23 @@ void controlTask(void*) {
     si.battery_mv = batt_mv;
     si.battery_valid = batt_mv > 6000;  // below this = no pack sense (USB bench)
     si.watchdog_fault = watchdog::missedMask() != 0;
-    si.dxl_hard_fault = false;  // TODO: derive from repeated bus / HW errors
+    si.dxl_hard_fault = g_dxlHardFault;  // servo HW error / dead bus (lmt.5)
     si.host_estop = g_arbiter.hostEstop() || g_controlApi.estopActive();
     si.rc_kill = g_rcStatus.kill;
     si.rc_failsafe = g_rcStatus.failsafe;
     si.rc_ever_seen = g_rcStatus.ever_seen;
     si.rc_armed = g_rcStatus.armed;
-    si.arming_checks_pass = g_configReady;
+    // Arming gate (lmt.5): leaving ArmingChecks for StandReady (the energised RC
+    // walk path) requires the full preconditions, not just a loaded config. The
+    // bench maintenance/passive paths enter from Disarmed directly, so this does
+    // not block torque-off bench work. Require: config loaded, a real pack
+    // reading (a present-but-low pack already E-stops in the FSM), the full
+    // servo set scanned, fresh present-position reads for every joint (so we
+    // know the pose before energising), and no active hard fault.
+    const bool servo_coverage = g_dxlBus.servoCount() >= config::kNumServos;
+    const bool pose_known = g_servoStatusCount >= config::kNumServos;
+    si.arming_checks_pass = g_configReady && si.battery_valid && servo_coverage &&
+                            pose_known && !si.dxl_hard_fault;
     si.host_disarm = g_controlApi.disarmRequested();
     si.command_source = g_commandSource;
     si.jetson_fresh = g_arbiter.jetsonFresh(now_ms);
@@ -638,8 +656,25 @@ void controlTask(void*) {
     si.maintenance_request = maint_held;
     si.passive_request = g_passiveApi.requested();
     si.torque_off = g_dxlTorqueOff;
-    si.contact_enabled = false;      // wired with the contact feature toggle
-    si.contact_confident = false;
+    // Contact-aware terrain gate (lmt.5): expose the live FootContact feature
+    // state and an aggregate confidence so the tested StandReady->ContactTerrain
+    // transition is reachable. "Confident" requires a solid stance set: enough
+    // feet whose sensor is neither stale nor faulted and whose fused confidence
+    // clears a margin. Below that we stay in nominal RcManual gait.
+    constexpr uint8_t kContactConfMin = 128;   // half-scale of the 0..255 conf
+    constexpr uint8_t kMinStanceFeet = 4;      // > tripod, for a safety margin
+    const bool contact_feature_on =
+        g_featureApi.effectiveEnabled(protocol::Feature::FootContact);
+    uint8_t confident_feet = 0;
+    for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
+      const sensors::LegContactState& f = g_footState[i];
+      if (!f.stale && !f.fault && f.confidence >= kContactConfMin) {
+        ++confident_feet;
+      }
+    }
+    si.contact_enabled = contact_feature_on;
+    si.contact_confident =
+        contact_feature_on && (confident_feet >= kMinStanceFeet);
     // Honor a host CLEAR_FAULT pulse before advancing the machine.
     if (g_controlApi.consumeClearFault()) {
       g_stateMachine.requestClearFault();
@@ -1111,6 +1146,8 @@ void dxlTask(void*) {
   g_dxlBus.begin();
   TickType_t next = xTaskGetTickCount();
   bool prev_authorized = false;
+  // Sustained dead-bus window before declaring a hard bus fault (lmt.5).
+  constexpr uint16_t kDxlBusFailLimit = 50;  // ~1 s at the 50 Hz dxl period
   for (;;) {
     tick(watchdog::TaskId::Dxl);
 
@@ -1202,6 +1239,7 @@ void dxlTask(void*) {
     // scan populates the servo table (DXL power is OFF at boot), and never
     // enables torque or writes goals. The goal Sync-Write path (writeGoal-
     // Positions) runs above, gated by g_motionGate + a valid goal frame.
+    static uint16_t consec_zero_reads = 0;  // dead-bus counter (lmt.5)
     if (g_dxlBus.servoCount() > 0) {
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
@@ -1221,6 +1259,30 @@ void dxlTask(void*) {
       g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
       g_servoStatus[rr_servo].id = rr_id;  // readStatus does not set id
       ++rr_servo;
+
+      // Hard-fault detection (lmt.5): publish g_dxlHardFault for the safety FSM.
+      // A servo hardware-error bit (MX 2.0 Hardware Error Status; converges via
+      // the round-robin read) is an immediate hard fault. A bus that stops
+      // answering the present-status Sync Read for a sustained window
+      // (kDxlBusFailLimit cycles) is treated as a hard bus failure. Level-
+      // triggered so that once the servo is rebooted / the bus is restored the
+      // condition clears and the FSM can release FaultHard after CLEAR_FAULT.
+      if (n == 0) {
+        if (consec_zero_reads < 0xFFFF) ++consec_zero_reads;
+      } else {
+        consec_zero_reads = 0;
+      }
+      bool hw_error = false;
+      for (uint8_t i = 0; i < cnt; ++i) {
+        if (g_servoStatus[i].hardware_error != 0) {
+          hw_error = true;
+          break;
+        }
+      }
+      g_dxlHardFault = hw_error || (consec_zero_reads >= kDxlBusFailLimit);
+    } else {
+      consec_zero_reads = 0;
+      g_dxlHardFault = false;  // nothing scanned yet -> no bus to fault on
     }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kDxl));
   }
