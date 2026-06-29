@@ -688,7 +688,48 @@ void controlTask(void*) {
     static uint32_t applied_intent_seq = 0xFFFFFFFFu;
     static uint8_t applied_gait = 0xFF;
     static bool prev_motion_gate = false;
-    if (g_motionGate) {
+    if (g_motionGate && arb.source == safety::CommandSource::MacMaintenance) {
+      // --- Maintenance actuation (lmt.4) ----------------------------------
+      // Bench control: actuate the stored per-joint maintenance target ticks
+      // directly (no gait). Only joints the operator has explicitly commanded
+      // (set[][]) and that map to a servo are written; uncommanded joints hold
+      // the pose dxlTask latched when it enabled torque (it seeds goal :=
+      // present position before torque-on), so nothing snaps. The same
+      // g_goalFrame -> dxlTask Sync-Write path actuates these under
+      // MacMaintenance authority + a held maintenance lock (both already
+      // required for the arbiter to report this source).
+      const dxl::ServoMap map(g_configApi.config());
+      const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
+      if (g_goalMutex != nullptr && xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
+        uint8_t count = 0;
+        bool any_clamped = false;
+        for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+          for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
+            if (!tgt.set[leg][j]) continue;
+            const config::ServoConfig* sc = map.servoFor(leg, j);
+            if (sc == nullptr) continue;
+            gait::PipelineJoint& pj = g_goalFrame.joints[count++];
+            pj.id = sc->id;
+            pj.tick = tgt.tick[leg][j];
+            pj.leg = leg;
+            pj.joint = j;
+            pj.clamped = tgt.clamped[leg][j];
+            if (pj.clamped) any_clamped = true;
+          }
+        }
+        g_goalFrame.count = count;
+        g_goalClamped = any_clamped;
+        ++g_goalSeq;
+        // Only present a valid frame once a joint is commanded; until then the
+        // servos simply hold the torque-on seed pose (no goal write).
+        g_goalValid = (count > 0);
+        xSemaphoreGive(g_goalMutex);
+      }
+      // Keep the gait pipeline parked so a later walking authorisation restarts
+      // from a clean cycle (mirrors the gate-closed reset below).
+      applied_intent_seq = 0xFFFFFFFFu;
+      applied_gait = 0xFF;
+    } else if (g_motionGate) {
       const protocol::MotionIntent& intent = g_motionApi.intent();
       const bool rc_drives = (arb.source == safety::CommandSource::Rc);
 
@@ -1088,22 +1129,49 @@ void dxlTask(void*) {
     // safe by default. g_motionGate already folds in the safety state machine.
     const bool authorized = g_motionGate;
     const bool have_servos = g_dxlBus.servoCount() > 0;
+    static bool torque_seed_pending = false;
     if (!authorized && prev_authorized && have_servos) {
       g_dxlBus.setTorqueAll(false);
     }
-    // Rising edge of authorisation: enable torque on all servos before the first
-    // goal Sync-Write below so they hold and track the commanded pose rather
-    // than being back-driven. Edge-triggered to avoid re-issuing torque-enable
-    // every cycle.
+    if (!authorized) {
+      torque_seed_pending = false;  // disarm any pending seed-then-enable
+    }
+    // Rising edge of authorisation: arm a seed-then-enable sequence. Before
+    // torque is enabled we latch each servo's measured present position as its
+    // goal (lmt.4 safety) so no servo snaps to a stale Goal Position register
+    // when torque turns on. Present positions are read continuously below, so
+    // the snapshot is normally already fresh on this edge; if it is not (cold
+    // start right after a scan) we keep torque off and retry next cycle rather
+    // than enable torque against an unknown goal.
     if (authorized && !prev_authorized && have_servos) {
-      g_dxlBus.setTorqueAll(true);
+      torque_seed_pending = true;
+    }
+    if (authorized && torque_seed_pending && have_servos) {
+      static dxl::GoalTarget hold[config::kNumServos];
+      uint8_t hn = 0;
+      for (uint8_t s = 0; s < g_servoStatusCount && hn < config::kNumServos;
+           ++s) {
+        if (!g_servoStatus[s].ok) continue;  // no fresh present read yet
+        int32_t pp = g_servoStatus[s].present_position;
+        if (pp < 0) pp = 0;
+        hold[hn].id = g_servoStatus[s].id;
+        hold[hn].tick = static_cast<uint16_t>(pp);
+        ++hn;
+      }
+      if (hn > 0) {
+        g_dxlBus.writeGoalPositions(hold, hn);  // goal := present (no motion)
+        g_dxlBus.setTorqueAll(true);            // now safe to hold the pose
+        torque_seed_pending = false;
+      }
+      // else: present snapshot not ready; leave torque off and retry next cycle.
     }
     prev_authorized = authorized;
     // Publish torque-off confirmation for the safety FSM (passive pose gating).
-    // Torque is off whenever no servo is driven: nothing discovered yet, or
-    // motion is not authorised this cycle (the goal-write/torque-enable path is
-    // gated by g_motionGate, so authorized==false => torque stays off).
-    g_dxlTorqueOff = !have_servos || !authorized;
+    // Torque is off whenever no servo is driven: nothing discovered yet, motion
+    // is not authorised this cycle, or the seed-then-enable sequence has not yet
+    // turned torque on (the goal-write/torque-enable path is gated by
+    // g_motionGate, so authorized==false => torque stays off).
+    g_dxlTorqueOff = !have_servos || !authorized || torque_seed_pending;
 
     // Goal Sync-Write path (lmt.2): while motion is authorised and torque is on,
     // push the latest goal frame published by controlTask (gait -> body IK ->
