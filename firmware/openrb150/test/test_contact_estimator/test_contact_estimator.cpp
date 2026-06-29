@@ -269,6 +269,60 @@ void test_capture_baseline_bad_leg_ignored() {
   TEST_ASSERT_EQUAL_INT32(0, est.foot(0).pressure_delta);
 }
 
+// setEnabled() activates a disabled-but-calibrated foot so it begins
+// classifying (CONTACT_CALIBRATE path), and refuses to enable a foot that has
+// no usable pressure calibration so it can never classify noise.
+void test_set_enabled_activates_calibrated_foot() {
+  FootSensorCal cal[kNumFeet] = {};  // all disabled
+  // Foot 0 carries a usable calibration but starts disabled; foot 1 has none.
+  cal[0].pressure_baseline = 1000;
+  cal[0].near_thresh = 50;
+  cal[0].touch_thresh = 100;
+  cal[0].load_thresh = 300;
+  cal[0].enabled = 0;
+  ContactEstimator est;
+  est.configure(cal, fastParams());
+
+  // While disabled, a big reading still classifies as AIR.
+  est.update(0, s(9999, 99999), 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Air),
+                          static_cast<uint8_t>(est.foot(0).state));
+
+  // Enabling a calibrated foot succeeds; it now classifies load.
+  TEST_ASSERT_TRUE(est.setEnabled(0, true));
+  est.update(0, s(0, 1400), 20);  // delta 400 > load thresh 300
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Loaded),
+                          static_cast<uint8_t>(est.foot(0).state));
+
+  // Enabling an uncalibrated foot (zero thresholds) is refused: it stays AIR.
+  TEST_ASSERT_FALSE(est.setEnabled(1, true));
+  est.update(1, s(9999, 99999), 30);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Air),
+                          static_cast<uint8_t>(est.foot(1).state));
+
+  // Disabling always succeeds and returns the foot to AIR-only behaviour.
+  TEST_ASSERT_TRUE(est.setEnabled(0, false));
+  est.update(0, s(0, 1400), 40);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(ContactState::Air),
+                          static_cast<uint8_t>(est.foot(0).state));
+
+  // Out-of-range leg is a safe no-op (returns false).
+  TEST_ASSERT_FALSE(est.setEnabled(kNumFeet, true));
+}
+
+// setEnabled() refuses a foot whose LOADED threshold sits below TOUCH (the same
+// inverted-ordering case validateRobotConfig rejects).
+void test_set_enabled_refuses_inverted_thresholds() {
+  FootSensorCal cal[kNumFeet] = {};
+  cal[0].near_thresh = 50;
+  cal[0].touch_thresh = 400;
+  cal[0].load_thresh = 200;  // load < touch -> invalid
+  cal[0].enabled = 0;
+  ContactEstimator est;
+  est.configure(cal, fastParams());
+  TEST_ASSERT_FALSE(est.setEnabled(0, true));
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_disabled_foot_stays_air);
@@ -284,5 +338,7 @@ int main(int, char**) {
   RUN_TEST(test_set_thresholds_bad_leg_ignored);
   RUN_TEST(test_capture_baseline_rezeroes_delta);
   RUN_TEST(test_capture_baseline_bad_leg_ignored);
+  RUN_TEST(test_set_enabled_activates_calibrated_foot);
+  RUN_TEST(test_set_enabled_refuses_inverted_thresholds);
   return UNITY_END();
 }

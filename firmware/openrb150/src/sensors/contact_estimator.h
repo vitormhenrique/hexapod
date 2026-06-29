@@ -106,6 +106,14 @@ class ContactEstimator {
   // the next update re-classifies against the new baseline. Owned by i2cTask.
   void captureBaseline(uint8_t leg);
 
+  // Enable/disable per-foot contact classification at runtime. CONTACT_CALIBRATE
+  // enables a freshly-baselined foot so it starts classifying instead of staying
+  // AIR (a disabled foot only mirrors raw values). Enabling is refused unless the
+  // foot carries a usable pressure calibration (touch/load > 0 and load >= touch),
+  // mirroring validateRobotConfig, so an uncalibrated foot can never classify
+  // noise. Returns true when the foot is left in the requested state.
+  bool setEnabled(uint8_t leg, bool enabled);
+
   // Reset all feet to AIR with zero counters (baselines kept from configure).
   void reset();
 

@@ -1526,6 +1526,9 @@ void i2cTask(void*) {
   // ConfigLoad. apiTask adopts any persisted payload independently.
   g_configReady = true;
   TickType_t next = xTaskGetTickCount();
+  // Loop period, runtime-tunable via SENSOR_SET_RATE (lmt.9). Starts at the
+  // nominal 50 Hz; a host rate request derives and clamps a new period below.
+  uint32_t i2c_period_ms = period_ms::kI2c;
   for (;;) {
     tick(watchdog::TaskId::I2c);
 
@@ -1611,9 +1614,32 @@ void i2cTask(void*) {
       for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
         if ((mask & static_cast<uint8_t>(1u << i)) != 0) {
           g_contact.captureBaseline(i);
+          // Calibrating a foot also activates it: a freshly-baselined foot with
+          // a usable threshold set should start classifying contact instead of
+          // staying AIR (lmt.9 / audit 22l.7). setEnabled refuses feet without a
+          // usable calibration, so an unconfigured foot stays disabled.
+          g_contact.setEnabled(i, true);
         }
       }
       applied_calibrate_seq = want_cal;
+    }
+
+    // Apply a host-requested sensor poll rate (SENSOR_SET_RATE). apiTask stages
+    // the rate; i2cTask owns the loop timing, so it derives the loop period from
+    // the requested Hz, clamped to a safe window so a host cannot starve the
+    // loop (which also services config commits) or spin it pointlessly fast
+    // (lmt.9 / audit 22l.7). Unset (rate 0) keeps the nominal period.
+    static uint32_t applied_rate_seq = 0;
+    const uint32_t want_rate_seq = g_sensorApi.rateSeq();
+    if (want_rate_seq != applied_rate_seq) {
+      const uint16_t hz = g_sensorApi.sensorRateHz();
+      if (hz > 0) {
+        uint32_t ms = 1000u / hz;
+        if (ms < period_ms::kI2cMinMs) ms = period_ms::kI2cMinMs;
+        if (ms > period_ms::kI2cMaxMs) ms = period_ms::kI2cMaxMs;
+        i2c_period_ms = ms;
+      }
+      applied_rate_seq = want_rate_seq;
     }
 
     // Poll one foot sensor per iteration (round-robin) so each pass does bounded
@@ -1625,21 +1651,33 @@ void i2cTask(void*) {
       poll_ch = static_cast<uint8_t>((poll_ch + 1) % i2c::kNumFootChannels);
       const bool present =
           (g_footPresentMask & static_cast<uint8_t>(1u << ch)) != 0;
-      if (present && g_i2cBus.selectChannel(ch)) {
-        const uint8_t bit = static_cast<uint8_t>(1u << ch);
-        if ((configured_mask & bit) == 0) {
-          // First time we touch this board: power up its sensors.
-          if (g_finger.configureChannel()) {
-            configured_mask = static_cast<uint8_t>(configured_mask | bit);
+      if (present) {
+        if (g_i2cBus.selectChannel(ch)) {
+          const uint8_t bit = static_cast<uint8_t>(1u << ch);
+          if ((configured_mask & bit) == 0) {
+            // First time we touch this board: power up its sensors.
+            if (g_finger.configureChannel()) {
+              configured_mask = static_cast<uint8_t>(configured_mask | bit);
+            }
           }
-        }
-        const sensors::FootSample sample = g_finger.readFoot();
-        if (!sample.ok) {
-          // Force reconfigure on next visit in case the board was reseated.
+          const sensors::FootSample sample = g_finger.readFoot();
+          if (!sample.ok) {
+            // Force reconfigure on next visit in case the board was reseated.
+            configured_mask = static_cast<uint8_t>(configured_mask & ~bit);
+          }
+          g_contact.update(ch, sample, millis());
+          g_i2cBus.selectNone();
+        } else {
+          // Mux channel select failed: feed a failed sample so the foot's fault
+          // counter advances and telemetry reflects the I2C problem promptly,
+          // instead of waiting only for the staleness timeout (lmt.9 / audit
+          // 22l.7). Drop the cached power-up so the board is reconfigured if the
+          // mux recovers.
+          const uint8_t bit = static_cast<uint8_t>(1u << ch);
           configured_mask = static_cast<uint8_t>(configured_mask & ~bit);
+          g_contact.update(ch, sensors::FootSample{}, millis());
+          g_i2cBus.selectNone();  // best-effort: leave the mux in a known state
         }
-        g_contact.update(ch, sample, millis());
-        g_i2cBus.selectNone();
       }
     }
     // Decay any silent foot to STALE and republish the snapshot every pass.
@@ -1650,7 +1688,7 @@ void i2cTask(void*) {
     // Mirror the fused foot state into the SensorApi snapshot (SENSOR_GET_STATUS).
     publishStatusSnapshot();
 
-    vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kI2c));
+    vTaskDelayUntil(&next, pdMS_TO_TICKS(i2c_period_ms));
   }
 }
 

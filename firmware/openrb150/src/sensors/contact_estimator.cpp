@@ -62,6 +62,22 @@ void ContactEstimator::captureBaseline(uint8_t leg) {
   st.pressure_delta = 0;
 }
 
+bool ContactEstimator::setEnabled(uint8_t leg, bool enabled) {
+  if (leg >= kNumFeet) return false;
+  FootCtx& c = ctx_[leg];
+  if (enabled) {
+    // Refuse to enable a foot without a usable pressure calibration: the state
+    // machine would otherwise classify noise. Mirrors validateRobotConfig's
+    // enabled-foot rule (touch/load set and load >= touch).
+    if (c.touch_thresh <= 0 || c.load_thresh <= 0 ||
+        c.load_thresh < c.touch_thresh) {
+      return false;
+    }
+  }
+  c.enabled = enabled;
+  return true;
+}
+
 void ContactEstimator::reset() {
   for (uint8_t i = 0; i < kNumFeet; ++i) {
     const int32_t keep_baseline = feet_[i].pressure_baseline;

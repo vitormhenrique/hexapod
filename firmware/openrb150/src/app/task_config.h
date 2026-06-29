@@ -49,6 +49,13 @@ constexpr uint32_t kApi = 5;        // 200 Hz poll
 constexpr uint32_t kI2c = 20;       // 50 Hz
 constexpr uint32_t kHealth = 500;   // 2 Hz reporting + watchdog evaluate
 constexpr uint32_t kBlink = 100;    // 5 Hz LED toggle (FreeRTOS liveness test)
+
+// Runtime-tunable bounds for the i2c/sensor poll loop period (SENSOR_SET_RATE,
+// lmt.9). The host requests a poll rate in Hz; the i2c task derives its loop
+// period from it and clamps to this window so a host cannot starve the loop
+// (which also services config commits) or spin it pointlessly fast.
+constexpr uint32_t kI2cMinMs = 5;    // 200 Hz ceiling
+constexpr uint32_t kI2cMaxMs = 100;  // 10 Hz floor
 }  // namespace period_ms
 
 }  // namespace app
