@@ -53,9 +53,15 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
 
   out.count = 0;
   out.any_unreachable = false;
+  out.any_reach_limited = false;
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
     const FootTarget& f = feet.feet[leg];
-    const IkResult ik = body_.solveBody(leg, f.x_mm, f.y_mm, f.z_mm);
+    bool reach_limited = false;
+    const IkResult ik =
+        body_.solveBodyLimited(leg, f.x_mm, f.y_mm, f.z_mm, reach_limited);
+    if (reach_limited) {
+      out.any_reach_limited = true;
+    }
     if (!ik.reachable) {
       out.any_unreachable = true;
     }

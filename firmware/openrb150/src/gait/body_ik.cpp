@@ -83,6 +83,14 @@ IkResult BodyKinematics::solveBody(uint8_t leg, float bx, float by,
   return ik_.solve(cx, cy, cz);
 }
 
+IkResult BodyKinematics::solveBodyLimited(uint8_t leg, float bx, float by,
+                                          float bz, bool& reach_limited) const {
+  float cx, cy, cz;
+  footBodyToCoxa(leg, bx, by, bz, cx, cy, cz);
+  reach_limited = ik_.clampToReach(cx, cy, cz);
+  return ik_.solve(cx, cy, cz);
+}
+
 IkResult BodyKinematics::solveBodyPose(uint8_t leg, const BodyPose& pose,
                                        float wx, float wy, float wz) const {
   float bx, by, bz;

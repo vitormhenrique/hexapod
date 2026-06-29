@@ -19,9 +19,12 @@
 // Every stage is already individually clamped (gait stroke/lift caps, the IK
 // reachable annulus, and the configured servo travel), so this pipeline can
 // never emit a tick outside the configured [min_tick, max_tick]; it is the
-// final servo-target generation stage before the safety gate in dxlTask. It
-// reports `any_unreachable` so the caller can react when the commanded foot
-// path leaves the workspace instead of silently saturating.
+// final servo-target generation stage before the safety gate in dxlTask. Before
+// IK it also applies a reachability-aware stride limit (lmt.14): each foot is
+// pulled radially inward to stay within kReachMarginFrac of full leg reach, so
+// the documented near-boundary home stance plus a commanded stride can never
+// drive a leg off the workspace. It reports `any_reach_limited` when that clamp
+// engaged and `any_unreachable` if a target still left the workspace.
 //
 // Static memory only: the engine, body transform and servo map are all held by
 // value and constructed once from the active RobotConfig. Deterministic float
@@ -55,6 +58,7 @@ struct PipelineOutput {
   PipelineJoint joints[config::kNumServos];
   uint8_t count = 0;            // number of mapped joints written
   bool any_unreachable = false;  // a leg IK target left the reachable workspace
+  bool any_reach_limited = false;  // a foot was pulled in to the reach margin (lmt.14)
 };
 
 class GaitPipeline {

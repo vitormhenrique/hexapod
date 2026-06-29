@@ -66,6 +66,44 @@ IkResult LegIk::solve(float x_mm, float y_mm, float z_mm) const {
   return r;
 }
 
+bool LegIk::clampToReach(float& x_mm, float& y_mm, float& z_mm) const {
+  const float horiz = sqrtf(x_mm * x_mm + y_mm * y_mm);
+  const float planar_r = horiz - l1_;  // radial distance past the coxa
+  const float dz = z_mm;
+  const float d = sqrtf(planar_r * planar_r + dz * dz);
+  const float d_max = kReachMarginFrac * (l2_ + l3_);
+  if (d <= d_max) {
+    return false;  // already inside the safe reach margin
+  }
+
+  // Prefer to keep the foot height (dz) fixed and shorten only the radial reach,
+  // so a stance foot stays on its ground plane while the stride is bounded. If
+  // the foot is lower than the whole reach margin (no radial solution at that
+  // height), fall back to scaling both components toward the reach centre.
+  float planar_r_new;
+  float dz_new = dz;
+  if (fabsf(dz) < d_max) {
+    planar_r_new = sqrtf(d_max * d_max - dz * dz);
+    if (planar_r < 0.0f) planar_r_new = -planar_r_new;  // preserve radial sign
+  } else {
+    const float s = d_max / d;
+    planar_r_new = planar_r * s;
+    dz_new = dz * s;
+  }
+
+  const float horiz_new = planar_r_new + l1_;
+  if (horiz > 1e-6f) {
+    const float k = horiz_new / horiz;  // preserves hip-yaw (atan2 unchanged)
+    x_mm *= k;
+    y_mm *= k;
+  } else {
+    x_mm = horiz_new;
+    y_mm = 0.0f;
+  }
+  z_mm = dz_new;
+  return true;
+}
+
 void LegIk::forwardRaw(float coxa, float femur_raw, float tibia_raw,
                        float& x_mm, float& y_mm, float& z_mm) const {
   // Planar arm: femur at angle alpha, tibia continues at alpha+beta.

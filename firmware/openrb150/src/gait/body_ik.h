@@ -69,6 +69,15 @@ class BodyKinematics {
   // Full chain: foot target in body frame B -> coxa frame -> leg IK.
   IkResult solveBody(uint8_t leg, float bx, float by, float bz) const;
 
+  // Full chain with reachability-aware stride limiting (lmt.14): foot target in
+  // body frame B -> coxa frame -> clamp to the safe reach margin -> leg IK.
+  // Sets `reach_limited` true when the foot had to be pulled in to stay
+  // reachable. Used by the gait pipeline so commanded strides never leave the
+  // workspace; single-leg maintenance targets keep using solveBody so the
+  // operator still sees the raw `reachable` flag.
+  IkResult solveBodyLimited(uint8_t leg, float bx, float by, float bz,
+                            bool& reach_limited) const;
+
   // Full chain with body pose: a world-fixed foot (neutral body frame) under a
   // body pose -> moved body frame -> coxa frame -> leg IK.
   IkResult solveBodyPose(uint8_t leg, const BodyPose& pose, float wx, float wy,

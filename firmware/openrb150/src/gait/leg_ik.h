@@ -29,6 +29,15 @@ namespace gait {
 constexpr float kHomeRadiusMm = 127.0f;
 constexpr float kHomeFootZMm = -44.55f;
 
+// Reachability-aware stride limit (lmt.14): generated foot targets are pulled
+// radially inward by clampToReach() so the planar reach distance never exceeds
+// this fraction of the full two-link extension (l2 + l3). The documented home
+// stance already sits at ~92% of full reach, so commanded strides routinely
+// push the stroke extremes past the workspace boundary; capping at 95% keeps
+// every commanded foot off the near-singular fully-extended region before
+// ground tests while still leaving the home stance untouched.
+constexpr float kReachMarginFrac = 0.95f;
+
 // Result of a single-leg IK solve. Angles are URDF-zero-relative radians.
 struct IkResult {
   float coxa = 0.0f;
@@ -53,6 +62,14 @@ class LegIk {
   // (clamped/saturated when out of reach); `reachable` is false if the target
   // is outside the two-link annulus.
   IkResult solve(float x_mm, float y_mm, float z_mm) const;
+
+  // Reachability-aware stride limiter (lmt.14): pull a coxa-frame foot target
+  // radially inward, in place, so its planar reach distance stays within
+  // kReachMarginFrac * (l2 + l3). Foot height (z) and hip-yaw direction are
+  // preserved when possible (only the radial reach is shortened), so a stance
+  // foot stays on its ground plane while the effective stride is bounded.
+  // Returns true if the target was modified (i.e. the raw stride over-reached).
+  bool clampToReach(float& x_mm, float& y_mm, float& z_mm) const;
 
   // Raw planar rest angles at the home foot (radians), exposed for tests/FK.
   float femurRest() const { return femur_rest_; }

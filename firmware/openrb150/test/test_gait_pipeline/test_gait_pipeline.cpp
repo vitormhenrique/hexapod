@@ -190,6 +190,47 @@ void test_reconfigure_rebuilds_cached_body_ik() {
   TEST_ASSERT_TRUE(changed_after_reconfig);
 }
 
+// lmt.14: with a realistic (large) stride the home stance + stroke extremes
+// over-reach the leg workspace. The reach-margin clamp must keep every commanded
+// foot reachable (any_unreachable stays false) while reporting any_reach_limited
+// when it engages, and the emitted ticks must still sit inside servo travel.
+void test_large_stride_is_reach_limited_not_unreachable() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Tripod);
+  // Max stride, modest lift, full speed, forward twist: drives the stroke
+  // extremes well past the near-boundary home stance.
+  pipe.setParams(40, 80, 30, 128, 255);
+  pipe.setTwist(1.0f, 0.0f, 0.0f);
+
+  bool saw_reach_limit = false;
+  for (int i = 0; i < 60; ++i) {  // ~1.2 s, a few full cycles
+    PipelineOutput out;
+    pipe.update(20, out);
+    // The clamp guarantees no commanded foot ever leaves the workspace.
+    TEST_ASSERT_FALSE(out.any_unreachable);
+    if (out.any_reach_limited) saw_reach_limit = true;
+    for (uint8_t k = 0; k < out.count; ++k) {
+      const ServoConfig* sc = servoById(cfg, out.joints[k].id);
+      TEST_ASSERT_NOT_NULL(sc);
+      TEST_ASSERT_TRUE(out.joints[k].tick >= sc->min_tick);
+      TEST_ASSERT_TRUE(out.joints[k].tick <= sc->max_tick);
+    }
+  }
+  TEST_ASSERT_TRUE(saw_reach_limit);
+}
+
+// The static home stance is within the reach margin, so it is never flagged.
+void test_stand_is_not_reach_limited() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  PipelineOutput out;
+  pipe.update(20, out);
+  TEST_ASSERT_FALSE(out.any_reach_limited);
+  TEST_ASSERT_FALSE(out.any_unreachable);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
@@ -199,5 +240,7 @@ int main(int, char**) {
   RUN_TEST(test_narrow_travel_sets_clamp_flag);
   RUN_TEST(test_set_params_preserves_selected_gait);
   RUN_TEST(test_reconfigure_rebuilds_cached_body_ik);
+  RUN_TEST(test_large_stride_is_reach_limited_not_unreachable);
+  RUN_TEST(test_stand_is_not_reach_limited);
   return UNITY_END();
 }

@@ -126,6 +126,51 @@ void test_leg_ik_home_params_shift_rest_offset() {
   TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, l0.tibia);
 }
 
+// ---- clampToReach (lmt.14 reachability-aware stride limiting) -------------
+
+// The documented home stance (~92% of full reach) is already inside the 95%
+// margin, so it must pass through untouched.
+void test_clamp_reach_leaves_home_unchanged() {
+  LegIk ik(kL1, kL2, kL3);
+  float x = kHomeRadiusMm, y = 0.0f, z = kHomeFootZMm;
+  const bool clamped = ik.clampToReach(x, y, z);
+  TEST_ASSERT_FALSE(clamped);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kHomeRadiusMm, x);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, y);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kHomeFootZMm, z);
+}
+
+// An over-reaching radial target is pulled in to exactly the reach margin, with
+// the foot height preserved and the result solidly reachable.
+void test_clamp_reach_pulls_overreach_to_margin_keeping_height() {
+  LegIk ik(kL1, kL2, kL3);
+  float x = 200.0f, y = 0.0f, z = kHomeFootZMm;  // far past full reach
+  const bool clamped = ik.clampToReach(x, y, z);
+  TEST_ASSERT_TRUE(clamped);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kHomeFootZMm, z);  // height kept
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, y);          // stays on radial
+
+  // Planar reach distance now equals the margin (95% of l2+l3).
+  const float d_max = kReachMarginFrac * (kL2 + kL3);
+  const float planar_r = sqrtf(x * x + y * y) - kL1;
+  const float d = sqrtf(planar_r * planar_r + z * z);
+  TEST_ASSERT_FLOAT_WITHIN(1e-2f, d_max, d);
+
+  // And the clamped target is comfortably reachable.
+  TEST_ASSERT_TRUE(ik.solve(x, y, z).reachable);
+}
+
+// A diagonal over-reach keeps its hip-yaw direction (x and y scale together).
+void test_clamp_reach_preserves_hip_yaw() {
+  LegIk ik(kL1, kL2, kL3);
+  const float yaw_in = atan2f(90.0f, 130.0f);
+  float x = 130.0f, y = 90.0f, z = kHomeFootZMm;  // |xy| ~ 158 mm, over-reach
+  const bool clamped = ik.clampToReach(x, y, z);
+  TEST_ASSERT_TRUE(clamped);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, yaw_in, atan2f(y, x));  // direction kept
+  TEST_ASSERT_TRUE(ik.solve(x, y, z).reachable);
+}
+
 // ---- BodyKinematics ------------------------------------------------------
 
 void test_body_to_coxa_maps_home_to_radial() {
@@ -243,6 +288,30 @@ void test_body_geometry_from_config_coxa_lift() {
   TEST_ASSERT_FLOAT_WITHIN(0.05f, y0, y1);
 }
 
+// lmt.14: solveBodyLimited applies the reach clamp before IK. A body-frame foot
+// that over-reaches in the coxa frame is reported reach_limited AND solved
+// reachable; the documented home stance is neither limited nor unreachable.
+void test_solve_body_limited_flags_and_recovers_overreach() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics bk(cfg);
+
+  const uint8_t leg = 2;  // mid-right, home foot purely +X in body frame
+  bool limited = true;
+  IkResult home = bk.solveBodyLimited(leg, kHomeFootB[leg].x, kHomeFootB[leg].y,
+                                      kHomeFootB[leg].z, limited);
+  TEST_ASSERT_FALSE(limited);       // home stance is inside the margin
+  TEST_ASSERT_TRUE(home.reachable);
+
+  // Push the foot 70 mm further out along +X (past the reach boundary).
+  bool limited2 = false;
+  IkResult far = bk.solveBodyLimited(leg, kHomeFootB[leg].x + 70.0f,
+                                     kHomeFootB[leg].y, kHomeFootB[leg].z,
+                                     limited2);
+  TEST_ASSERT_TRUE(limited2);       // clamp engaged
+  TEST_ASSERT_TRUE(far.reachable);  // and the result is back inside the annulus
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_home_foot_maps_to_zero_angles);
@@ -253,6 +322,9 @@ int main(int, char**) {
   RUN_TEST(test_edge_too_close_is_unreachable);
   RUN_TEST(test_unreachable_still_returns_clamped_angles);
   RUN_TEST(test_leg_ik_home_params_shift_rest_offset);
+  RUN_TEST(test_clamp_reach_leaves_home_unchanged);
+  RUN_TEST(test_clamp_reach_pulls_overreach_to_margin_keeping_height);
+  RUN_TEST(test_clamp_reach_preserves_hip_yaw);
   RUN_TEST(test_body_to_coxa_maps_home_to_radial);
   RUN_TEST(test_solve_body_home_is_near_zero_all_legs);
   RUN_TEST(test_apply_body_pose_identity);
@@ -261,5 +333,6 @@ int main(int, char**) {
   RUN_TEST(test_body_pose_raise_lowers_foot_in_coxa_frame);
   RUN_TEST(test_solve_body_invalid_leg);
   RUN_TEST(test_body_geometry_from_config_coxa_lift);
+  RUN_TEST(test_solve_body_limited_flags_and_recovers_overreach);
   return UNITY_END();
 }
