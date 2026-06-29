@@ -59,5 +59,28 @@ firmware/openrb150/
     main.cpp                entry point
 ```
 
+## Intentionally not implemented (`#NOTIMPLEMENTED`)
+
+These enhancements were raised by the 2026-06-29 Phase 1/2 audit
+([docs/firmware_phase2_beads_audit_2026-06-29.md](../../docs/firmware_phase2_beads_audit_2026-06-29.md))
+but are deliberately **not** on the backlog. They are micro-optimizations or
+cleanups that are not required for a safe, working robot at this stage. Revisit
+only if a profiler or hardware-in-loop run proves a concrete need.
+
+- `#NOTIMPLEMENTED` **Precomputed servo lookup tables** (audit 22l.3). `ServoMap::servoFor()`/
+  `servoForId()` linearly scan all servos. With only 18 servos the scan cost is
+  negligible; a cached slot/id map adds state to maintain for no measurable gain.
+- `#NOTIMPLEMENTED` **Coherent-snapshot / sequence guards on multi-field telemetry** (audit 22l.9).
+  `buildTelemetry()` reads `g_servoStatus` while `dxlTask` writes it. A torn record
+  is cosmetic for bring-up telemetry. Add a copy/sequence guard only if an HIL run
+  shows visibly torn snapshots.
+- `#NOTIMPLEMENTED` **Consolidate/remove the unused `CommandArbiter` Mac-lock path** (audit 22l.8).
+  `MaintenanceApi` is the single source of truth for the maintenance lock; the
+  dormant `CommandArbiter` Mac-lock methods are harmless dead code. Leave them
+  until a broader arbiter refactor, rather than churning safety code for cleanup.
+
+> Bench / hardware-in-loop sign-off (audit 22l.11) is tracked separately and is
+> **deferred, not rejected** — it is pending hardware, not a non-goal.
+
 See the repo-root `AGENTS.md` for the full architecture, safety rules, and phase
 plan. Work is tracked in Beads (`bd ready`), not markdown TODOs.
