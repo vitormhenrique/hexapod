@@ -24,6 +24,7 @@
 #include "../protocol/passive_api.h"
 #include "../protocol/sensor_api.h"
 #include "../protocol/telemetry.h"
+#include "../protocol/telemetry_encode.h"
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
@@ -336,20 +337,9 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // 256 payload cap. Position is refreshed for all servos every cycle by the
       // all-servo Sync Read; the detail fields (vel/load/volt/temp/torque) are
       // filled by the dxlTask round-robin per-servo read (eax.6), so they are
-      // valid once each servo has been polled at least once.
-      const uint8_t n = g_servoStatusCount;
-      p[o++] = n;
-      for (uint8_t i = 0; i < n; ++i) {
-        const dxl::ServoStatus& s = g_servoStatus[i];
-        p[o++] = s.id;
-        o += put32(&p[o], static_cast<uint32_t>(s.present_position));
-        o += put16(&p[o], static_cast<uint16_t>(s.present_velocity));
-        o += put16(&p[o], static_cast<uint16_t>(s.present_load));
-        o += put16(&p[o], s.present_voltage_mv);
-        p[o++] = static_cast<uint8_t>(s.present_temperature_c);
-        p[o++] = s.hardware_error;
-        p[o++] = s.torque_enabled ? 1 : 0;
-      }
+      // valid once each servo has been polled at least once. Byte layout lives
+      // in the portable encoder (lmt.12) so it is host-vector-tested.
+      o = protocol::encodeServoStatus(g_servoStatus, g_servoStatusCount, p);
       break;
     }
     case StreamId::ContactState: {
@@ -399,31 +389,10 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // angle_centideg(int16). Angles come from the active config's servo map
       // (sign/trim/center 2048, 4096 ticks/rev), so they read correctly in both
       // active and passive (torque-off) modes from the present-position snapshot.
-      // 18 joints -> 1 + 18*4 = 73 bytes, within the 256 payload cap.
+      // 18 joints -> 1 + 18*4 = 73 bytes, within the 256 payload cap. Byte
+      // layout + tick->angle mapping live in the portable encoder (lmt.12).
       const dxl::ServoMap map(g_configApi.config());
-      const uint8_t n = g_servoStatusCount;
-      uint8_t* countp = &p[o++];
-      uint8_t emitted = 0;
-      for (uint8_t i = 0; i < n; ++i) {
-        const dxl::ServoStatus& s = g_servoStatus[i];
-        const config::ServoConfig* sc = map.servoForId(s.id);
-        if (sc == nullptr) continue;  // skip servos not in the map
-        // Single-turn present position; clamp into the device range so a
-        // multi-turn or stale read cannot wrap the angle.
-        int32_t raw = s.present_position;
-        if (raw < 0) raw = 0;
-        if (raw > config::kServoMaxTick) raw = config::kServoMaxTick;
-        const float rad =
-            map.tickToAngle(sc->leg, sc->joint, static_cast<uint16_t>(raw));
-        long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
-        if (centideg > 32767) centideg = 32767;
-        if (centideg < -32768) centideg = -32768;
-        p[o++] = sc->leg;
-        p[o++] = sc->joint;
-        o += put16(&p[o], static_cast<uint16_t>(static_cast<int16_t>(centideg)));
-        ++emitted;
-      }
-      *countp = emitted;
+      o = protocol::encodeJointState(map, g_servoStatus, g_servoStatusCount, p);
       break;
     }
     case StreamId::ServoGoals: {
@@ -435,53 +404,24 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // authoritative source; on the bench (motion not gated) the stored
       // maintenance target set is rendered instead. Either way only joints with
       // a real command are emitted, so an idle robot yields a zero count.
-      // 18 joints -> 1 + 18*5 = 91 bytes, within the 256 payload cap.
+      // 18 joints -> 1 + 18*5 = 91 bytes, within the 256 payload cap. The byte
+      // layout lives in the portable encoder (lmt.12); this case keeps only the
+      // task glue (source selection + the zero-wait goal mutex).
       const dxl::ServoMap map(g_configApi.config());
-      uint8_t* countp = &p[o++];
-      uint8_t emitted = 0;
       bool used_gait = false;
       // Live gait goals take priority while motion is authorised. Copy under a
       // zero-wait lock; if controlTask is mid-publish, fall back to the bench
       // target set for this frame rather than block the telemetry task.
       if (g_motionGate && g_goalValid && g_goalMutex != nullptr &&
           xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
-        const uint8_t n = g_goalFrame.count;
-        for (uint8_t i = 0; i < n; ++i) {
-          const gait::PipelineJoint& jt = g_goalFrame.joints[i];
-          const float rad = map.tickToAngle(jt.leg, jt.joint, jt.tick);
-          long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
-          if (centideg > 32767) centideg = 32767;
-          if (centideg < -32768) centideg = -32768;
-          p[o++] = jt.leg;
-          p[o++] = jt.joint;
-          o += put16(&p[o],
-                     static_cast<uint16_t>(static_cast<int16_t>(centideg)));
-          p[o++] = jt.clamped ? 0x01 : 0x00;
-          ++emitted;
-        }
+        o = protocol::encodeServoGoals(map, g_goalFrame.joints,
+                                       g_goalFrame.count, p);
         xSemaphoreGive(g_goalMutex);
         used_gait = true;
       }
       if (!used_gait) {
-        const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
-        for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
-          for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
-            if (!tgt.set[leg][j]) continue;
-            if (map.servoFor(leg, j) == nullptr) continue;  // skip unmapped
-            const float rad = map.tickToAngle(leg, j, tgt.tick[leg][j]);
-            long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
-            if (centideg > 32767) centideg = 32767;
-            if (centideg < -32768) centideg = -32768;
-            p[o++] = leg;
-            p[o++] = j;
-            o += put16(&p[o],
-                       static_cast<uint16_t>(static_cast<int16_t>(centideg)));
-            p[o++] = tgt.clamped[leg][j] ? 0x01 : 0x00;
-            ++emitted;
-          }
-        }
+        o = protocol::encodeServoGoals(map, g_maintTargetApi.target(), p);
       }
-      *countp = emitted;
       break;
     }
     case StreamId::LegState: {
@@ -491,23 +431,9 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // frame), flags(1). flags bit0 = reachable, bit1 = clamped (a joint hit
       // its configured travel). Only legs with a recorded SET_LEG_TARGET attempt
       // are emitted, so until a leg target is sent the payload is a zero count.
-      // 6 legs -> 1 + 6*8 = 49 bytes, within the 256 payload cap.
-      const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
-      uint8_t* countp = &p[o++];
-      uint8_t emitted = 0;
-      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
-        if (!tgt.leg_target_set[leg]) continue;
-        p[o++] = leg;
-        o += put16(&p[o], static_cast<uint16_t>(tgt.foot_x_mm[leg]));
-        o += put16(&p[o], static_cast<uint16_t>(tgt.foot_y_mm[leg]));
-        o += put16(&p[o], static_cast<uint16_t>(tgt.foot_z_mm[leg]));
-        uint8_t flags = 0;
-        if (tgt.leg_reachable[leg]) flags |= 0x01;
-        if (tgt.leg_clamped[leg]) flags |= 0x02;
-        p[o++] = flags;
-        ++emitted;
-      }
-      *countp = emitted;
+      // 6 legs -> 1 + 6*8 = 49 bytes, within the 256 payload cap. Byte layout
+      // lives in the portable encoder (lmt.12).
+      o = protocol::encodeLegState(g_maintTargetApi.target(), p);
       break;
     }
   }
