@@ -105,7 +105,9 @@ void test_round_trip_preserves_fields() {
   cfg.servos[7].max_tick = 3100;
   cfg.gait.stride_len_mm = 75;
   cfg.feet[2].pressure_baseline = -123456;
+  cfg.feet[2].near_thresh = 300;
   cfg.feet[2].touch_thresh = 4200;
+  cfg.feet[2].load_thresh = 5000;  // LOADED >= TOUCH
   cfg.feet[2].enabled = 1;
   cfg.feature_defaults = kFeatSensorPolling | kFeatPassivePoseStream;
 
@@ -189,6 +191,81 @@ void test_validate_rejects_missing_joint_slot() {
   TEST_ASSERT_FALSE(validateRobotConfig(cfg));
 }
 
+// lmt.8: gait defaults outside the engine's safe envelope are rejected (the
+// engine would otherwise silently clamp them), and feature_defaults may only
+// set known bits.
+void test_validate_rejects_unsafe_gait_and_features() {
+  RobotConfig cfg;
+
+  defaultRobotConfig(cfg);
+  cfg.gait.body_height_mm = kMaxGaitBodyHeightMm + 1;  // above foot-Z envelope
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.gait.body_height_mm = kMinGaitBodyHeightMm - 1;  // below safe floor
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.gait.stride_len_mm = kMaxGaitStrideMm + 1;  // beyond max stroke
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.gait.step_height_mm = kMaxGaitStepMm + 1;  // beyond max lift
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.feature_defaults = 1u << 5;  // undefined feature bit
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  // Boundary values stay valid.
+  defaultRobotConfig(cfg);
+  cfg.gait.body_height_mm = kMaxGaitBodyHeightMm;
+  cfg.gait.stride_len_mm = kMaxGaitStrideMm;
+  cfg.gait.step_height_mm = kMaxGaitStepMm;
+  cfg.feature_defaults = kKnownFeatureBits;
+  TEST_ASSERT_TRUE(validateRobotConfig(cfg));
+}
+
+// lmt.8: an enabled foot sensor must carry a complete, ordered pressure
+// calibration; disabled feet are unconstrained.
+void test_validate_rejects_bad_foot_calibration() {
+  RobotConfig cfg;
+
+  // Enabled but no thresholds set -> reject.
+  defaultRobotConfig(cfg);
+  cfg.feet[0].enabled = 1;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  // Enabled, near/touch set but load missing -> reject.
+  defaultRobotConfig(cfg);
+  cfg.feet[0].enabled = 1;
+  cfg.feet[0].near_thresh = 300;
+  cfg.feet[0].touch_thresh = 4000;
+  cfg.feet[0].load_thresh = 0;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  // Enabled with LOADED below TOUCH -> reject (inverted ordering).
+  defaultRobotConfig(cfg);
+  cfg.feet[0].enabled = 1;
+  cfg.feet[0].near_thresh = 300;
+  cfg.feet[0].touch_thresh = 4000;
+  cfg.feet[0].load_thresh = 3000;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  // Complete, ordered calibration -> valid.
+  defaultRobotConfig(cfg);
+  cfg.feet[0].enabled = 1;
+  cfg.feet[0].near_thresh = 300;
+  cfg.feet[0].touch_thresh = 4000;
+  cfg.feet[0].load_thresh = 5000;
+  TEST_ASSERT_TRUE(validateRobotConfig(cfg));
+
+  // Disabled foot with zero thresholds stays valid (default case).
+  defaultRobotConfig(cfg);
+  cfg.feet[0].enabled = 0;
+  TEST_ASSERT_TRUE(validateRobotConfig(cfg));
+}
+
 // Cross-check: the serialized default-config bytes must match the host
 // reference byte-for-byte. The host generator (protocol/tests/gen_vectors.py)
 // emits frames.json["config"]["default_payload_crc"] over the same payload, and
@@ -219,6 +296,8 @@ int main(int, char**) {
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
   RUN_TEST(test_validate_rejects_missing_joint_slot);
+  RUN_TEST(test_validate_rejects_unsafe_gait_and_features);
+  RUN_TEST(test_validate_rejects_bad_foot_calibration);
   RUN_TEST(test_default_payload_crc_matches_host_vector);
   return UNITY_END();
 }

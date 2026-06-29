@@ -249,9 +249,21 @@ bool validateRobotConfig(const RobotConfig& cfg) {
     return false;
   }
 
-  // Body height must be positive.
-  if (cfg.gait.body_height_mm == 0) return false;
+  // Gait selection must be a known gait, and the persisted gait defaults must
+  // sit inside the gait engine's safe envelope -- not merely be clampable to it.
+  // A persisted default the engine would have to clamp back is a configuration
+  // error, not a safe baseline (lmt.8 / audit 22l.1).
   if (cfg.gait.gait > static_cast<uint8_t>(GaitId::Crawl)) return false;
+  if (cfg.gait.body_height_mm < kMinGaitBodyHeightMm ||
+      cfg.gait.body_height_mm > kMaxGaitBodyHeightMm) {
+    return false;
+  }
+  if (cfg.gait.stride_len_mm > kMaxGaitStrideMm) return false;
+  if (cfg.gait.step_height_mm > kMaxGaitStepMm) return false;
+
+  // feature_defaults may only request known features; an unknown bit means the
+  // payload was produced by a newer/garbage schema and must not be trusted.
+  if ((cfg.feature_defaults & ~kKnownFeatureBits) != 0u) return false;
 
   // Servo map: ids unique + in 1..253, leg/joint in range, sign +/-1,
   // min < max, ticks within device range. Also require each (leg, joint) slot
@@ -278,6 +290,22 @@ bool validateRobotConfig(const RobotConfig& cfg) {
     for (uint8_t j = 0; j < kJointsPerLeg; ++j) {
       if (!joint_seen[leg][j]) return false;  // missing slot
     }
+  }
+
+  // Enabled foot sensors must carry a complete, ordered calibration: all three
+  // thresholds set and LOADED at or above TOUCH. The contact estimator escalates
+  // NEAR (proximity) -> TOUCH -> LOADED (both pressure-delta), so a zero or
+  // inverted pressure threshold would never fire or would misclassify load.
+  // near_thresh is a proximity reading (different sensor/units), so it is only
+  // required to be non-zero, not ordered against the pressure thresholds.
+  // Disabled feet carry no calibration and are not constrained.
+  for (uint8_t f = 0; f < kNumFootSensors; ++f) {
+    const FootSensorCal& c = cfg.feet[f];
+    if (!c.enabled) continue;
+    if (c.near_thresh == 0 || c.touch_thresh == 0 || c.load_thresh == 0) {
+      return false;
+    }
+    if (c.load_thresh < c.touch_thresh) return false;
   }
 
   return true;

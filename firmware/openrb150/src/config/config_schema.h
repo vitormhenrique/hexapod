@@ -79,6 +79,23 @@ enum FeatureBit : uint32_t {
   kFeatJetsonControl = 1u << 4,
 };
 
+// Mask of every defined feature_defaults bit. validateRobotConfig rejects any
+// config that sets a bit outside this mask, so a forward/garbage payload cannot
+// silently request an undefined feature.
+constexpr uint32_t kKnownFeatureBits = kFeatFootContact | kFeatTerrainLeveling |
+                                       kFeatSensorPolling |
+                                       kFeatPassivePoseStream | kFeatJetsonControl;
+
+// Safe envelope for persisted gait defaults (validateRobotConfig). Mirrors the
+// gait engine's runtime clamps (gait/gait_engine.h: kMaxStrideMm 80, kMaxStepMm
+// 50, foot-Z floor -120 mm) without a layering dependency. A persisted default
+// outside this envelope is a configuration error -- the engine would otherwise
+// silently clamp it -- so it is rejected rather than stored as a "safe" default.
+constexpr uint16_t kMaxGaitStrideMm = 80;
+constexpr uint16_t kMaxGaitStepMm = 50;
+constexpr uint16_t kMinGaitBodyHeightMm = 5;
+constexpr uint16_t kMaxGaitBodyHeightMm = 120;
+
 // ---------------------------------------------------------------------------
 // Sub-structures.
 // ---------------------------------------------------------------------------
