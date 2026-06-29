@@ -1,0 +1,73 @@
+// Gait -> servo goal pipeline (portable, host-tested). See gait_pipeline.h.
+
+#include "gait_pipeline.h"
+
+namespace gait {
+
+GaitPipeline::GaitPipeline(const config::RobotConfig& cfg)
+    : cfg_(cfg), body_(cfg), map_(cfg) {
+  configureFromConfig();
+}
+
+void GaitPipeline::configureFromConfig() { engine_.configure(cfg_.gait); }
+
+void GaitPipeline::setGait(config::GaitId g) { engine_.setGait(g); }
+
+void GaitPipeline::setParams(uint16_t body_height_mm, uint16_t stride_len_mm,
+                             uint16_t step_height_mm, uint8_t duty_x255,
+                             uint8_t speed_x255) {
+  config::GaitDefaults d = cfg_.gait;
+  d.body_height_mm = body_height_mm;
+  d.stride_len_mm = stride_len_mm;
+  d.step_height_mm = step_height_mm;
+  d.duty_x255 = duty_x255;
+  d.speed_x255 = speed_x255;
+  // Preserve the currently selected gait; configure() would otherwise reset it
+  // to the config default.
+  const config::GaitId g = engine_.gait();
+  engine_.configure(d);
+  engine_.setGait(g);
+}
+
+void GaitPipeline::setTwist(float vx, float vy, float wz) {
+  BodyTwist t;
+  t.vx = vx;
+  t.vy = vy;
+  t.wz = wz;
+  engine_.setTwist(t);
+}
+
+void GaitPipeline::resetPhase() { engine_.reset(); }
+
+void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
+  GaitOutput feet;
+  engine_.update(dt_ms, feet);
+
+  out.count = 0;
+  out.any_unreachable = false;
+  for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+    const FootTarget& f = feet.feet[leg];
+    const IkResult ik = body_.solveBody(leg, f.x_mm, f.y_mm, f.z_mm);
+    if (!ik.reachable) {
+      out.any_unreachable = true;
+    }
+    // JointRole order: Coxa=0, Femur=1, Tibia=2 (config_schema.h), matching the
+    // IkResult fields so the angle index lines up with the joint index.
+    const float angles[config::kJointsPerLeg] = {ik.coxa, ik.femur, ik.tibia};
+    for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
+      const config::ServoConfig* sc = map_.servoFor(leg, j);
+      if (sc == nullptr) {
+        continue;  // no servo mapped for this slot; emit nothing
+      }
+      const dxl::JointCommand jc = map_.angleToTick(leg, j, angles[j]);
+      PipelineJoint& pj = out.joints[out.count++];
+      pj.id = sc->id;
+      pj.tick = jc.tick;
+      pj.leg = leg;
+      pj.joint = j;
+      pj.clamped = jc.clamped_low || jc.clamped_high;
+    }
+  }
+}
+
+}  // namespace gait

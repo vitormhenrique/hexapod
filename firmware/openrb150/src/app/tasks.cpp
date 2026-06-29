@@ -10,6 +10,7 @@
 #include "../dxl/dxl_bus.h"
 #include "../dxl/dxl_params.h"
 #include "../dxl/servo_map.h"
+#include "../gait/gait_pipeline.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
@@ -96,6 +97,25 @@ protocol::ControlApi g_controlApi;
 // knows whether the intent is being honored. The goal-generation (gait/IK)
 // path consumes g_motionApi.intent() and is gated by g_motionGate.
 protocol::MotionApi g_motionApi;
+
+// Servo goal frame published by controlTask's gait/IK pipeline (lmt.1) and
+// consumed by dxlTask's Sync Write (lmt.2). Single writer (controlTask) /
+// single reader (dxlTask), guarded by a briefly-held mutex (the critical
+// section is just a ~37-byte copy, so neither task blocks meaningfully).
+// g_goalValid is cleared whenever motion is not gated open, so dxlTask never
+// drives the servos from a stale frame once authority is lost.
+struct GoalFrame {
+  uint8_t count = 0;
+  dxl::GoalTarget targets[config::kNumServos];
+};
+GoalFrame g_goalFrame;
+SemaphoreHandle_t g_goalMutex = nullptr;  // guards g_goalFrame
+volatile bool g_goalValid = false;        // a fresh, gated goal frame is ready
+volatile uint32_t g_goalSeq = 0;          // bumped on each published frame
+// True when the last published frame saturated any joint against the configured
+// servo travel; surfaced for clamp diagnostics (lmt.2 / audit 22l.3).
+volatile bool g_goalClamped = false;
+
 
 // Host maintenance lock (ENTER/EXIT/HEARTBEAT). apiTask drives the lock token +
 // TTL here; controlTask reads lockHeld() to feed the safety FSM's maintenance
@@ -230,6 +250,13 @@ class TaskConfigPersistence : public config::ConfigPersistence {
 
 TaskConfigPersistence g_configPersist;
 config::ConfigApi g_configApi(g_configPersist);
+
+// Gait -> servo goal pipeline (gait engine -> body IK -> servo map), owned by
+// controlTask (lmt.1). Declared after g_configApi so its captured config
+// reference is the live RAM shadow; the ServoMap stage reads the shadow by
+// reference, while the gait engine + body transform are re-seeded from config
+// on adopt/commit (lmt.7).
+gait::GaitPipeline g_pipeline(g_configApi.config());
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -599,6 +626,53 @@ void controlTask(void*) {
     // responses tell the host whether the stored intent is being honored now or
     // parked until the robot is armed/authorised.
     g_motionApi.setLiveState(g_safetyState, g_motionGate);
+
+    // --- Gait -> servo goal generation (lmt.1) ------------------------------
+    // Translate the latest high-level motion intent into concrete goal ticks and
+    // publish a frame for dxlTask (gait engine -> body IK -> servo map). The
+    // pipeline is built once from the active config (rebuilt on config adopt/
+    // commit by lmt.7). It is only advanced and published while motion is gated
+    // open; the phase is reset on the rising edge of the gate so each
+    // (re)authorisation starts from a clean cycle, and the frame is invalidated
+    // when the gate closes so the bus-write path (lmt.2) holds position instead
+    // of replaying a stale goal.
+    static uint32_t applied_intent_seq = 0xFFFFFFFFu;
+    static bool prev_motion_gate = false;
+    if (g_motionGate) {
+      const protocol::MotionIntent& intent = g_motionApi.intent();
+      if (intent.seq != applied_intent_seq) {
+        g_pipeline.setGait(static_cast<config::GaitId>(intent.gait));
+        g_pipeline.setParams(intent.body_height_mm, intent.stride_len_mm,
+                             intent.step_height_mm, intent.duty_x255,
+                             intent.speed_x255);
+        g_pipeline.setTwist(intent.twist_vx, intent.twist_vy, intent.twist_wz);
+        applied_intent_seq = intent.seq;
+      }
+      if (!prev_motion_gate) {
+        g_pipeline.resetPhase();
+      }
+      gait::PipelineOutput goals;
+      g_pipeline.update(period_ms::kControl, goals);
+      // Publish for dxlTask under a zero-wait lock: if dxlTask momentarily holds
+      // it, skip this frame (keep the previous) rather than block controlTask.
+      if (g_goalMutex != nullptr && xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
+        g_goalFrame.count = goals.count;
+        bool any_clamped = false;
+        for (uint8_t i = 0; i < goals.count; ++i) {
+          g_goalFrame.targets[i].id = goals.joints[i].id;
+          g_goalFrame.targets[i].tick = goals.joints[i].tick;
+          if (goals.joints[i].clamped) any_clamped = true;
+        }
+        g_goalClamped = any_clamped;
+        ++g_goalSeq;
+        g_goalValid = true;
+        xSemaphoreGive(g_goalMutex);
+      }
+    } else {
+      g_goalValid = false;
+      applied_intent_seq = 0xFFFFFFFFu;  // force re-apply on next authorisation
+    }
+    prev_motion_gate = g_motionGate;
 
     // Gate maintenance leg/joint targets on the live MacMaintenance state +
     // held lock so a foot/joint nudge is only accepted on the bench.
@@ -1349,6 +1423,9 @@ void start() {
   // here at boot (before the scheduler), not at runtime.
   g_commitMutex = xSemaphoreCreateMutex();
   g_commitDone = xSemaphoreCreateBinary();
+
+  // Guards the controlTask -> dxlTask servo goal frame (lmt.1).
+  g_goalMutex = xSemaphoreCreateMutex();
 
   // Route FreeRTOS fault reporting to the USER LED and USB CDC.
   vSetErrorLed(board::pinUserLed(), HIGH);
