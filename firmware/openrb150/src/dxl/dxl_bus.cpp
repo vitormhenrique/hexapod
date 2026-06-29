@@ -154,11 +154,12 @@ uint8_t DxlBus::setTorqueAll(bool on) {
   }
   uint8_t acked = 0;
   for (uint8_t i = 0; i < count_; ++i) {
-    const ServoProfile& p = servos_[i];
+    ServoProfile& p = servos_[i];
     selectProtocol(p.table_kind);
     const bool ok = on ? dxl_.torqueOn(p.id) : dxl_.torqueOff(p.id);
     if (ok) {
       ++acked;
+      p.torque_enabled = on;  // track commanded torque for allTorqueOff (lmt.6)
     } else {
       stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
     }
@@ -320,8 +321,24 @@ bool DxlBus::setTorqueOne(uint8_t id, TableKind table, bool on) {
   const bool ok = on ? dxl_.torqueOn(id) : dxl_.torqueOff(id);
   if (!ok) {
     stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+    return false;
   }
-  return ok;
+  for (uint8_t i = 0; i < count_; ++i) {  // track commanded torque (lmt.6)
+    if (servos_[i].id == id) {
+      servos_[i].torque_enabled = on;
+      break;
+    }
+  }
+  return true;
+}
+
+bool DxlBus::allTorqueOff() const {
+  for (uint8_t i = 0; i < count_; ++i) {
+    if (servos_[i].torque_enabled) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool DxlBus::torqueState(uint8_t id, TableKind table, bool& on) {

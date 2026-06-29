@@ -1167,11 +1167,13 @@ void dxlTask(void*) {
     }
     prev_authorized = authorized;
     // Publish torque-off confirmation for the safety FSM (passive pose gating).
-    // Torque is off whenever no servo is driven: nothing discovered yet, motion
-    // is not authorised this cycle, or the seed-then-enable sequence has not yet
-    // turned torque on (the goal-write/torque-enable path is gated by
-    // g_motionGate, so authorized==false => torque stays off).
-    g_dxlTorqueOff = !have_servos || !authorized || torque_seed_pending;
+    // Derive it from the real per-servo torque cache (lmt.6) rather than motion
+    // authorisation: a maintenance DXL_TORQUE-on while motion is unauthorised
+    // must NOT report torque off. allTorqueOff() reflects every torque write
+    // this task issued (arming seed-enable, falling-edge disable, maintenance
+    // torque jobs, EEPROM-write torque-off), so passive entry sees the truth.
+    // !have_servos keeps it true before any scan (nothing is driven).
+    g_dxlTorqueOff = !have_servos || g_dxlBus.allTorqueOff();
 
     // Goal Sync-Write path (lmt.2): while motion is authorised and torque is on,
     // push the latest goal frame published by controlTask (gait -> body IK ->

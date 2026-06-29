@@ -128,6 +128,14 @@ class DxlBus {
   // Read a single servo's torque-enable state. Returns false on a failed read.
   bool torqueState(uint8_t id, TableKind table, bool& on);
 
+  // Firmware-authoritative torque view (lmt.6): true only when every discovered
+  // servo's last commanded torque state is OFF. dxlTask is the sole bus owner,
+  // so the per-servo torque flag cached by setTorqueAll/setTorqueOne is the
+  // source of truth for passive-pose gating without extra bus reads. A servo
+  // that self-shuts-down on a hardware fault is only ever reported torque ON
+  // here, so this never falsely reports torque off (the safe direction).
+  bool allTorqueOff() const;
+
   // Discovered-servo accessors.
   uint8_t servoCount() const { return count_; }
   const ServoProfile& profile(uint8_t index) const { return servos_[index]; }
