@@ -99,6 +99,15 @@ class FeatureApi {
   // Restore the compiled default enable set and clear reflected availability.
   void reset();
 
+  // Seed the desired-enable set from a persisted RobotConfig.feature_defaults
+  // bitmask (bit index == Feature enum order). Applied after boot config
+  // adoption and after a successful CFG_COMMIT so the operator's persisted
+  // default features take effect (lmt.7). Bumps seq() if anything changed.
+  // Availability still gates the real effect, so enabling an unavailable
+  // feature here only records intent (effectiveEnabled stays false until the
+  // hardware/state allows it).
+  void applyDefaults(uint32_t mask);
+
   // --- Reflected state, published by the control task each cycle ------------
   // Mark whether a feature is currently available and why (when not). Effective
   // enabled = desired && available, so flipping availability off auto-disables

@@ -31,6 +31,7 @@ constexpr uint8_t kErrorFlag = 0x02;
 void ConfigApi::resetToDefaults() {
   defaultRobotConfig(shadow_);
   staging_len_ = serializeRobotConfig(shadow_, staging_, sizeof(staging_));
+  ++shadow_rev_;  // known-good config changed (lmt.7)
 }
 
 bool ConfigApi::adoptPayload(const uint8_t* payload, uint16_t len) {
@@ -40,6 +41,7 @@ bool ConfigApi::adoptPayload(const uint8_t* payload, uint16_t len) {
   shadow_ = tmp;
   memcpy(staging_, payload, len);
   staging_len_ = len;
+  ++shadow_rev_;  // known-good config changed (lmt.7)
   return true;
 }
 
@@ -153,6 +155,7 @@ bool ConfigApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
         result = CfgResult::CommitFailed;
       } else {
         shadow_ = tmp;  // staged config is now the known-good baseline
+        ++shadow_rev_;  // known-good config changed (lmt.7)
         result = CfgResult::Ok;
       }
       out[0] = static_cast<uint8_t>(result);

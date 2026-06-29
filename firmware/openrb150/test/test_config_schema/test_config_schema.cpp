@@ -72,8 +72,9 @@ void test_default_gait_and_features() {
   defaultRobotConfig(cfg);
   TEST_ASSERT_EQUAL_UINT16(40, cfg.gait.body_height_mm);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(GaitId::Stand), cfg.gait.gait);
-  // Conservative defaults: no optional features on, no foot sensor enabled.
-  TEST_ASSERT_EQUAL_UINT32(0u, cfg.feature_defaults);
+  // Conservative defaults: only sensor polling on (so present boards stream raw
+  // data); no other optional feature and no foot sensor enabled (lmt.7).
+  TEST_ASSERT_EQUAL_UINT32(kFeatureDefaultMask, cfg.feature_defaults);
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     TEST_ASSERT_EQUAL_UINT8(0, cfg.feet[f].enabled);
   }
@@ -201,7 +202,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(23403, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(37274, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {

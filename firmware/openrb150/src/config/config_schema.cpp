@@ -128,8 +128,11 @@ void defaultRobotConfig(RobotConfig& cfg) {
     cfg.feet[f] = FootSensorCal{};
   }
 
-  // Conservative: all optional features off until hardware/calibration enables.
-  cfg.feature_defaults = 0;
+  // Conservative baseline: only sensor polling defaults on (so present boards
+  // stream raw data); all richer/safety features stay off until hardware,
+  // calibration, and an explicit request enable them (mirrors the protocol
+  // kFeatureDefaultEnabled set so adopting this config preserves polling).
+  cfg.feature_defaults = kFeatureDefaultMask;
 }
 
 uint16_t serializeRobotConfig(const RobotConfig& cfg, uint8_t* out,

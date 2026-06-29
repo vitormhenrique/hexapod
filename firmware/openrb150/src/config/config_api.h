@@ -108,6 +108,14 @@ class ConfigApi {
   // consume the active servo map / geometry / gait defaults.
   const RobotConfig& config() const { return shadow_; }
 
+  // Monotonic revision of the known-good config(). Bumped on every shadow
+  // change: reset-to-defaults, boot adopt, and a successful CFG_COMMIT (NOT on
+  // CFG_SET_BLOCK, which only edits the staged bytes). Runtime consumers that
+  // cache config-derived state (gait pipeline body IK, contact calibration,
+  // motion + feature defaults) watch this to re-apply after boot adoption /
+  // commit instead of polling each field (lmt.7).
+  uint32_t revision() const { return shadow_rev_; }
+
  private:
   // Best-effort decode of the staged bytes; returns true if they validate.
   bool stagedValid(RobotConfig& out) const;
@@ -116,6 +124,7 @@ class ConfigApi {
   RobotConfig shadow_;                    // last known-good config
   uint8_t staging_[kConfigPayloadSize];   // editable serialized RAM shadow
   uint16_t staging_len_ = kConfigPayloadSize;
+  uint32_t shadow_rev_ = 0;               // bumped whenever shadow_ changes
 };
 
 }  // namespace config

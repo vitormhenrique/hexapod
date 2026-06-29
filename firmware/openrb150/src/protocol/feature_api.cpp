@@ -17,6 +17,18 @@ void FeatureApi::reset() {
   seq_ = 0;
 }
 
+void FeatureApi::applyDefaults(uint32_t mask) {
+  bool changed = false;
+  for (uint8_t i = 0; i < kFeatureCount; ++i) {
+    const bool want = ((mask >> i) & 1u) != 0u;
+    if (state_[i].desired != want) {
+      state_[i].desired = want;
+      changed = true;
+    }
+  }
+  if (changed) ++seq_;
+}
+
 void FeatureApi::setAvailability(Feature f, bool available,
                                  FeatureReason reason) {
   const uint8_t i = static_cast<uint8_t>(f);

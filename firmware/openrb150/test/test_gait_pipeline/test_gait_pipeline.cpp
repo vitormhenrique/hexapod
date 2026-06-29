@@ -148,6 +148,48 @@ void test_set_params_preserves_selected_gait() {
                           static_cast<uint8_t>(pipe.engine().gait()));
 }
 
+// lmt.7: the pipeline caches body-IK leg geometry by value, so a mutation to the
+// referenced config must NOT take effect until reconfigure() is called -- and
+// then it must. Shifting each leg's mount Z moves the foot in the coxa frame
+// (not absorbed by the IK home offset), so the solved ticks change.
+void test_reconfigure_rebuilds_cached_body_ik() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+
+  PipelineOutput before;
+  pipe.update(20, before);
+
+  // Mutate the referenced geometry WITHOUT reconfiguring: the cached body IK
+  // must still produce the original solution.
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    cfg.legs[leg].mount_z_dmm =
+        static_cast<int16_t>(cfg.legs[leg].mount_z_dmm + 300);  // +30 mm
+  }
+  PipelineOutput stale;
+  pipe.update(20, stale);
+  bool changed_without_reconfig = false;
+  for (uint8_t i = 0; i < before.count; ++i) {
+    if (before.joints[i].tick != stale.joints[i].tick) {
+      changed_without_reconfig = true;
+    }
+  }
+  TEST_ASSERT_FALSE(changed_without_reconfig);
+
+  // After reconfigure the new geometry must change at least one solved tick.
+  pipe.reconfigure();
+  pipe.setGait(GaitId::Stand);
+  PipelineOutput after;
+  pipe.update(20, after);
+  bool changed_after_reconfig = false;
+  for (uint8_t i = 0; i < before.count; ++i) {
+    if (before.joints[i].tick != after.joints[i].tick) {
+      changed_after_reconfig = true;
+    }
+  }
+  TEST_ASSERT_TRUE(changed_after_reconfig);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
@@ -156,5 +198,6 @@ int main(int, char**) {
   RUN_TEST(test_forward_twist_changes_goals_vs_neutral);
   RUN_TEST(test_narrow_travel_sets_clamp_flag);
   RUN_TEST(test_set_params_preserves_selected_gait);
+  RUN_TEST(test_reconfigure_rebuilds_cached_body_ik);
   return UNITY_END();
 }

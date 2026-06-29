@@ -723,6 +723,22 @@ void controlTask(void*) {
     static uint32_t applied_intent_seq = 0xFFFFFFFFu;
     static uint8_t applied_gait = 0xFF;
     static bool prev_motion_gate = false;
+
+    // Re-apply the active config to the pipeline when it changes (boot adopt /
+    // CFG_COMMIT, lmt.7). The pipeline caches link lengths + leg geometry by
+    // value, so rebuild its body IK from the new known-good config and force the
+    // gait intent (gait id + shape params) to be re-seeded on the next motion
+    // cycle. controlTask is the sole owner of g_pipeline, so this stays a
+    // single-task operation.
+    static uint32_t applied_cfg_rev = 0xFFFFFFFFu;
+    const uint32_t cfg_rev = g_configApi.revision();
+    if (cfg_rev != applied_cfg_rev) {
+      g_pipeline.reconfigure();
+      applied_intent_seq = 0xFFFFFFFFu;
+      applied_gait = 0xFF;
+      applied_cfg_rev = cfg_rev;
+    }
+
     if (g_motionGate && arb.source == safety::CommandSource::MacMaintenance) {
       // --- Maintenance actuation (lmt.4) ----------------------------------
       // Bench control: actuate the stored per-joint maintenance target ticks
@@ -1529,6 +1545,26 @@ void i2cTask(void*) {
       xSemaphoreGive(g_commitMutex);
       if (ok) g_configVolatile = false;  // a valid slot now exists
       xSemaphoreGive(g_commitDone);
+    }
+
+    // Re-apply the active config to i2c-owned consumers when it changes (boot
+    // adopt / CFG_COMMIT, lmt.7). apiTask updates the config shadow; we re-seed
+    // the contact estimator foot calibration and the motion-intent gait
+    // defaults from the new known-good config, and push the persisted feature
+    // default set into the feature api. i2cTask owns these consumers' boot
+    // seeding, so it owns the refresh too (the gait pipeline + body IK are
+    // refreshed in controlTask). Watched by revision so it runs once per change.
+    static uint32_t applied_cfg_rev = 0xFFFFFFFFu;
+    const uint32_t cfg_rev = g_configApi.revision();
+    if (cfg_rev != applied_cfg_rev) {
+      const config::RobotConfig& cfg = g_configApi.config();
+      sensors::ContactParams params;  // conservative defaults
+      g_contact.configure(cfg.feet, params);
+      g_motionApi.setDefaults(cfg.gait.gait, cfg.gait.body_height_mm,
+                              cfg.gait.stride_len_mm, cfg.gait.step_height_mm,
+                              cfg.gait.duty_x255, cfg.gait.speed_x255);
+      g_featureApi.applyDefaults(cfg.feature_defaults);
+      applied_cfg_rev = cfg_rev;
     }
 
     // Apply host-staged per-foot contact thresholds (CONTACT_SET_THRESHOLDS).

@@ -149,6 +149,15 @@ struct RobotConfig {
   uint32_t feature_defaults = 0;
 };
 
+// Default feature-enable bitmask stored in RobotConfig.feature_defaults. Bit
+// index == protocol Feature enum order (FootContact=0, TerrainLeveling=1,
+// SensorPolling=2, JetsonControl=3, PassivePose=4). Only SensorPolling defaults
+// on so present sensor boards stream raw data on boot; richer/safety features
+// stay off until armed and explicitly requested. Mirrors the protocol layer's
+// kFeatureDefaultEnabled baseline (feature_api.h) without a layering dependency,
+// so adopting a freshly-defaulted config does not silently disable polling.
+constexpr uint32_t kFeatureDefaultMask = (1u << 2);  // SensorPolling
+
 // Serialized payload size (bytes) for the current schema. Static so callers can
 // size buffers and so a compile-time check guards against payload overflow.
 constexpr uint16_t kConfigPayloadSize =

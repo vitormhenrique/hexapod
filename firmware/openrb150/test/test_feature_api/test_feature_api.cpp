@@ -239,6 +239,31 @@ void test_seq_changes() {
   TEST_ASSERT_EQUAL_UINT(s1, feat.seq());
 }
 
+// lmt.7: applyDefaults seeds the desired-enable set from a persisted config
+// feature_defaults bitmask (bit index == Feature enum order). It overrides the
+// compiled defaults and bumps seq only when something actually changes.
+void test_apply_defaults_seeds_from_mask() {
+  FeatureApi feat;
+  // Compiled default: SensorPolling on, the rest off.
+  TEST_ASSERT_TRUE(feat.desiredEnabled(Feature::SensorPolling));
+  TEST_ASSERT_FALSE(feat.desiredEnabled(Feature::FootContact));
+
+  // Mask enabling FootContact (bit0) + PassivePose (bit4), clearing the rest.
+  const uint32_t mask = (1u << 0) | (1u << 4);
+  const uint32_t s0 = feat.seq();
+  feat.applyDefaults(mask);
+  TEST_ASSERT_TRUE(feat.seq() > s0);
+  TEST_ASSERT_TRUE(feat.desiredEnabled(Feature::FootContact));
+  TEST_ASSERT_TRUE(feat.desiredEnabled(Feature::PassivePose));
+  TEST_ASSERT_FALSE(feat.desiredEnabled(Feature::SensorPolling));  // cleared
+  TEST_ASSERT_FALSE(feat.desiredEnabled(Feature::TerrainLeveling));
+
+  // Re-applying the same mask is a no-op (seq unchanged).
+  const uint32_t s1 = feat.seq();
+  feat.applyDefaults(mask);
+  TEST_ASSERT_EQUAL_UINT(s1, feat.seq());
+}
+
 // Without a FeatureApi the dispatcher rejects the feature range as unknown.
 void test_unknown_without_feature_api() {
   uint8_t req[kMaxWireFrame];
@@ -273,6 +298,7 @@ int main(int, char**) {
   RUN_TEST(test_get_reasons);
   RUN_TEST(test_reset_defaults);
   RUN_TEST(test_seq_changes);
+  RUN_TEST(test_apply_defaults_seeds_from_mask);
   RUN_TEST(test_unknown_without_feature_api);
   return UNITY_END();
 }

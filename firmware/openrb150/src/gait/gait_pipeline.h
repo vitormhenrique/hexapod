@@ -65,6 +65,14 @@ class GaitPipeline {
   // body height, stride, step height, speed). Does not bump the phase.
   void configureFromConfig();
 
+  // Re-apply the active RobotConfig after it changed (boot adopt / CFG_COMMIT,
+  // lmt.7). Rebuilds the cached body transform + leg IK from the new link
+  // lengths / leg geometry and re-seeds the gait defaults. The servo map reads
+  // the config reference live, so it needs no rebuild. The cfg reference itself
+  // is stable (ConfigApi::config() returns a fixed member); only its contents
+  // change, so callers re-run this whenever ConfigApi::revision() advances.
+  void reconfigure();
+
   // Select the active gait (stand/sit/tripod/ripple/wave/crawl).
   void setGait(config::GaitId g);
 

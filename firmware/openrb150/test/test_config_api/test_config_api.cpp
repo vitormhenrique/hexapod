@@ -381,6 +381,70 @@ void test_non_config_msg_not_handled() {
   TEST_ASSERT_FALSE(api.handle(0x03, nullptr, 0, buf, sizeof(buf), &len, &flags));
 }
 
+// lmt.7: the revision counter must advance on every change to the known-good
+// shadow (adopt, commit, reset) so runtime consumers can re-apply, but NOT on
+// staging-only edits (set_block) or reads (get_summary), which leave the shadow
+// untouched.
+void test_revision_bumps_only_on_shadow_change() {
+  FakeEeprom mem;
+  ConfigStore store(mem);
+  StorePersistence persist(store, true);
+  ConfigApi api(persist);
+
+  // Ctor seeds defaults -> revision already advanced past 0.
+  const uint32_t r0 = api.revision();
+  TEST_ASSERT_NOT_EQUAL(0u, r0);
+
+  // A read does not change the shadow.
+  call(api, cfgmsg::kGetSummary, nullptr, 0);
+  TEST_ASSERT_EQUAL_UINT32(r0, api.revision());
+
+  // Staging an edit does not change the shadow either.
+  uint8_t req[4 + 16];
+  req[0] = 2;
+  req[1] = 0;
+  req[2] = 16;
+  req[3] = 0;
+  memset(&req[4], 0, 16);
+  memcpy(&req[4], "Staged", 6);
+  call(api, cfgmsg::kSetBlock, req, sizeof(req));
+  TEST_ASSERT_EQUAL_UINT32(r0, api.revision());
+
+  // Committing the staged config promotes it to the shadow -> bump.
+  Resp c = call(api, cfgmsg::kCommit, nullptr, 0);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CfgResult::Ok), c.buf[0]);
+  const uint32_t r1 = api.revision();
+  TEST_ASSERT_NOT_EQUAL(r0, r1);
+
+  // Adopting a payload replaces the shadow -> bump.
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  strncpy(cfg.robot_name, "Adopted", sizeof(cfg.robot_name) - 1);
+  uint8_t payload[kConfigPayloadSize];
+  uint16_t n = serializeRobotConfig(cfg, payload, sizeof(payload));
+  TEST_ASSERT_TRUE(api.adoptPayload(payload, n));
+  const uint32_t r2 = api.revision();
+  TEST_ASSERT_NOT_EQUAL(r1, r2);
+
+  // A rejected adopt (bad payload) leaves the shadow + revision untouched.
+  TEST_ASSERT_FALSE(api.adoptPayload(payload, n - 1));
+  TEST_ASSERT_EQUAL_UINT32(r2, api.revision());
+
+  // Reset-to-defaults rewrites the shadow -> bump.
+  call(api, cfgmsg::kResetDefaults, nullptr, 0);
+  TEST_ASSERT_NOT_EQUAL(r2, api.revision());
+}
+
+// lmt.7: the compiled default config must mark SensorPolling on (bit 2) so a
+// freshly-defaulted or freshly-adopted config does not silently stop sensor
+// polling when its feature defaults are applied.
+void test_default_config_enables_sensor_polling_bit() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  TEST_ASSERT_EQUAL_UINT32(kFeatureDefaultMask, cfg.feature_defaults);
+  TEST_ASSERT_TRUE((cfg.feature_defaults & (1u << 2)) != 0u);  // SensorPolling
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_get_summary_reports_schema_and_persistent);
@@ -398,5 +462,7 @@ int main(int, char**) {
   RUN_TEST(test_reset_defaults_restores_staging);
   RUN_TEST(test_adopt_payload_seeds_shadow);
   RUN_TEST(test_non_config_msg_not_handled);
+  RUN_TEST(test_revision_bumps_only_on_shadow_change);
+  RUN_TEST(test_default_config_enables_sensor_polling_bit);
   return UNITY_END();
 }

@@ -11,6 +11,14 @@ GaitPipeline::GaitPipeline(const config::RobotConfig& cfg)
 
 void GaitPipeline::configureFromConfig() { engine_.configure(cfg_.gait); }
 
+void GaitPipeline::reconfigure() {
+  // Body IK caches link lengths + per-leg geometry by value, so rebuild it from
+  // the (updated) config. The servo map holds a live reference and needs no
+  // action. Re-seed the gait engine defaults last.
+  body_ = BodyKinematics(cfg_);
+  configureFromConfig();
+}
+
 void GaitPipeline::setGait(config::GaitId g) { engine_.setGait(g); }
 
 void GaitPipeline::setParams(uint16_t body_height_mm, uint16_t stride_len_mm,

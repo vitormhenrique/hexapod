@@ -289,7 +289,10 @@ def default_robot_config() -> RobotConfig:
         body_height_mm=40, stride_len_mm=60, step_height_mm=30, duty_x255=128, speed_x255=128, gait=0
     )
     cfg.feet = [FootSensorCal() for _ in range(NUM_FOOT_SENSORS)]
-    cfg.feature_defaults = 0
+    # Only sensor polling defaults on so present boards stream raw data; all
+    # richer/safety features stay off until requested (mirrors the firmware
+    # kFeatureDefaultMask / protocol kFeatureDefaultEnabled baseline).
+    cfg.feature_defaults = FEAT_SENSOR_POLLING
     return cfg
 
 
