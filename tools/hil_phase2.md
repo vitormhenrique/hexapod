@@ -19,7 +19,7 @@ RC kill switch and the DYNAMIXEL power cutoff at all times.
 - [ ] Firmware built and flashed: `cd firmware/openrb150 && ~/.platformio/penv/bin/pio run -e openrb150 -t upload`.
 - [ ] Native test suite green: `~/.platformio/penv/bin/pio test -e native` (expect all cases passing).
 - [ ] USB CDC enumerates; record the port (e.g. `/dev/tty.usbmodemXXXX`).
-- [ ] Phase 1 boot-safety smoke passes: `uv run python tools/hil_smoke.py --port <PORT>`
+- [ ] Phase 1 boot-safety smoke passes: `cd companion && uv run python ../tools/hil_smoke.py --port <PORT>`
       (HELLO ok, DXL power OFF, no watchdog misses, uptime advancing).
 - [ ] 12 V DXL bus on its own fused, switched, high-current feed with a common ground
       to the OpenRB-150 (AGENTS.md 1.1 — never power 18 servos through the controller).

@@ -15,8 +15,13 @@ Phase 2 API commands; those are covered by the companion checklist in
 ``docs/hil_smoke_phase1.md`` and printed as guided manual steps at the end.
 
 Usage:
-    uv run python tools/hil_smoke.py --port /dev/tty.usbmodemXXXX
-    # or, without uv:
+    # Run from the companion uv environment -- it is the only env that provides
+    # both pyserial and the hexapod_protocol package. Bare system Python fails
+    # because pyserial is not installed, and there is no root uv project.
+    cd companion && uv run python ../tools/hil_smoke.py --port /dev/tty.usbmodemXXXX
+
+    # Without uv: install pyserial into the active interpreter first
+    # (pip install pyserial), then put hexapod_protocol on the path:
     PYTHONPATH=protocol/python python tools/hil_smoke.py --port <PORT>
 
 Exit code 0 = all automated checks passed, 1 = a check failed, 2 = setup error.
@@ -33,7 +38,12 @@ try:
     import serial  # type: ignore
     from serial.tools import list_ports  # type: ignore
 except ImportError:  # pragma: no cover - environment guard
-    print("ERROR: pyserial is required (pip install pyserial).", file=sys.stderr)
+    print(
+        "ERROR: pyserial is required. Run from the companion uv env "
+        "(cd companion && uv run python ../tools/hil_smoke.py --port <PORT>), "
+        "or 'pip install pyserial' into the active interpreter.",
+        file=sys.stderr,
+    )
     sys.exit(2)
 
 from hexapod_protocol import api

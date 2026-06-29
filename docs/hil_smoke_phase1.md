@@ -38,8 +38,10 @@ everything that needs physical interaction or 12 V power is a manual step here.
 Run:
 
 ```bash
-uv run python tools/hil_smoke.py --port <PORT>
-# or: PYTHONPATH=protocol/python python tools/hil_smoke.py --port <PORT>
+# From the companion uv env (the only one with pyserial + hexapod_protocol):
+cd companion && uv run python ../tools/hil_smoke.py --port <PORT>
+# or, with deps on the active interpreter (pip install pyserial):
+PYTHONPATH=protocol/python python tools/hil_smoke.py --port <PORT>
 ```
 
 Expected automated checks (all PASS):
