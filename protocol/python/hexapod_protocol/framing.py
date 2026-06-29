@@ -130,3 +130,20 @@ def decode_frame_body(body_cobs: bytes) -> tuple[Header, bytes]:
 
     payload = body[HEADER_LEN:crc_offset]
     return header, payload
+
+
+def version_compatible(proto_major: int, proto_minor: int) -> bool:
+    """Whether firmware advertising protocol v``major``.``minor`` is wire-
+    compatible with this host build (``VERSION_MAJOR``.``VERSION_MINOR``).
+
+    The major version must match exactly: a different major means an
+    incompatible frame/message layout. A differing minor is additive-only and
+    tolerated (newer firmware may add messages the host ignores, and vice
+    versa). Note the frame decoder does NOT reject a version mismatch -- the
+    version rides in the header and is surfaced at the handshake (HELLO /
+    GET_CAPABILITIES), so callers use this to diagnose rather than to drop
+    frames (4sa.5).
+    """
+    del proto_minor  # reserved for future minor-based gating; major gates today
+    return proto_major == VERSION_MAJOR
+

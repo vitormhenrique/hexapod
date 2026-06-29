@@ -156,6 +156,39 @@ def test_connect_disconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None
     assert stream.closed
 
 
+def test_connect_version_mismatch_emits_event(qtbot, monkeypatch) -> None:
+    # 4sa.5: a handshake against firmware on an incompatible MAJOR protocol
+    # version must surface a diagnostic event rather than silently connecting.
+    from services import ConnectionService
+    import services as services_mod
+
+    handlers = _handshake_handlers()
+    name = b"HexNav".ljust(api.DEVICE_NAME_LEN, b"\x00")
+
+    def hello_mismatch(_p):
+        # proto_major=9 (host is 0) -> incompatible wire layout.
+        return bytes([9, 0, 0, 2, 0]) + name, False
+
+    handlers[api.MSG_HELLO] = hello_mismatch
+    stream = RespondingStream(handlers)
+    monkeypatch.setattr(services_mod, "open_serial", lambda port, baud=115200: stream)
+
+    service = ConnectionService()
+    events: list[tuple[str, str]] = []
+    service.event.connect(lambda kind, msg: events.append((kind, msg)))
+
+    # Wait for the handshake worker to finish (connected emitted last); its
+    # queued event emissions are delivered before it.
+    with qtbot.waitSignal(service.connected, timeout=2000):
+        service.connect_to("/dev/fake", baud=115200)
+    qtbot.waitUntil(lambda: any(k == "version" for k, _ in events), timeout=2000)
+
+    version_msgs = [m for k, m in events if k == "version"]
+    assert version_msgs
+    assert "mismatch" in version_msgs[0] and "v9.0" in version_msgs[0]
+    service.disconnect()
+
+
 def test_connect_open_failure_emits_error(qtbot, monkeypatch) -> None:
     from services import ConnectionService
     import services as services_mod

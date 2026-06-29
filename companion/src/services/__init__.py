@@ -14,6 +14,7 @@ from typing import Optional
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from hexapod_protocol import api, telemetry as tlm
+from hexapod_protocol.framing import VERSION_MAJOR, VERSION_MINOR, version_compatible
 
 from transport import list_serial_ports, open_serial
 from transport.protocol_client import ProtocolClient
@@ -78,6 +79,17 @@ class ConnectionService(QObject):
             hello = client.hello()
             if hello is not None:
                 self.hello_received.emit(hello)
+                # Surface a protocol version mismatch as a diagnostic rather
+                # than silently talking to incompatible firmware (4sa.5). The
+                # frame layer carries but does not reject the version; the
+                # handshake is where the host can compare and warn.
+                if not version_compatible(hello.proto_major, hello.proto_minor):
+                    self.event.emit(
+                        "version",
+                        f"protocol mismatch: firmware v{hello.proto_major}."
+                        f"{hello.proto_minor} vs host v{VERSION_MAJOR}."
+                        f"{VERSION_MINOR}",
+                    )
                 self.event.emit(
                     "connect",
                     f"{hello.device_name} fw "

@@ -11,11 +11,15 @@ import pytest
 from hexapod_protocol import (
     DecodeError,
     Header,
+    MsgType,
+    VERSION_MAJOR,
+    VERSION_MINOR,
     cobs_decode,
     cobs_encode,
     crc16,
     decode_frame_body,
     encode_frame,
+    version_compatible,
 )
 from hexapod_protocol import api
 
@@ -124,6 +128,53 @@ def test_decode_rejects_bad_magic():
     bad = cobs_encode(bytes(body))
     with pytest.raises(DecodeError):
         decode_frame_body(bad)
+
+
+# --------------------------------------------------------------------------- #
+# Protocol version mismatch (4sa.5)
+#
+# The frame layer is version-CARRYING, not version-GATING: a frame with the
+# right magic + CRC but a different protocol version decodes fine (the version
+# rides in the header), so the API/handshake layer can diagnose a mismatch
+# instead of the decoder silently dropping the frame. These lock that contract
+# on the host side; test_version_mismatch.cpp mirrors it on the firmware side.
+# --------------------------------------------------------------------------- #
+def test_decode_preserves_mismatched_major_version():
+    # A frame from a hypothetical future major version still decodes (magic and
+    # CRC are valid); the mismatched version is preserved in the header.
+    h = Header(msg_type=0, msg_id=api.MSG_HELLO, seq=3, timestamp_ms=0)
+    h.version_major = VERSION_MAJOR + 7
+    h.version_minor = VERSION_MINOR + 2
+    wire = encode_frame(h, b"")
+    header, payload = decode_frame_body(wire[1:-1])
+    assert header.version_major == VERSION_MAJOR + 7
+    assert header.version_minor == VERSION_MINOR + 2
+    assert header.msg_id == api.MSG_HELLO
+    assert payload == b""
+
+
+def test_version_compatible_major_gates():
+    # Exact major match (any minor) is compatible; a different major is not.
+    assert version_compatible(VERSION_MAJOR, VERSION_MINOR) is True
+    assert version_compatible(VERSION_MAJOR, VERSION_MINOR + 5) is True
+    assert version_compatible(VERSION_MAJOR + 1, VERSION_MINOR) is False
+    assert version_compatible(VERSION_MAJOR + 1, 0) is False
+
+
+def test_hello_response_surfaces_firmware_version():
+    # The diagnostic surface: a HELLO reply carries the firmware's protocol
+    # version in both the frame header and the payload, so a host on a different
+    # version can detect the mismatch from the handshake.
+    fw_major, fw_minor = VERSION_MAJOR + 3, VERSION_MINOR + 1
+    payload = bytes([fw_major, fw_minor, 0, 1, 0]) + b"HexNav\x00"
+    resp = Header(
+        msg_type=int(MsgType.RESPONSE), msg_id=api.MSG_HELLO, seq=1
+    )
+    wire = encode_frame(resp, payload)
+    header, body = decode_frame_body(wire[1:-1])
+    info = api.parse_hello(body)
+    assert (info.proto_major, info.proto_minor) == (fw_major, fw_minor)
+    assert not version_compatible(info.proto_major, info.proto_minor)
 
 
 def test_decode_rejects_truncation():
