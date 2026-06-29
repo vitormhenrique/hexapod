@@ -225,41 +225,51 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
   uint8_t fresh = 0;
   const TableKind kinds[] = {TableKind::Mx28Legacy, TableKind::Mx28V2};
   for (TableKind kind : kinds) {
-    // Collect this kind's servos (Present Position only; fits the recv buffer).
+    // Collect this kind's servos (Present Position only; fits the recv buffer)
+    // in chunks of DXL_MAX_NODE. A single Sync Read carries at most
+    // DXL_MAX_NODE nodes, so a bus with more than DXL_MAX_NODE same-table
+    // servos (e.g. an all-legacy 18-servo hexapod) needs multiple reads to
+    // refresh every present position each cycle (lmt.10 / audit 22l.6).
     sr_param_.addr = posAddr(kind);
     sr_param_.length = posLen(kind);
-    sr_param_.id_count = 0;
-    for (uint8_t i = 0; i < count_ && sr_param_.id_count < DXL_MAX_NODE; ++i) {
-      if (servos_[i].table_kind != kind) {
+    uint8_t scan = 0;
+    while (scan < count_) {
+      // Fill one chunk with the next run of this-kind servos. `scan` advances
+      // over every entry (matching or not); the chunk closes at DXL_MAX_NODE or
+      // when the table is exhausted, and the outer loop resumes from `scan`.
+      sr_param_.id_count = 0;
+      while (scan < count_ && sr_param_.id_count < DXL_MAX_NODE) {
+        if (servos_[scan].table_kind == kind) {
+          sr_param_.xel[sr_param_.id_count].id = servos_[scan].id;
+          ++sr_param_.id_count;
+        }
+        ++scan;
+      }
+      if (sr_param_.id_count == 0) {
+        continue;  // no this-kind servos in the span just scanned
+      }
+      selectProtocol(kind);
+      if (!dxl_.syncRead(sr_param_, sr_recv_)) {
+        stats_.reads_fail++;
+        stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
         continue;
       }
-      sr_param_.xel[sr_param_.id_count].id = servos_[i].id;
-      ++sr_param_.id_count;
-    }
-    if (sr_param_.id_count == 0) {
-      continue;
-    }
-    selectProtocol(kind);
-    if (!dxl_.syncRead(sr_param_, sr_recv_)) {
-      stats_.reads_fail++;
-      stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
-      continue;
-    }
-    // Map received status back to the matching servo index.
-    for (uint8_t r = 0; r < sr_recv_.id_count; ++r) {
-      const XelInfoForStatusInst_t& xs = sr_recv_.xel[r];
-      for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
-        if (servos_[i].id != xs.id) {
-          continue;
+      // Map received status back to the matching servo index.
+      for (uint8_t r = 0; r < sr_recv_.id_count; ++r) {
+        const XelInfoForStatusInst_t& xs = sr_recv_.xel[r];
+        for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
+          if (servos_[i].id != xs.id) {
+            continue;
+          }
+          out[i].present_position = decodePosition(kind, xs.data);
+          out[i].hardware_error = xs.error;
+          out[i].ok = true;
+          ++fresh;
+          break;
         }
-        out[i].present_position = decodePosition(kind, xs.data);
-        out[i].hardware_error = xs.error;
-        out[i].ok = true;
-        ++fresh;
-        break;
       }
+      stats_.reads_ok++;
     }
-    stats_.reads_ok++;
   }
   return fresh;
 }
