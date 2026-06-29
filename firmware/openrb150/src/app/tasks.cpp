@@ -274,7 +274,9 @@ void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
   g_deviceInfo.fw_minor = 1;
   g_deviceInfo.fw_patch = 0;
-  g_deviceInfo.feature_bits = 0;  // populated as features land in Phase 2
+  // Refreshed live from runtime feature availability before each request in
+  // apiTask (4sa.4); this boot value just means "nothing available yet".
+  g_deviceInfo.feature_bits = 0;
   const char name[] = "OpenRB150-Hex";
   size_t i = 0;
   for (; name[i] != '\0' && i < protocol::api::kDeviceNameLen; ++i) {
@@ -1352,6 +1354,12 @@ void apiTask(void*) {
       // Refresh the passive handler's live state so PASSIVE_ENTER gates on the
       // current safety state (control task also keeps this current each cycle).
       g_passiveApi.setLiveState(g_safetyState);
+
+      // Report honest runtime capabilities: feature_bits mirrors the per-
+      // feature availability the control task publishes each cycle (bit index
+      // == Feature enum order), so GET_CAPABILITIES is no longer a zero stub
+      // (4sa.4). g_deviceInfo is only touched by this task.
+      g_deviceInfo.feature_bits = g_featureApi.availableMask();
 
       const size_t n = protocol::api::handleRequest(
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),

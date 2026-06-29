@@ -49,6 +49,14 @@ bool FeatureApi::effectiveEnabled(Feature f) const {
   return state_[i].desired && state_[i].available;
 }
 
+uint32_t FeatureApi::availableMask() const {
+  uint32_t mask = 0;
+  for (uint8_t i = 0; i < kFeatureCount; ++i) {
+    if (state_[i].available) mask |= (1u << i);
+  }
+  return mask;
+}
+
 FeatureApplyResult FeatureApi::applyDesired(Feature f, bool enable) {
   FeatureApplyResult r;
   const uint8_t i = static_cast<uint8_t>(f);

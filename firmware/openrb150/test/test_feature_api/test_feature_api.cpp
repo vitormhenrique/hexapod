@@ -264,6 +264,34 @@ void test_apply_defaults_seeds_from_mask() {
   TEST_ASSERT_EQUAL_UINT(s1, feat.seq());
 }
 
+// 4sa.4: availableMask() exposes per-feature availability as a bitmask (bit
+// index == Feature enum order) so apiTask can fill GET_CAPABILITIES feature_bits
+// with honest runtime capabilities. Availability is independent of desired.
+void test_available_mask_reflects_availability() {
+  FeatureApi feat;
+  // Nothing available at reset.
+  TEST_ASSERT_EQUAL_HEX32(0u, feat.availableMask());
+
+  // Flip two non-adjacent features available; expect exactly their bits.
+  feat.setAvailability(Feature::FootContact, true, FeatureReason::None);
+  feat.setAvailability(Feature::PassivePose, true, FeatureReason::None);
+  const uint32_t expect = (1u << static_cast<uint8_t>(Feature::FootContact)) |
+                          (1u << static_cast<uint8_t>(Feature::PassivePose));
+  TEST_ASSERT_EQUAL_HEX32(expect, feat.availableMask());
+
+  // A feature can be available but disabled (desired off) and still set its
+  // bit -- the mask is capability, not current enable.
+  TEST_ASSERT_FALSE(feat.effectiveEnabled(Feature::FootContact));
+  TEST_ASSERT_TRUE((feat.availableMask() &
+                    (1u << static_cast<uint8_t>(Feature::FootContact))) != 0u);
+
+  // Clearing availability clears the bit.
+  feat.setAvailability(Feature::FootContact, false,
+                       FeatureReason::HardwareMissing);
+  TEST_ASSERT_EQUAL_HEX32(
+      (1u << static_cast<uint8_t>(Feature::PassivePose)), feat.availableMask());
+}
+
 // Without a FeatureApi the dispatcher rejects the feature range as unknown.
 void test_unknown_without_feature_api() {
   uint8_t req[kMaxWireFrame];
@@ -299,6 +327,7 @@ int main(int, char**) {
   RUN_TEST(test_reset_defaults);
   RUN_TEST(test_seq_changes);
   RUN_TEST(test_apply_defaults_seeds_from_mask);
+  RUN_TEST(test_available_mask_reflects_availability);
   RUN_TEST(test_unknown_without_feature_api);
   return UNITY_END();
 }

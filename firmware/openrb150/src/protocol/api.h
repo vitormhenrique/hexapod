@@ -19,6 +19,8 @@
 //                           battery_mv(2), watchdog_missed(4)
 //   GET_CAPABILITIES (25B): proto_major, proto_minor, fw_major, fw_minor,
 //                           fw_patch, feature_bits(4), name[16]
+//                           feature_bits: per-Feature availability bitmask,
+//                           bit i == Feature i available (see feature_api.h).
 //   error frame       (1B): error_code  (header flags has kError set)
 //
 //   status_flags: bit0 = dxl_power, bit1 = dxl_power_control
@@ -178,11 +180,15 @@ constexpr uint8_t kPassiveMsgLast = 0x83;
 
 constexpr size_t kDeviceNameLen = 16;
 
-// Static description of this firmware build. Filled once at boot.
+// Description of this firmware build. fw_* and device_name are filled once at
+// boot; feature_bits is refreshed live from runtime feature availability before
+// each request (4sa.4), so GET_CAPABILITIES reports honest capabilities.
 struct DeviceInfo {
   uint8_t fw_major = 0;
   uint8_t fw_minor = 0;
   uint8_t fw_patch = 0;
+  // Per-Feature availability bitmask, bit i == Feature i available (see
+  // protocol::Feature / FeatureApi::availableMask). 0 == nothing available yet.
   uint32_t feature_bits = 0;
   char device_name[kDeviceNameLen] = {0};
 };

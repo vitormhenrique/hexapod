@@ -124,6 +124,13 @@ class FeatureApi {
   bool desiredEnabled(Feature f) const;
   // Effective enabled = desired && available (what the wire reports).
   bool effectiveEnabled(Feature f) const;
+  // Bitmask of features currently AVAILABLE (bit index == Feature enum order,
+  // i.e. bit i == feature i). Reflects the hardware/state availability the
+  // control task publishes via setAvailability() each cycle, so the apiTask can
+  // fill GET_CAPABILITIES feature_bits with honest runtime capabilities
+  // (4sa.4). A set bit means the feature can be enabled now -- not that it is
+  // currently enabled (that is effectiveEnabled()).
+  uint32_t availableMask() const;
   // Increments whenever the desired set changes (SET / RESET_DEFAULTS) so the
   // task can detect host changes without diffing each flag.
   uint32_t seq() const { return seq_; }

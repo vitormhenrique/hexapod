@@ -118,6 +118,23 @@ FEATURE_JETSON_CONTROL = 3
 FEATURE_PASSIVE_POSE = 4
 FEATURE_COUNT = 5
 
+# Human-readable feature names indexed by feature id (for capability display).
+FEATURE_NAMES = (
+    "foot_contact",
+    "terrain_leveling",
+    "sensor_polling",
+    "jetson_control",
+    "passive_pose",
+)
+
+
+def capability_features(feature_bits: int) -> list[int]:
+    """Decode a GET_CAPABILITIES feature_bits mask into available feature ids.
+
+    Bit i set == Feature i currently available (see FEATURE_* / FEATURE_NAMES).
+    """
+    return [i for i in range(FEATURE_COUNT) if feature_bits & (1 << i)]
+
 # Feature unavailability reason byte (mirrors protocol::FeatureReason).
 FEATURE_REASON_NONE = 0
 FEATURE_REASON_HARDWARE_MISSING = 1
@@ -290,6 +307,9 @@ class Capabilities:
     fw_major: int
     fw_minor: int
     fw_patch: int
+    # Per-feature availability mask: bit i set == Feature i available now (see
+    # FEATURE_* / FEATURE_NAMES / capability_features()). Refreshed live by the
+    # firmware, so it reflects detected DXL/I2C hardware (4sa.4).
     feature_bits: int
     device_name: str
 
