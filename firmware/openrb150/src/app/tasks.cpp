@@ -99,14 +99,17 @@ protocol::ControlApi g_controlApi;
 protocol::MotionApi g_motionApi;
 
 // Servo goal frame published by controlTask's gait/IK pipeline (lmt.1) and
-// consumed by dxlTask's Sync Write (lmt.2). Single writer (controlTask) /
-// single reader (dxlTask), guarded by a briefly-held mutex (the critical
-// section is just a ~37-byte copy, so neither task blocks meaningfully).
-// g_goalValid is cleared whenever motion is not gated open, so dxlTask never
-// drives the servos from a stale frame once authority is lost.
+// consumed by dxlTask's Sync Write (lmt.2). Single writer (controlTask) and two
+// readers (dxlTask drives the bus, apiTask renders the servo_goals telemetry),
+// guarded by a briefly-held mutex (the critical section is a small fixed copy,
+// so no task blocks meaningfully). Stores the full per-joint result (id, tick,
+// leg, joint, clamped) so the goal-write path and the clamp-flag telemetry
+// (audit 22l.3) share one source of truth. g_goalValid is cleared whenever
+// motion is not gated open, so neither the bus write nor the telemetry renders
+// a stale frame once authority is lost.
 struct GoalFrame {
   uint8_t count = 0;
-  dxl::GoalTarget targets[config::kNumServos];
+  gait::PipelineJoint joints[config::kNumServos];
 };
 GoalFrame g_goalFrame;
 SemaphoreHandle_t g_goalMutex = nullptr;  // guards g_goalFrame
@@ -419,29 +422,55 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // Per-joint commanded goal after IK + servo-map clamping (eax.2). Lets the
       // host overlay commanded vs present pose in the animation. count(1) then
       // 5 bytes/joint: leg(1), joint(1), angle_centideg(int16), flags(1). flags
-      // bit0 = clamped (goal saturated against configured servo travel). Only
-      // joints with a stored, mapped command are emitted, so until a maintenance
-      // target is set the payload is just a zero count (the gait goal-write path
-      // is the future source; today the maintenance target set is authoritative).
+      // bit0 = clamped (goal saturated against configured servo travel).
+      // While motion is gated open the live gait/IK goal frame (lmt.2) is the
+      // authoritative source; on the bench (motion not gated) the stored
+      // maintenance target set is rendered instead. Either way only joints with
+      // a real command are emitted, so an idle robot yields a zero count.
       // 18 joints -> 1 + 18*5 = 91 bytes, within the 256 payload cap.
       const dxl::ServoMap map(g_configApi.config());
-      const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
       uint8_t* countp = &p[o++];
       uint8_t emitted = 0;
-      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
-        for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
-          if (!tgt.set[leg][j]) continue;
-          if (map.servoFor(leg, j) == nullptr) continue;  // skip unmapped slots
-          const float rad = map.tickToAngle(leg, j, tgt.tick[leg][j]);
+      bool used_gait = false;
+      // Live gait goals take priority while motion is authorised. Copy under a
+      // zero-wait lock; if controlTask is mid-publish, fall back to the bench
+      // target set for this frame rather than block the telemetry task.
+      if (g_motionGate && g_goalValid && g_goalMutex != nullptr &&
+          xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
+        const uint8_t n = g_goalFrame.count;
+        for (uint8_t i = 0; i < n; ++i) {
+          const gait::PipelineJoint& jt = g_goalFrame.joints[i];
+          const float rad = map.tickToAngle(jt.leg, jt.joint, jt.tick);
           long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
           if (centideg > 32767) centideg = 32767;
           if (centideg < -32768) centideg = -32768;
-          p[o++] = leg;
-          p[o++] = j;
+          p[o++] = jt.leg;
+          p[o++] = jt.joint;
           o += put16(&p[o],
                      static_cast<uint16_t>(static_cast<int16_t>(centideg)));
-          p[o++] = tgt.clamped[leg][j] ? 0x01 : 0x00;
+          p[o++] = jt.clamped ? 0x01 : 0x00;
           ++emitted;
+        }
+        xSemaphoreGive(g_goalMutex);
+        used_gait = true;
+      }
+      if (!used_gait) {
+        const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
+        for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+          for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
+            if (!tgt.set[leg][j]) continue;
+            if (map.servoFor(leg, j) == nullptr) continue;  // skip unmapped
+            const float rad = map.tickToAngle(leg, j, tgt.tick[leg][j]);
+            long centideg = lroundf(rad * dxl::kRadToDeg * 100.0f);
+            if (centideg > 32767) centideg = 32767;
+            if (centideg < -32768) centideg = -32768;
+            p[o++] = leg;
+            p[o++] = j;
+            o += put16(&p[o],
+                       static_cast<uint16_t>(static_cast<int16_t>(centideg)));
+            p[o++] = tgt.clamped[leg][j] ? 0x01 : 0x00;
+            ++emitted;
+          }
         }
       }
       *countp = emitted;
@@ -659,8 +688,7 @@ void controlTask(void*) {
         g_goalFrame.count = goals.count;
         bool any_clamped = false;
         for (uint8_t i = 0; i < goals.count; ++i) {
-          g_goalFrame.targets[i].id = goals.joints[i].id;
-          g_goalFrame.targets[i].tick = goals.joints[i].tick;
+          g_goalFrame.joints[i] = goals.joints[i];
           if (goals.joints[i].clamped) any_clamped = true;
         }
         g_goalClamped = any_clamped;
@@ -1016,23 +1044,51 @@ void dxlTask(void*) {
     // scan populates servos and DXL power is on (both OFF at boot), keeping this
     // safe by default. g_motionGate already folds in the safety state machine.
     const bool authorized = g_motionGate;
-    if (!authorized && prev_authorized && g_dxlBus.servoCount() > 0) {
+    const bool have_servos = g_dxlBus.servoCount() > 0;
+    if (!authorized && prev_authorized && have_servos) {
       g_dxlBus.setTorqueAll(false);
+    }
+    // Rising edge of authorisation: enable torque on all servos before the first
+    // goal Sync-Write below so they hold and track the commanded pose rather
+    // than being back-driven. Edge-triggered to avoid re-issuing torque-enable
+    // every cycle.
+    if (authorized && !prev_authorized && have_servos) {
+      g_dxlBus.setTorqueAll(true);
     }
     prev_authorized = authorized;
     // Publish torque-off confirmation for the safety FSM (passive pose gating).
     // Torque is off whenever no servo is driven: nothing discovered yet, or
     // motion is not authorised this cycle (the goal-write/torque-enable path is
     // gated by g_motionGate, so authorized==false => torque stays off).
-    g_dxlTorqueOff = (g_dxlBus.servoCount() == 0) || !authorized;
+    g_dxlTorqueOff = !have_servos || !authorized;
+
+    // Goal Sync-Write path (lmt.2): while motion is authorised and torque is on,
+    // push the latest goal frame published by controlTask (gait -> body IK ->
+    // servo map). Copy the frame out under the brief mutex so the bus is never
+    // held while the lock is taken; if controlTask is mid-publish we skip this
+    // cycle and the servos hold their previous goal. Writing every cycle (not
+    // just on goal change) also keeps any per-servo bus watchdog fed.
+    if (authorized && have_servos && g_goalValid && g_goalMutex != nullptr) {
+      static dxl::GoalTarget targets[config::kNumServos];
+      uint8_t count = 0;
+      if (xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
+        count = g_goalFrame.count;
+        for (uint8_t i = 0; i < count; ++i) {
+          targets[i].id = g_goalFrame.joints[i].id;
+          targets[i].tick = g_goalFrame.joints[i].tick;
+        }
+        xSemaphoreGive(g_goalMutex);
+      }
+      if (count > 0) {
+        g_dxlBus.writeGoalPositions(targets, count);
+      }
+    }
 
     // Publish a fresh present-position snapshot for all discovered servos in a
     // single Sync Read per control table. This is a no-op until a maintenance
     // scan populates the servo table (DXL power is OFF at boot), and never
     // enables torque or writes goals. The goal Sync-Write path (writeGoal-
-    // Positions) is implemented and unit-tested at the driver level; its task-
-    // level activation is gated by g_motionAuthorized (22l.8) and the safety
-    // state machine (22l.10).
+    // Positions) runs above, gated by g_motionGate + a valid goal frame.
     if (g_dxlBus.servoCount() > 0) {
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
