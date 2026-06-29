@@ -550,6 +550,11 @@ void controlTask(void*) {
     safety::StateInputs si;
     si.config_loaded = g_configReady;
     si.battery_mv = batt_mv;
+    // A real 3S pack is >= ~9 V; below 6 V there is no pack on the sense pin
+    // (USB-only bench power) so the reading is not a trustworthy voltage. Both
+    // this floor and the FSM E-stop threshold assume the divider ratio is
+    // HIL-calibrated (board.h kBatteryDividerRatio); an uncalibrated ratio
+    // shifts both bounds together.
     si.battery_valid = batt_mv > 6000;  // below this = no pack sense (USB bench)
     si.watchdog_fault = watchdog::missedMask() != 0;
     si.dxl_hard_fault = g_dxlHardFault;  // servo HW error / dead bus (lmt.5)

@@ -35,6 +35,10 @@ enum class FaultReason : uint8_t {
 
 // Tunable thresholds. Defaults are conservative; the config layer may override.
 struct StateParams {
+  // 10.0 V assumes a 3S LiPo (~3.33 V/cell): below this an armed pack is too
+  // low to keep walking safely. This is meaningful only when battery_mv is a
+  // HIL-calibrated reading (board.h kBatteryDividerRatio); 1S/2S packs are not
+  // supported by this robot (12 V MX-28AT bus -> 3S).
   uint16_t battery_min_mv = 10000;  // below this (when valid) -> Estop
 };
 

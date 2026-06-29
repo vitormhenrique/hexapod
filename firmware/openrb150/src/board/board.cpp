@@ -1,5 +1,6 @@
 #include "board.h"
 
+#include "battery_calc.h"
 #include "openrb150_pins.h"
 
 namespace board {
@@ -59,16 +60,13 @@ uint16_t readBatteryRaw() {
 }
 
 uint16_t readBatteryPinMilliVolts() {
-  const uint32_t raw = readBatteryRaw();
-  // mV = raw / maxCount * Vref(3.3V) * 1000
-  const uint32_t mv =
-      (raw * static_cast<uint32_t>(kAdcReferenceVolts * 1000.0f)) / kAdcMaxCount;
-  return static_cast<uint16_t>(mv);
+  return battery::pinMilliVolts(readBatteryRaw(), kAdcMaxCount,
+                                kBatteryReferenceMv);
 }
 
 uint16_t readBatteryMilliVolts() {
-  const uint32_t pin_mv = readBatteryPinMilliVolts();
-  return static_cast<uint16_t>(pin_mv * kBatteryDividerRatio);
+  return battery::packMilliVolts(readBatteryRaw(), kAdcMaxCount,
+                                 kBatteryReferenceMv, kBatteryDividerRatio);
 }
 
 }  // namespace board

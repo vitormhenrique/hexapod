@@ -16,16 +16,46 @@
 
 namespace board {
 
-// Board ADC reference and resolution used for battery conversion.
-constexpr float kAdcReferenceVolts = 3.3f;
+// Board ADC resolution used for battery conversion.
 constexpr uint8_t kAdcResolutionBits = 12;
 constexpr uint16_t kAdcMaxCount = (1u << kAdcResolutionBits) - 1u;  // 4095
 
-// PROVISIONAL battery divider ratio (Vbatt / Vpin). The OpenRB-150 supports up
-// to a 3S LiPo (~12.6 V) on a 3.3 V ADC, so the on-board divider is ~4x. This
-// value MUST be calibrated against a known battery voltage during Phase 1 HIL
-// bring-up (issue rbg.10) before it is trusted for any safety threshold.
-constexpr float kBatteryDividerRatio = 4.0f;
+// ADC reference in millivolts, used by the battery conversion. The SAMD21
+// analog reference is the 3.3 V analog rail (AR_DEFAULT). Override with
+// -DHEXAPOD_BATTERY_REF_MV=<measured_mv> during HIL bring-up after measuring the
+// actual 3V3 rail (it is typically a few tens of mV off nominal).
+#ifndef HEXAPOD_BATTERY_REF_MV
+#define HEXAPOD_BATTERY_REF_MV 3300.0f
+#endif
+constexpr float kBatteryReferenceMv = HEXAPOD_BATTERY_REF_MV;
+
+// Battery divider ratio (Vbatt / Vpin). The OpenRB-150 accepts up to a 3S LiPo
+// (12.6 V full charge, ROBOTIS spec) on a 3.3 V ADC, so the on-board divider is
+// ~4x. This default keeps the full-charge pin voltage ~3.15 V (under the 3.3 V
+// limit), but the exact ratio depends on resistor tolerance and the real ADC
+// reference, so it MUST be trimmed against a measured pack voltage before the
+// low-voltage E-stop is trusted (issue 4sa.3 / rbg.10).
+//
+// HIL calibration (no recompile of this file needed): read the reported pin
+// millivolts and a meter reading of the pack, then build with
+//   -DHEXAPOD_BATTERY_DIVIDER_RATIO=<Vpack_mv / Vpin_mv>
+// (and optionally -DHEXAPOD_BATTERY_REF_MV=<measured rail>).
+#ifndef HEXAPOD_BATTERY_DIVIDER_RATIO
+#define HEXAPOD_BATTERY_DIVIDER_RATIO 4.0f
+#endif
+constexpr float kBatteryDividerRatio = HEXAPOD_BATTERY_DIVIDER_RATIO;
+
+// Maximum design input (3S LiPo full charge, 12.6 V). Used only for the safety
+// guard below.
+constexpr float kBatteryMaxInputMv = 12600.0f;
+
+// SAFETY GUARD: a divider ratio that is too small lets the full-charge pin
+// voltage exceed the ADC reference, so the ADC rails at full scale and a LOW
+// battery would read the same as a full one -- defeating the low-voltage
+// E-stop. Reject such a (mis)calibration at compile time.
+static_assert(kBatteryDividerRatio >= kBatteryMaxInputMv / kBatteryReferenceMv,
+              "Battery divider ratio too small: full-charge pin voltage would "
+              "exceed the ADC reference and clip, hiding a low battery.");
 
 // Initialize board I/O and enforce safe boot defaults:
 //   - DYNAMIXEL power FET driven OFF (servos unpowered)
@@ -53,9 +83,11 @@ bool dxlPowerEnabled();
 // Raw 12-bit ADC counts at the battery sense pin (0..4095).
 uint16_t readBatteryRaw();
 // Voltage at the ADC pin itself (after the on-board divider), in millivolts.
+// This is the value to read against a meter when calibrating the divider ratio.
 uint16_t readBatteryPinMilliVolts();
-// Estimated pack voltage in millivolts, using kBatteryDividerRatio.
-// PROVISIONAL until the divider ratio is HIL-calibrated.
+// Estimated pack voltage in millivolts, using kBatteryDividerRatio. Accurate
+// only once that ratio (and optionally kBatteryReferenceMv) is HIL-calibrated
+// via the build-flag overrides documented above.
 uint16_t readBatteryMilliVolts();
 
 }  // namespace board
