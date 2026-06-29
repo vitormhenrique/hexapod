@@ -40,6 +40,16 @@ uint8_t crc8(const uint8_t* data, uint8_t len);
 // Convert a raw 11-bit CRSF tick value (~172..1811) to microseconds (~988..2012).
 uint16_t ticksToMicros(uint16_t ticks);
 
+// Stick-to-command mapping (lmt.3). A centred stick (kMicrosMid) maps to 0; the
+// magnitude ramps linearly from 0 at the deadband edge to +/-1 at +/-half-span.
+constexpr uint16_t kStickDeadbandUs = 25;   // centre deadband (kills jitter)
+constexpr uint16_t kStickHalfSpanUs = 500;  // us from centre that maps to +/-1
+
+// Map a normalized RC channel value in microseconds to a symmetric [-1,1]
+// body-twist command using the constants above. Values inside the centre
+// deadband return exactly 0; values beyond +/-half-span clamp to +/-1.
+float stickToUnit(uint16_t micros);
+
 // Decoded RC channel ticks from one valid RC_CHANNELS_PACKED frame.
 struct ChannelData {
   uint16_t channels[kNumChannels];  // raw 11-bit ticks

@@ -179,6 +179,38 @@ void test_rc_status_init_is_safe() {
   TEST_ASSERT_FALSE(rc.ever_seen);
 }
 
+// --- stickToUnit (lmt.3 body-twist mapping) --------------------------------
+
+void test_stick_unit_center_is_zero() {
+  // Exactly centred and anywhere inside the deadband maps to a hard zero.
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, stickToUnit(kMicrosMid));
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, stickToUnit(kMicrosMid + kStickDeadbandUs - 1));
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, stickToUnit(kMicrosMid - (kStickDeadbandUs - 1)));
+}
+
+void test_stick_unit_full_deflection_clamps() {
+  // At/above +/- half span the command saturates at +/-1.
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, stickToUnit(kMicrosMid + kStickHalfSpanUs));
+  TEST_ASSERT_EQUAL_FLOAT(-1.0f, stickToUnit(kMicrosMid - kStickHalfSpanUs));
+  // Beyond half span (e.g. the ~2012 us channel max) stays clamped.
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, stickToUnit(2012));
+  TEST_ASSERT_EQUAL_FLOAT(-1.0f, stickToUnit(988));
+}
+
+void test_stick_unit_symmetric_and_signed() {
+  // Forward (above centre) is positive, back (below centre) is negative, and
+  // symmetric offsets give equal-magnitude opposite-sign commands.
+  const uint16_t off = kStickHalfSpanUs / 2;  // a partial deflection
+  const float hi = stickToUnit(kMicrosMid + off);
+  const float lo = stickToUnit(kMicrosMid - off);
+  TEST_ASSERT_TRUE(hi > 0.0f);
+  TEST_ASSERT_TRUE(lo < 0.0f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, hi, -lo);
+  // Just past the deadband edge yields a small but non-zero command.
+  const float edge = stickToUnit(kMicrosMid + kStickDeadbandUs + 1);
+  TEST_ASSERT_TRUE(edge > 0.0f && edge < 0.05f);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_crc8_known_vector);
@@ -189,5 +221,8 @@ int main(int, char**) {
   RUN_TEST(test_rc_status_arm_kill_gait_mapping);
   RUN_TEST(test_rc_status_failsafe_on_stale);
   RUN_TEST(test_rc_status_init_is_safe);
+  RUN_TEST(test_stick_unit_center_is_zero);
+  RUN_TEST(test_stick_unit_full_deflection_clamps);
+  RUN_TEST(test_stick_unit_symmetric_and_signed);
   return UNITY_END();
 }

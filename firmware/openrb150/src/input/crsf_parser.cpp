@@ -30,6 +30,20 @@ uint16_t ticksToMicros(uint16_t ticks) {
   return static_cast<uint16_t>(((static_cast<uint32_t>(ticks) * 5) >> 3) + 880);
 }
 
+float stickToUnit(uint16_t micros) {
+  int v = static_cast<int>(micros) - static_cast<int>(kMicrosMid);
+  const int dead = static_cast<int>(kStickDeadbandUs);
+  if (v > -dead && v < dead) return 0.0f;
+  // Bias out the deadband so the command ramps from zero at the deadband edge.
+  v += (v > 0) ? -dead : dead;
+  float span = static_cast<float>(kStickHalfSpanUs) - static_cast<float>(dead);
+  if (span < 1.0f) span = 1.0f;  // guard against a degenerate deadband config
+  float u = static_cast<float>(v) / span;
+  if (u > 1.0f) u = 1.0f;
+  if (u < -1.0f) u = -1.0f;
+  return u;
+}
+
 void Parser::reset() {
   idx_ = 0;
   frame_len_ = 0;

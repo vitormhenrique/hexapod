@@ -573,6 +573,19 @@ void updateFeatureFlags(uint32_t /*now_ms*/) {
 // Each task runs a fixed-period loop with vTaskDelayUntil so timing does not
 // drift with body execution time. Bodies are stubs for the skeleton.
 
+// Map the 3-position CRSF gait switch (gait_index 0,1,2) to a gait id (lmt.3).
+// Position 0 is Stand so a centred switch never walks (priority:safety); the
+// upper two positions select walking gaits. Indices are clamped defensively.
+config::GaitId rcGaitToId(uint8_t gait_index) {
+  static const config::GaitId kMap[3] = {
+      config::GaitId::Stand,   // switch low: hold a stance, ignore sticks
+      config::GaitId::Tripod,  // switch mid: fast alternating-tripod walk
+      config::GaitId::Ripple,  // switch high: slower, more stable ripple
+  };
+  if (gait_index > 2) gait_index = 2;
+  return kMap[gait_index];
+}
+
 void controlTask(void*) {
   TickType_t next = xTaskGetTickCount();
   g_stateMachine.reset();
@@ -656,27 +669,56 @@ void controlTask(void*) {
     // parked until the robot is armed/authorised.
     g_motionApi.setLiveState(g_safetyState, g_motionGate);
 
-    // --- Gait -> servo goal generation (lmt.1) ------------------------------
-    // Translate the latest high-level motion intent into concrete goal ticks and
-    // publish a frame for dxlTask (gait engine -> body IK -> servo map). The
-    // pipeline is built once from the active config (rebuilt on config adopt/
-    // commit by lmt.7). It is only advanced and published while motion is gated
-    // open; the phase is reset on the rising edge of the gate so each
-    // (re)authorisation starts from a clean cycle, and the frame is invalidated
-    // when the gate closes so the bus-write path (lmt.2) holds position instead
-    // of replaying a stale goal.
+    // --- Gait -> servo goal generation (lmt.1 / lmt.3) ----------------------
+    // Translate the active motion intent into concrete goal ticks and publish a
+    // frame for dxlTask (gait engine -> body IK -> servo map). The pipeline is
+    // built once from the active config (rebuilt on config adopt/commit by
+    // lmt.7). It is only advanced and published while motion is gated open; the
+    // phase is reset on the rising edge of the gate so each (re)authorisation
+    // starts from a clean cycle, and the frame is invalidated when the gate
+    // closes so the bus-write path (lmt.2) holds position instead of replaying a
+    // stale goal.
+    //
+    // Command source (lmt.3): when RC owns motion the 3-position gait switch
+    // selects the gait and the pitch/roll/yaw sticks drive the body twist;
+    // otherwise the host's stored MotionApi intent (Mac/Jetson) drives. Shape
+    // params (stride/step/height/duty/speed) always come from the host intent,
+    // which is seeded from the config gait defaults at boot, so RC reuses the
+    // calibrated walk shape.
     static uint32_t applied_intent_seq = 0xFFFFFFFFu;
+    static uint8_t applied_gait = 0xFF;
     static bool prev_motion_gate = false;
     if (g_motionGate) {
       const protocol::MotionIntent& intent = g_motionApi.intent();
+      const bool rc_drives = (arb.source == safety::CommandSource::Rc);
+
+      // Effective gait + body twist from the active source.
+      uint8_t eff_gait = intent.gait;
+      float eff_vx = intent.twist_vx;
+      float eff_vy = intent.twist_vy;
+      float eff_wz = intent.twist_wz;
+      if (rc_drives) {
+        eff_gait = static_cast<uint8_t>(rcGaitToId(g_rcStatus.gait_index));
+        eff_vx = crsf::stickToUnit(g_rcStatus.channels_us[crsf::kChPitch]);  // fwd
+        eff_vy = crsf::stickToUnit(g_rcStatus.channels_us[crsf::kChRoll]);   // lat
+        eff_wz = crsf::stickToUnit(g_rcStatus.channels_us[crsf::kChYaw]);    // yaw
+      }
+
+      // Re-seed shape params when the host intent changes (RC reuses them).
       if (intent.seq != applied_intent_seq) {
-        g_pipeline.setGait(static_cast<config::GaitId>(intent.gait));
         g_pipeline.setParams(intent.body_height_mm, intent.stride_len_mm,
                              intent.step_height_mm, intent.duty_x255,
                              intent.speed_x255);
-        g_pipeline.setTwist(intent.twist_vx, intent.twist_vy, intent.twist_wz);
         applied_intent_seq = intent.seq;
       }
+      // Apply the gait only when it actually changes (avoid per-cycle churn).
+      if (eff_gait != applied_gait) {
+        g_pipeline.setGait(static_cast<config::GaitId>(eff_gait));
+        applied_gait = eff_gait;
+      }
+      // Twist tracks the sticks/intent every cycle (cheap: stores three floats).
+      g_pipeline.setTwist(eff_vx, eff_vy, eff_wz);
+
       if (!prev_motion_gate) {
         g_pipeline.resetPhase();
       }
@@ -699,6 +741,7 @@ void controlTask(void*) {
     } else {
       g_goalValid = false;
       applied_intent_seq = 0xFFFFFFFFu;  // force re-apply on next authorisation
+      applied_gait = 0xFF;               // force gait re-apply on next auth
     }
     prev_motion_gate = g_motionGate;
 
