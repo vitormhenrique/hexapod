@@ -156,6 +156,7 @@ MSG_DXL_SET_PARAM = 0x66
 MSG_DXL_SET_SERVO_LIMITS = 0x67
 MSG_DXL_READ_REGISTER = 0x68
 MSG_DXL_WRITE_REGISTER = 0x69
+MSG_DXL_POWER = 0x6A
 
 # Sensor / contact / leveling command group (mirrors src/protocol/sensor_api.h,
 # 0x70..0x7F). ubs.5.1 covers the contact + leveling control subset; the I2C
@@ -1467,6 +1468,18 @@ def build_dxl_write_register(
     )
 
 
+def build_dxl_power(on: bool, seq: int = 0) -> bytes:
+    """Build a DXL_POWER command toggling the DYNAMIXEL power FET.
+
+    Payload [on(0/1)]. Maintenance-gated: firmware only accepts it while in the
+    MacMaintenance state with the bench lock held, and force-cuts power on any
+    exit from maintenance (lock release/expiry, disarm, estop, fault).
+    """
+    return build_command(
+        MSG_DXL_POWER, seq=seq, payload=struct.pack("<B", 1 if on else 0)
+    )
+
+
 @dataclass
 class DxlSubmitResult:
     result: int  # DXL_SUBMIT_*
@@ -1572,6 +1585,12 @@ class DxlJobResult:
         verified = self.data[11] != 0
         return DxlWriteRegisterResult(addr, length, written, readback, verified)
 
+    def power(self) -> Optional["DxlPowerResult"]:
+        """Decode a DONE DXL_POWER result ([power_on(1), has_control(1)])."""
+        if not self.done or len(self.data) < 2:
+            return None
+        return DxlPowerResult(self.data[0] != 0, self.data[1] != 0)
+
 
 @dataclass
 class DxlParamValue:
@@ -1612,6 +1631,12 @@ class DxlWriteRegisterResult:
     written: int
     readback: int
     verified: bool
+
+
+@dataclass
+class DxlPowerResult:
+    power_on: bool
+    has_control: bool
 
 
 def parse_dxl_submit(payload: bytes) -> DxlSubmitResult:

@@ -168,6 +168,25 @@ def test_dxl_scan(monkeypatch):
     assert "id=1" in result.output
 
 
+def test_dxl_power(monkeypatch):
+    def submit(_payload):
+        return bytes([api.DXL_SUBMIT_ACCEPTED, 4, api.DXL_SLOT_PENDING]), False
+
+    def get_result(_payload):
+        # DONE, code OK: [power_on=1, has_control=1].
+        data = bytes([1, 1])
+        return bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data, False
+
+    _patch_client(
+        monkeypatch,
+        {api.MSG_DXL_POWER: submit, api.MSG_DXL_GET_RESULT: get_result},
+    )
+    result = runner.invoke(cli.app, ["dxl", "power", "true"])
+    assert result.exit_code == 0
+    assert "power_on=True" in result.output
+    assert "has_control=True" in result.output
+
+
 def test_dxl_limits_validation(monkeypatch):
     _patch_client(monkeypatch, {})
     # min >= max is rejected before connecting.

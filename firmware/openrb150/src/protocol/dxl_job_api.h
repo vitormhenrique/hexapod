@@ -45,6 +45,7 @@ constexpr uint8_t kSetParam = 0x66;
 constexpr uint8_t kSetServoLimits = 0x67;
 constexpr uint8_t kReadRegister = 0x68;
 constexpr uint8_t kWriteRegister = 0x69;
+constexpr uint8_t kPower = 0x6A;  // [on(0/1)] -> DXL power FET (bench-only)
 constexpr uint8_t kFirst = 0x60;
 constexpr uint8_t kLast = 0x6F;
 inline bool isDxlMsg(uint8_t id) { return id >= kFirst && id <= kLast; }
@@ -64,6 +65,7 @@ enum class Type : uint8_t {
   SetLimits = 7,   // arg0=id, val_a=min_tick, val_b=max_tick
   ReadReg = 8,     // arg0=id, val_a=addr, param=len (raw, expert-gated)
   WriteReg = 9,    // arg0=id, val_a=addr, param=len, val_b=value, arg1=flags
+  Power = 10,      // arg0=on (0/1) -> toggles the DXL power FET (bench-only)
 };
 
 // Single-slot lifecycle, written only on a state transition (the SPSC fence).

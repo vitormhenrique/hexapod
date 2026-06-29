@@ -634,6 +634,32 @@ def dxl_torque(
         client.stop()
 
 
+@dxl_app.command("power")
+def dxl_power(
+    on: bool = typer.Argument(..., help="true|false"),
+    port: Optional[str] = _PORT,
+    baud: int = _BAUD,
+) -> None:
+    """Enable or disable the DYNAMIXEL power FET (maintenance only).
+
+    Firmware only accepts this while in MacMaintenance with the bench lock held,
+    and force-cuts power on any exit from maintenance (disarm, estop, fault).
+    """
+    client = _connect(port, baud)
+    try:
+        res = _require_done(client.dxl_power(on))
+        pr = res.power()
+        if pr is not None:
+            typer.secho(
+                f"power_on={pr.power_on} has_control={pr.has_control}",
+                fg=typer.colors.GREEN,
+            )
+        else:
+            typer.secho(f"code={res.code} data={res.data.hex()}", fg=typer.colors.GREEN)
+    finally:
+        client.stop()
+
+
 @dxl_app.command("get")
 def dxl_get(
     servo_id: int = typer.Argument(...),

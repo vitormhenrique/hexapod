@@ -412,6 +412,10 @@ def build_dxl() -> dict:
                 5, 6, 2, 100, is_eeprom=True, seq=10
             ).hex(),
         },
+        {
+            "name": "dxl_power",
+            "request": api_mod.build_dxl_power(True, seq=11).hex(),
+        },
     ]
     return {"cases": cases}
 

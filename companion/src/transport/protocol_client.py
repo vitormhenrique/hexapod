@@ -383,6 +383,9 @@ class ProtocolClient:
     def dxl_torque(self, on: bool) -> Optional[api.DxlJobResult]:
         return self.dxl_run(api.build_dxl_torque(on))
 
+    def dxl_power(self, on: bool) -> Optional[api.DxlJobResult]:
+        return self.dxl_run(api.build_dxl_power(on))
+
     def dxl_get_param(self, servo_id: int, param: int) -> Optional[api.DxlJobResult]:
         return self.dxl_run(api.build_dxl_get_param(servo_id, param))
 

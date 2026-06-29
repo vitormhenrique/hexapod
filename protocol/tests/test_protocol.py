@@ -593,6 +593,7 @@ _DXL_BUILDERS = {
     "dxl_write_register": lambda: api.build_dxl_write_register(
         5, 6, 2, 100, is_eeprom=True, seq=10
     ),
+    "dxl_power": lambda: api.build_dxl_power(True, seq=11),
 }
 
 
@@ -633,6 +634,24 @@ def test_parse_dxl_result_pending_and_scan():
 def test_parse_dxl_result_not_found():
     nf = api.parse_dxl_result(bytes([api.DXL_SLOT_DONE, api.DXL_CODE_NOT_FOUND, 0]))
     assert nf.done and nf.code == api.DXL_CODE_NOT_FOUND and nf.servos() == []
+
+
+def test_parse_dxl_power_result():
+    # A DONE DXL_POWER result: [power_on(1), has_control(1)].
+    data = bytes([1, 1])
+    done = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, len(data)]) + data
+    )
+    pr = done.power()
+    assert pr is not None and pr.power_on and pr.has_control
+    off = api.parse_dxl_result(
+        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, 2, 0, 1])
+    )
+    pr_off = off.power()
+    assert pr_off is not None and not pr_off.power_on and pr_off.has_control
+    # Not-yet-DONE slot yields no decode.
+    pend = api.parse_dxl_result(bytes([api.DXL_SLOT_PENDING, api.DXL_CODE_OK, 0]))
+    assert pend.power() is None
 
 
 def test_parse_dxl_get_param_result():

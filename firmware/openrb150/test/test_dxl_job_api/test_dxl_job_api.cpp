@@ -518,6 +518,77 @@ void test_reset_clears_raw_register_flag() {
   TEST_ASSERT_FALSE(api_obj.rawRegisterEnabled());
 }
 
+// --- DXL power (4sa.1) ------------------------------------------------------
+
+void test_power_submit_accepted_and_parses_on() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  const uint8_t on[1] = {1};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kPower, on, 1, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  TEST_ASSERT_EQUAL(0, out_flags);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::Power),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(1, job.arg0);
+}
+
+void test_power_submit_parses_off() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  const uint8_t off[1] = {0};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kPower, off, 1, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Accepted), out[0]);
+  DxlJobRequest job;
+  uint8_t got_id = 0;
+  TEST_ASSERT_TRUE(api_obj.queue().claim(job, got_id));
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Type::Power),
+                    static_cast<int>(job.type));
+  TEST_ASSERT_EQUAL(0, job.arg0);
+}
+
+void test_power_submit_rejected_when_not_in_maintenance() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kDisarmed, true);  // wrong state, lock irrelevant
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  const uint8_t on[1] = {1};
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kPower, on, 1, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::Rejected), out[0]);
+  TEST_ASSERT_EQUAL(kErrorFlag, out_flags);
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Slot::Empty),
+                    static_cast<int>(api_obj.queue().slotState()));
+}
+
+void test_power_bad_request_empty_payload() {
+  DxlJobApi api_obj;
+  api_obj.reset();
+  api_obj.setLiveState(kMacMaintenance, true);
+  uint8_t out[kMaxPayload];
+  uint16_t out_len = 0;
+  uint8_t out_flags = 0;
+  TEST_ASSERT_TRUE(runDxl(api_obj, dxlmsg::kPower, nullptr, 0, out, &out_len,
+                          &out_flags));
+  TEST_ASSERT_EQUAL(static_cast<int>(DxlSubmit::BadRequest), out[0]);
+  TEST_ASSERT_EQUAL(static_cast<int>(dxljob::Slot::Empty),
+                    static_cast<int>(api_obj.queue().slotState()));
+}
+
 void test_handle_declines_out_of_range() {
   DxlJobApi api_obj;
   api_obj.reset();
@@ -556,6 +627,10 @@ int main(int, char**) {
   RUN_TEST(test_read_register_submit_when_enabled);
   RUN_TEST(test_write_register_submit_when_enabled);
   RUN_TEST(test_reset_clears_raw_register_flag);
+  RUN_TEST(test_power_submit_accepted_and_parses_on);
+  RUN_TEST(test_power_submit_parses_off);
+  RUN_TEST(test_power_submit_rejected_when_not_in_maintenance);
+  RUN_TEST(test_power_bad_request_empty_payload);
   RUN_TEST(test_handle_declines_out_of_range);
   return UNITY_END();
 }

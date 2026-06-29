@@ -290,6 +290,19 @@ bool DxlJobApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
       job.arg1 = req[8];                                         // flags
       break;
     }
+    case dxlmsg::kPower: {
+      // [on(0/1)]; toggles the DXL power FET. The executor (dxlTask) owns the
+      // board power line, so the toggle runs there. Maintenance-gated like every
+      // other submit (gateOpen() already enforced above), so power can only be
+      // energized while the bench maintenance lock is held.
+      if (req_len < 1) {
+        return writeSubmit(DxlSubmit::BadRequest, 0, dxljob::Slot::Empty, out,
+                           out_cap, out_len, out_flags);
+      }
+      job.type = dxljob::Type::Power;
+      job.arg0 = (req[0] != 0) ? 1 : 0;
+      break;
+    }
     default:
       // An unassigned id inside the reserved DXL block: decline so the
       // dispatcher falls through to UnknownMsg.

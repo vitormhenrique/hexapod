@@ -866,6 +866,25 @@ void runQueuedDxlJob() {
   uint8_t len = 0;
   protocol::dxljob::Code code = protocol::dxljob::Code::Ok;
 
+  // The DXL power toggle is the one job allowed to run with power off: it owns
+  // the power FET (board:: HAL). Handle it before the power-on gate below.
+  // dxlTask is the sole owner of the board power line, so the toggle must run
+  // here, never in apiTask. Result payload: [power_on(1), has_control(1)].
+  if (job.type == protocol::dxljob::Type::Power) {
+    if (!board::hasDxlPowerControl()) {
+      // No software-controlled FET on this build (e.g. mkrzero fallback).
+      g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::Unsupported,
+                                   nullptr, 0);
+      return;
+    }
+    board::setDxlPower(job.arg0 != 0);
+    uint8_t pd[2];
+    pd[0] = board::dxlPowerEnabled() ? 1 : 0;
+    pd[1] = board::hasDxlPowerControl() ? 1 : 0;
+    g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::Ok, pd, 2);
+    return;
+  }
+
   const bool power_on = board::dxlPowerEnabled();
   if (!power_on && job.type != protocol::dxljob::Type::None) {
     g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::PowerOff,
@@ -1099,6 +1118,19 @@ void dxlTask(void*) {
     // result. Running one job per loop keeps the present-position streaming
     // below responsive and bounds the per-cycle bus time.
     runQueuedDxlJob();
+
+    // Safety force-off (4sa.1): DXL power may only be energized during
+    // MacMaintenance -- the sole state in which the power-enable command is
+    // accepted (the arbiter grants the maintenance lock only while not killed
+    // and not armed). The instant the robot leaves maintenance -- lock release
+    // or expiry, disarm, RC kill / host estop, or a fault -- cut DXL power so
+    // every servo is de-energized. board:: caches the FET state, so this is at
+    // most one digitalWrite per transition; it is a no-op on builds without a
+    // software power FET (board::dxlPowerEnabled() stays false there).
+    if (board::dxlPowerEnabled() &&
+        g_safetyState != static_cast<uint8_t>(safety::State::MacMaintenance)) {
+      board::setDxlPower(false);
+    }
 
     // Enforce the safety gate at the bus level: the instant motion is no longer
     // permitted (RC kill, host estop, disarm, fault, or a non-motion state),
