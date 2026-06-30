@@ -124,7 +124,9 @@ class ControlStateTelemetry:
 
     @property
     def source_name(self) -> str:
-        return COMMAND_SOURCE_NAMES.get(self.command_source, f"0x{self.command_source:02X}")
+        return COMMAND_SOURCE_NAMES.get(
+            self.command_source, f"0x{self.command_source:02X}"
+        )
 
     @property
     def state_name(self) -> str:
@@ -444,9 +446,7 @@ def decode_leg_state(p: bytes) -> LegStateTelemetry:
         y = struct.unpack_from("<h", p, off + 3)[0]
         z = struct.unpack_from("<h", p, off + 5)[0]
         flags = p[off + 7]
-        legs.append(
-            LegTarget(leg, x, y, z, bool(flags & 0x01), bool(flags & 0x02))
-        )
+        legs.append(LegTarget(leg, x, y, z, bool(flags & 0x01), bool(flags & 0x02)))
         off += 8
     return LegStateTelemetry(legs)
 

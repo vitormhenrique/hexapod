@@ -231,6 +231,64 @@ void test_stand_is_not_reach_limited() {
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 
+// oha.3: a non-neutral body pose shifts/tilts the body over planted (Stand)
+// feet, changing the solved goal ticks vs the neutral stance -- this is the
+// "move the core without moving the legs" path. A modest pose stays reachable.
+void test_body_pose_moves_core_over_planted_feet() {
+  RobotConfig cfg = defaultCfg();
+
+  GaitPipeline neutral(cfg);
+  neutral.setGait(GaitId::Stand);
+  PipelineOutput z;
+  neutral.update(20, z);
+
+  GaitPipeline posed(cfg);
+  posed.setGait(GaitId::Stand);
+  BodyPose pose;
+  pose.z_mm = -10.0f;    // lower body (retracts legs -> stays reachable)
+  pose.roll = 0.05f;     // gentle roll (~2.9 deg)
+  posed.setBodyPose(pose);
+  PipelineOutput p;
+  posed.update(20, p);
+
+  TEST_ASSERT_EQUAL_UINT8(z.count, p.count);
+  TEST_ASSERT_FALSE(p.any_unreachable);
+  bool changed = false;
+  for (uint8_t i = 0; i < z.count; ++i) {
+    if (z.joints[i].tick != p.joints[i].tick) changed = true;
+  }
+  TEST_ASSERT_TRUE(changed);
+}
+
+// oha.3: setting a body pose then clearing it back to neutral restores the
+// normal walking path (identical goals to never having posed).
+void test_body_pose_neutral_restores_walk_path() {
+  RobotConfig cfg = defaultCfg();
+
+  GaitPipeline ref(cfg);
+  ref.setGait(GaitId::Stand);
+  PipelineOutput want;
+  ref.update(20, want);
+
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  BodyPose pose;
+  pose.y_mm = 15.0f;
+  pose.roll = 0.1f;
+  pipe.setBodyPose(pose);
+  PipelineOutput posed;
+  pipe.update(20, posed);
+  // Now clear back to neutral.
+  pipe.setBodyPose(BodyPose{});
+  PipelineOutput cleared;
+  pipe.update(20, cleared);
+
+  TEST_ASSERT_EQUAL_UINT8(want.count, cleared.count);
+  for (uint8_t i = 0; i < want.count; ++i) {
+    TEST_ASSERT_EQUAL_UINT16(want.joints[i].tick, cleared.joints[i].tick);
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
@@ -242,5 +300,7 @@ int main(int, char**) {
   RUN_TEST(test_reconfigure_rebuilds_cached_body_ik);
   RUN_TEST(test_large_stride_is_reach_limited_not_unreachable);
   RUN_TEST(test_stand_is_not_reach_limited);
+  RUN_TEST(test_body_pose_moves_core_over_planted_feet);
+  RUN_TEST(test_body_pose_neutral_restores_walk_path);
   return UNITY_END();
 }

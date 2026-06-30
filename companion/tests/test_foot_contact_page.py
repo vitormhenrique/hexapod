@@ -36,8 +36,10 @@ def test_table_has_one_row_per_foot(qtbot) -> None:
 
 def test_contact_state_updates_table(qtbot) -> None:
     service, page = _make_page(qtbot)
-    feet = [tlm.FootContact(state=i % 7, confidence=10 * i, pressure_delta=i)
-            for i in range(tlm.NUM_FEET)]
+    feet = [
+        tlm.FootContact(state=i % 7, confidence=10 * i, pressure_delta=i)
+        for i in range(tlm.NUM_FEET)
+    ]
     service.telemetry.emit(
         int(tlm.StreamId.CONTACT_STATE), tlm.ContactStateTelemetry(feet=feet)
     )
@@ -48,8 +50,10 @@ def test_contact_state_updates_table(qtbot) -> None:
 
 def test_i2c_raw_updates_table(qtbot) -> None:
     service, page = _make_page(qtbot)
-    feet = [tlm.FootRaw(proximity=100 + i, pressure_raw=200 + i)
-            for i in range(tlm.NUM_FEET)]
+    feet = [
+        tlm.FootRaw(proximity=100 + i, pressure_raw=200 + i)
+        for i in range(tlm.NUM_FEET)
+    ]
     service.telemetry.emit(
         int(tlm.StreamId.I2C_SENSORS_RAW), tlm.I2cSensorsRawTelemetry(feet=feet)
     )

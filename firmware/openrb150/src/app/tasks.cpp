@@ -11,6 +11,7 @@
 #include "../dxl/dxl_params.h"
 #include "../dxl/servo_map.h"
 #include "../gait/gait_pipeline.h"
+#include "../input/controller_bridge.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
@@ -59,6 +60,14 @@ volatile uint8_t g_servoStatusCount = 0;
 // CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial2).
 crsf::Parser g_crsfParser;
 crsf::RcStatus g_rcStatus;
+
+// Controller bridge (oha.2/oha.3): decodes the ChannelPack CRSF frame into a
+// high-level ControllerCommand (modes, twist, body pose, gait, shape, tricks,
+// arm/estop, feature requests). rcTask is the sole writer; controlTask reads a
+// copy of the published snapshot each cycle. The derived RcStatus above feeds
+// the existing safety FSM / arbiter / telemetry plumbing unchanged.
+controller::ControllerBridge g_bridge;
+controller::ControllerCommand g_ctrlCmd;
 
 // Command-source arbiter (RC / Jetson / Mac). controlTask evaluates it each
 // cycle from the RC snapshot; apiTask feeds Jetson heartbeats, the Mac
@@ -522,6 +531,28 @@ config::GaitId rcGaitToId(uint8_t gait_index) {
   return kMap[gait_index];
 }
 
+// Project the decoded ControllerCommand onto the legacy RcStatus the safety
+// FSM / arbiter / rc_input telemetry still consume (oha.3). The bridge is the
+// single decoder of truth; this keeps the rest of the safety plumbing working
+// without re-plumbing it. channels_us is refreshed (for the rc_input telemetry)
+// only on a fresh frame so a dropped link does not zero the last-known sticks.
+void deriveRcStatus(const controller::ControllerCommand& cc,
+                    const crsf::ChannelData& frame, bool fresh, uint32_t now_ms,
+                    crsf::RcStatus& rc) {
+  if (fresh) {
+    for (uint8_t i = 0; i < crsf::kNumChannels; ++i) {
+      rc.channels_us[i] = crsf::ticksToMicros(frame.channels[i]);
+    }
+    rc.last_frame_ms = now_ms;
+  }
+  rc.armed = cc.arm_request;       // SW_A (and not failsafe; bridge clears it)
+  rc.kill = cc.estop;              // SW_B kill / failsafe
+  rc.gait_index = cc.gait_index;   // SW_F 3-pos
+  rc.autonomy = cc.host_authority; // SW_H grants host/Jetson authority
+  rc.failsafe = cc.failsafe;
+  rc.ever_seen = cc.ever_seen;
+}
+
 void controlTask(void*) {
   TickType_t next = xTaskGetTickCount();
   g_stateMachine.reset();
@@ -722,20 +753,56 @@ void controlTask(void*) {
       float eff_vx = intent.twist_vx;
       float eff_vy = intent.twist_vy;
       float eff_wz = intent.twist_wz;
+      gait::BodyPose body_pose;  // neutral unless an RC body mode is active
       if (rc_drives) {
-        eff_gait = static_cast<uint8_t>(rcGaitToId(g_rcStatus.gait_index));
-        eff_vx = crsf::stickToUnit(g_rcStatus.channels_us[crsf::kChPitch]);  // fwd
-        eff_vy = crsf::stickToUnit(g_rcStatus.channels_us[crsf::kChRoll]);   // lat
-        eff_wz = crsf::stickToUnit(g_rcStatus.channels_us[crsf::kChYaw]);    // yaw
-      }
-
-      // Re-seed shape params when the host intent changes (RC reuses them).
-      if (intent.seq != applied_intent_seq) {
+        // The controller bridge is the RC command source (oha.3). Snapshot it
+        // once so a mid-cycle rcTask write cannot tear the read.
+        const controller::ControllerCommand cc = g_ctrlCmd;
+        if (cc.mode == controller::ControlMode::Walk) {
+          // WALK: gimbals -> gait body twist, SW_F selects the gait family.
+          eff_gait = static_cast<uint8_t>(rcGaitToId(cc.gait_index));
+          eff_vx = cc.twist_vx;  // forward/back
+          eff_vy = cc.twist_vy;  // lateral
+          eff_wz = cc.twist_wz;  // yaw
+        } else {
+          // TRANSLATE/ROTATE-BODY: feet planted (Stand) and the core moves via
+          // a body pose offset -- "move the core without moving the legs".
+          eff_gait = static_cast<uint8_t>(config::GaitId::Stand);
+          eff_vx = eff_vy = eff_wz = 0.0f;
+          body_pose.x_mm = cc.pose_x_mm;
+          body_pose.y_mm = cc.pose_y_mm;
+          body_pose.z_mm = cc.pose_z_mm;
+          body_pose.roll = cc.pose_roll;
+          body_pose.pitch = cc.pose_pitch;
+          body_pose.yaw = cc.pose_yaw;
+        }
+        // NAV1 pose trim adds a persistent lean on top of any RC mode.
+        body_pose.roll += cc.trim_roll;
+        body_pose.pitch += cc.trim_pitch;
+        // RC knobs drive the gait shape live (POT1 speed, POT2 body height,
+        // ENC1 stride, ENC2 step height). Map the bridge 0..1 scalars onto the
+        // config-validated safe ranges; duty stays on the host/config value.
+        const uint16_t bh = static_cast<uint16_t>(
+            config::kMinGaitBodyHeightMm +
+            cc.body_height *
+                (config::kMaxGaitBodyHeightMm - config::kMinGaitBodyHeightMm));
+        const uint16_t st =
+            static_cast<uint16_t>(cc.stride * config::kMaxGaitStrideMm);
+        const uint16_t sh =
+            static_cast<uint16_t>(cc.step_height * config::kMaxGaitStepMm);
+        const uint8_t sp = static_cast<uint8_t>(cc.speed * 255.0f);
+        g_pipeline.setParams(bh, st, sh, intent.duty_x255, sp);
+        applied_intent_seq = 0xFFFFFFFFu;  // force host re-seed when RC yields
+      } else if (intent.seq != applied_intent_seq) {
+        // Host (Mac/Jetson) drives: re-seed shape params when its intent changes.
         g_pipeline.setParams(intent.body_height_mm, intent.stride_len_mm,
                              intent.step_height_mm, intent.duty_x255,
                              intent.speed_x255);
         applied_intent_seq = intent.seq;
       }
+
+      // Apply the body pose every cycle (neutral restores the normal walk path).
+      g_pipeline.setBodyPose(body_pose);
       // Apply the gait only when it actually changes (avoid per-cycle churn).
       if (eff_gait != applied_gait) {
         g_pipeline.setGait(static_cast<config::GaitId>(eff_gait));
@@ -1271,6 +1338,7 @@ void dxlTask(void*) {
 
 void rcTask(void*) {
   crsf::initRcStatus(g_rcStatus);
+  g_bridge.reset();
 #if defined(PIN_SERIAL2_RX)
   // Serial2 is the ExpressLRS CRSF receiver link; rcTask owns it exclusively.
   Serial2.begin(kCrsfBaud);
@@ -1280,17 +1348,25 @@ void rcTask(void*) {
     tick(watchdog::TaskId::Rc);
     const uint32_t now_ms =
         static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
-#if defined(PIN_SERIAL2_RX)
     crsf::ChannelData frame;
+    bool fresh = false;
+#if defined(PIN_SERIAL2_RX)
     while (Serial2.available() > 0) {
       const uint8_t b = static_cast<uint8_t>(Serial2.read());
       if (g_crsfParser.push(b, frame)) {
-        crsf::applyFrame(g_rcStatus, frame, now_ms);
+        // Feed the raw 11-bit ChannelPack ticks to the bridge decoder.
+        g_bridge.update(frame.channels, /*link_up=*/true, now_ms);
+        fresh = true;
       }
     }
 #endif
-    // Raise failsafe if no valid RC frame has arrived within the timeout.
-    crsf::evaluateFailsafe(g_rcStatus, now_ms);
+    // Trip failsafe if no fresh frame arrived within the timeout (or the link
+    // has never been seen) -- forces a safe disarmed/estop hold.
+    g_bridge.evaluateFailsafe(now_ms);
+    // Publish the decoded command snapshot for controlTask and derive the
+    // legacy RcStatus the safety FSM / arbiter / telemetry consume.
+    g_ctrlCmd = g_bridge.command();
+    deriveRcStatus(g_ctrlCmd, frame, fresh, now_ms, g_rcStatus);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kRc));
   }
 }

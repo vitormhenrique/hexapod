@@ -167,9 +167,7 @@ def test_hello_response_surfaces_firmware_version():
     # version can detect the mismatch from the handshake.
     fw_major, fw_minor = VERSION_MAJOR + 3, VERSION_MINOR + 1
     payload = bytes([fw_major, fw_minor, 0, 1, 0]) + b"HexNav\x00"
-    resp = Header(
-        msg_type=int(MsgType.RESPONSE), msg_id=api.MSG_HELLO, seq=1
-    )
+    resp = Header(msg_type=int(MsgType.RESPONSE), msg_id=api.MSG_HELLO, seq=1)
     wire = encode_frame(resp, payload)
     header, body = decode_frame_body(wire[1:-1])
     info = api.parse_hello(body)
@@ -396,10 +394,10 @@ def test_feature_request_golden(case):
 
 def test_parse_feature_list():
     # FEATURE_GET layout: [state, count, {id, available, enabled, reason} x count]
-    payload = bytes([2, 2]) + bytes(
-        [api.FEATURE_FOOT_CONTACT, 1, 1, api.FEATURE_REASON_NONE]
-    ) + bytes(
-        [api.FEATURE_TERRAIN_LEVELING, 0, 0, api.FEATURE_REASON_DEPENDENCY_OFF]
+    payload = (
+        bytes([2, 2])
+        + bytes([api.FEATURE_FOOT_CONTACT, 1, 1, api.FEATURE_REASON_NONE])
+        + bytes([api.FEATURE_TERRAIN_LEVELING, 0, 0, api.FEATURE_REASON_DEPENDENCY_OFF])
     )
     fl = api.parse_feature_list(payload)
     assert fl.state == 2 and len(fl.features) == 2
@@ -421,9 +419,11 @@ def test_parse_feature_list_reset_layout():
 
 
 def test_parse_feature_reasons():
-    payload = bytes([4, 2]) + bytes(
-        [api.FEATURE_FOOT_CONTACT, api.FEATURE_REASON_HARDWARE_MISSING]
-    ) + bytes([api.FEATURE_PASSIVE_POSE, api.FEATURE_REASON_NOT_IMPLEMENTED])
+    payload = (
+        bytes([4, 2])
+        + bytes([api.FEATURE_FOOT_CONTACT, api.FEATURE_REASON_HARDWARE_MISSING])
+        + bytes([api.FEATURE_PASSIVE_POSE, api.FEATURE_REASON_NOT_IMPLEMENTED])
+    )
     fr = api.parse_feature_reasons(payload)
     assert fr.state == 4 and len(fr.reasons) == 2
     assert fr.reasons[0].feature == api.FEATURE_FOOT_CONTACT
@@ -432,7 +432,9 @@ def test_parse_feature_reasons():
 
 def test_parse_feature_set_result():
     ok = api.parse_feature_set_result(
-        bytes([api.FEATURE_OK, 2, api.FEATURE_FOOT_CONTACT, 1, 1, api.FEATURE_REASON_NONE])
+        bytes(
+            [api.FEATURE_OK, 2, api.FEATURE_FOOT_CONTACT, 1, 1, api.FEATURE_REASON_NONE]
+        )
     )
     assert ok.ok and ok.feature == api.FEATURE_FOOT_CONTACT and ok.enabled
     rej = api.parse_feature_set_result(
@@ -695,9 +697,7 @@ def test_parse_dxl_power_result():
     )
     pr = done.power()
     assert pr is not None and pr.power_on and pr.has_control
-    off = api.parse_dxl_result(
-        bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, 2, 0, 1])
-    )
+    off = api.parse_dxl_result(bytes([api.DXL_SLOT_DONE, api.DXL_CODE_OK, 2, 0, 1]))
     pr_off = off.power()
     assert pr_off is not None and not pr_off.power_on and pr_off.has_control
     # Not-yet-DONE slot yields no decode.
@@ -769,9 +769,12 @@ def test_parse_dxl_read_register_result():
     assert rv is not None
     assert rv.address == 36 and rv.length == 2 and rv.value == 2048
     # Pending result yields no decode.
-    assert api.parse_dxl_result(
-        bytes([api.DXL_SLOT_PENDING, api.DXL_CODE_OK, 0])
-    ).read_register() is None
+    assert (
+        api.parse_dxl_result(
+            bytes([api.DXL_SLOT_PENDING, api.DXL_CODE_OK, 0])
+        ).read_register()
+        is None
+    )
 
 
 def test_parse_dxl_write_register_result():
@@ -1057,7 +1060,9 @@ def test_tick_to_angle_golden(case):
 def test_angle_to_tick_golden(case):
     cfg = cfgmod.default_robot_config()
     smap = cfgmod.ServoMap(cfg)
-    cmd = smap.angle_to_tick(case["leg"], case["joint"], case["angle_deg"] * cfgmod.DEG_TO_RAD)
+    cmd = smap.angle_to_tick(
+        case["leg"], case["joint"], case["angle_deg"] * cfgmod.DEG_TO_RAD
+    )
     assert cmd.tick == case["tick"]
     assert cmd.clamped_low == case["clamped_low"]
     assert cmd.clamped_high == case["clamped_high"]
@@ -1086,7 +1091,12 @@ def test_servo_map_lookup_and_unmapped():
 
 def test_config_summary_decode():
     payload = (
-        struct.pack("<HHH", cfgmod.SCHEMA_VERSION, cfgmod.CONFIG_PAYLOAD_SIZE, cfgmod.CFG_BLOCK_MAX)
+        struct.pack(
+            "<HHH",
+            cfgmod.SCHEMA_VERSION,
+            cfgmod.CONFIG_PAYLOAD_SIZE,
+            cfgmod.CFG_BLOCK_MAX,
+        )
         + bytes([0x03])  # persistent + staged valid
         + struct.pack("<I", cfgmod.FEAT_SENSOR_POLLING)
         + b"HexNav".ljust(cfgmod.ROBOT_NAME_LEN, b"\x00")
@@ -1159,6 +1169,7 @@ def test_servo_status_fallback_clamps_out_of_range_ticks():
     )
     joints = cfgmod.servo_status_to_joint_angles(cfg, status)
     # Clamped to 4095 -> same as tick_to_angle(servo, 4095).
-    expected = round(cfgmod.tick_to_angle(cfg.servos[0], 4095) * cfgmod.RAD_TO_DEG * 100)
+    expected = round(
+        cfgmod.tick_to_angle(cfg.servos[0], 4095) * cfgmod.RAD_TO_DEG * 100
+    )
     assert joints[0].angle_centideg == expected
-

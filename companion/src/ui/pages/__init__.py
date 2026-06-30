@@ -492,9 +492,7 @@ class ModeSafetyPage(BasePage):
         elif res.ok:
             self.lock_lbl.setText("Maintenance lock: none")
         else:
-            self.lock_lbl.setText(
-                f"Maintenance lock: rejected (result {res.result})"
-            )
+            self.lock_lbl.setText(f"Maintenance lock: rejected (result {res.result})")
 
     def _on_control_result(self, kind: str, res) -> None:
         state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
@@ -727,7 +725,16 @@ class ServoTuningPage(BasePage):
         api.DXL_PARAM_STATUS_RETURN_LEVEL,
     }
 
-    COLUMNS = ["ID", "Position", "Velocity", "Load", "Voltage", "Temp", "Error", "Torque"]
+    COLUMNS = [
+        "ID",
+        "Position",
+        "Velocity",
+        "Load",
+        "Voltage",
+        "Temp",
+        "Error",
+        "Torque",
+    ]
     INT32_MIN = -(2**31)
     INT32_MAX = 2**31 - 1
 
@@ -943,7 +950,9 @@ class ServoTuningPage(BasePage):
             servo = self._servo_map.servo_for(g.leg, g.joint)
             if servo is None:
                 continue
-            cmd = self._servo_map.angle_to_tick(g.leg, g.joint, g.angle_deg * 3.141592653589793 / 180.0)
+            cmd = self._servo_map.angle_to_tick(
+                g.leg, g.joint, g.angle_deg * 3.141592653589793 / 180.0
+            )
             self._goal_ticks[servo.id] = cmd.tick
             if self.detail.servo_id == servo.id:
                 self.detail.set_target_tick(cmd.tick)

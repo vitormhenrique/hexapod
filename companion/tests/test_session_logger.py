@@ -26,8 +26,9 @@ def test_session_roundtrip(tmp_path) -> None:
     frame = make_telemetry(int(tlm.StreamId.HEALTH), _health_payload())
     record = tlm.decode_stream(int(tlm.StreamId.HEALTH), _health_payload())
 
-    with SessionLogger(out_dir=tmp_path, robot_name="hex",
-                       firmware={"version": "0.1"}) as logger:
+    with SessionLogger(
+        out_dir=tmp_path, robot_name="hex", firmware={"version": "0.1"}
+    ) as logger:
         session_dir = logger.dir
         logger.log_raw_frame(frame)
         logger.log_record("health", record, robot_time_ms=1234)

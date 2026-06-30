@@ -126,12 +126,8 @@ def test_servo_status_fallback_matches_joint_state_path() -> None:
     m_ref = HexapodPoseModel(config)
     m_ref.update_from_joint_state(tlm.JointStateTelemetry(joints=joints))
 
-    assert math.isclose(
-        m_fallback.leg(4).foot.x, m_ref.leg(4).foot.x, abs_tol=1e-9
-    )
-    assert math.isclose(
-        m_fallback.leg(4).foot.z, m_ref.leg(4).foot.z, abs_tol=1e-9
-    )
+    assert math.isclose(m_fallback.leg(4).foot.x, m_ref.leg(4).foot.x, abs_tol=1e-9)
+    assert math.isclose(m_fallback.leg(4).foot.z, m_ref.leg(4).foot.z, abs_tol=1e-9)
 
 
 def test_out_of_range_indices_are_ignored() -> None:

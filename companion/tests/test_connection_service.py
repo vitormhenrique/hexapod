@@ -246,4 +246,3 @@ def test_reconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None:
     assert service.is_connected
     assert len(streams) == 2
     service.disconnect()
-

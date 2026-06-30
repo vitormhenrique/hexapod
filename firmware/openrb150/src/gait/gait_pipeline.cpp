@@ -45,6 +45,12 @@ void GaitPipeline::setTwist(float vx, float vy, float wz) {
   engine_.setTwist(t);
 }
 
+void GaitPipeline::setBodyPose(const BodyPose& pose) {
+  pose_ = pose;
+  apply_pose_ = (pose.x_mm != 0.0f || pose.y_mm != 0.0f || pose.z_mm != 0.0f ||
+                 pose.roll != 0.0f || pose.pitch != 0.0f || pose.yaw != 0.0f);
+}
+
 void GaitPipeline::resetPhase() { engine_.reset(); }
 
 void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
@@ -56,11 +62,20 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
   out.any_reach_limited = false;
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
     const FootTarget& f = feet.feet[leg];
-    bool reach_limited = false;
-    const IkResult ik =
-        body_.solveBodyLimited(leg, f.x_mm, f.y_mm, f.z_mm, reach_limited);
-    if (reach_limited) {
-      out.any_reach_limited = true;
+    IkResult ik;
+    if (apply_pose_) {
+      // Body-pose mode: the gait foot target is treated as a world-fixed
+      // foothold and re-expressed in the moved body frame, so the body shifts
+      // and tilts over planted feet (oha.3). The pose is already clamped to a
+      // safe envelope by the caller, so no reach-margin pull-in is applied;
+      // unreachable targets are still reported.
+      ik = body_.solveBodyPose(leg, pose_, f.x_mm, f.y_mm, f.z_mm);
+    } else {
+      bool reach_limited = false;
+      ik = body_.solveBodyLimited(leg, f.x_mm, f.y_mm, f.z_mm, reach_limited);
+      if (reach_limited) {
+        out.any_reach_limited = true;
+      }
     }
     if (!ik.reachable) {
       out.any_unreachable = true;

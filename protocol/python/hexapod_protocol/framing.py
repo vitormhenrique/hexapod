@@ -146,4 +146,3 @@ def version_compatible(proto_major: int, proto_minor: int) -> bool:
     """
     del proto_minor  # reserved for future minor-based gating; major gates today
     return proto_major == VERSION_MAJOR
-

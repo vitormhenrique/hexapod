@@ -206,7 +206,9 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
         servos.append(ServoConfig(sid, leg, joint, sign, trim, mn, mx))
         o += 10
 
-    body_h, stride, step_h, duty, speed, gait = struct.unpack_from("<HHHBBB", payload, o)
+    body_h, stride, step_h, duty, speed, gait = struct.unpack_from(
+        "<HHHBBB", payload, o
+    )
     o += 9
     gait_defaults = GaitDefaults(body_h, stride, step_h, duty, speed, gait)
 
@@ -242,25 +244,52 @@ def encode_robot_config(cfg: RobotConfig) -> bytes:
     out += struct.pack("<H", cfg.schema_version)
     name = cfg.robot_name.encode("ascii")[: ROBOT_NAME_LEN - 1]
     out += name + b"\x00" * (ROBOT_NAME_LEN - len(name))
-    out += struct.pack("<HHH", cfg.links.coxa_cmm, cfg.links.femur_cmm, cfg.links.tibia_cmm)
     out += struct.pack(
-        "<HhH", cfg.geometry.home_radius_cmm, cfg.geometry.home_foot_z_cmm, cfg.geometry.coxa_lift_cmm
+        "<HHH", cfg.links.coxa_cmm, cfg.links.femur_cmm, cfg.links.tibia_cmm
+    )
+    out += struct.pack(
+        "<HhH",
+        cfg.geometry.home_radius_cmm,
+        cfg.geometry.home_foot_z_cmm,
+        cfg.geometry.coxa_lift_cmm,
     )
     for leg in cfg.legs:
         out += struct.pack(
-            "<hhhh", leg.mount_x_dmm, leg.mount_y_dmm, leg.mount_z_dmm, leg.mount_yaw_cdeg
+            "<hhhh",
+            leg.mount_x_dmm,
+            leg.mount_y_dmm,
+            leg.mount_z_dmm,
+            leg.mount_yaw_cdeg,
         )
     for s in cfg.servos:
         out += struct.pack(
-            "<BBBbhHH", s.id, s.leg, s.joint, s.sign, s.trim_ticks, s.min_tick, s.max_tick
+            "<BBBbhHH",
+            s.id,
+            s.leg,
+            s.joint,
+            s.sign,
+            s.trim_ticks,
+            s.min_tick,
+            s.max_tick,
         )
     g = cfg.gait
     out += struct.pack(
-        "<HHHBBB", g.body_height_mm, g.stride_len_mm, g.step_height_mm, g.duty_x255, g.speed_x255, g.gait
+        "<HHHBBB",
+        g.body_height_mm,
+        g.stride_len_mm,
+        g.step_height_mm,
+        g.duty_x255,
+        g.speed_x255,
+        g.gait,
     )
     for foot in cfg.feet:
         out += struct.pack(
-            "<iHHHB", foot.pressure_baseline, foot.near_thresh, foot.touch_thresh, foot.load_thresh, foot.enabled
+            "<iHHHB",
+            foot.pressure_baseline,
+            foot.near_thresh,
+            foot.touch_thresh,
+            foot.load_thresh,
+            foot.enabled,
         )
     out += struct.pack("<I", cfg.feature_defaults)
     return bytes(out)
@@ -287,7 +316,9 @@ def default_robot_config() -> RobotConfig:
     cfg.links = LinkLengths(coxa_cmm=5608, femur_cmm=6651, tibia_cmm=2486)
     # Reference stance geometry (0.01 mm); mirrors gait::kHomeRadiusMm 127.0,
     # kHomeFootZMm -44.55, kCoxaLiftMm 21.0.
-    cfg.geometry = BodyGeometry(home_radius_cmm=12700, home_foot_z_cmm=-4455, coxa_lift_cmm=2100)
+    cfg.geometry = BodyGeometry(
+        home_radius_cmm=12700, home_foot_z_cmm=-4455, coxa_lift_cmm=2100
+    )
     cfg.legs = [LegGeometry(*seed) for seed in _LEG_SEEDS]
     cfg.servos = []
     for i in range(NUM_SERVOS):
@@ -305,7 +336,12 @@ def default_robot_config() -> RobotConfig:
             )
         )
     cfg.gait = GaitDefaults(
-        body_height_mm=40, stride_len_mm=60, step_height_mm=30, duty_x255=128, speed_x255=128, gait=0
+        body_height_mm=40,
+        stride_len_mm=60,
+        step_height_mm=30,
+        duty_x255=128,
+        speed_x255=128,
+        gait=0,
     )
     cfg.feet = [FootSensorCal() for _ in range(NUM_FOOT_SENSORS)]
     # Only sensor polling defaults on so present boards stream raw data; all

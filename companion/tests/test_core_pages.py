@@ -98,9 +98,7 @@ def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
     service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), servos)
     assert page.badges["dxl"]._value.text() == "1 servos"
 
-    i2c = tlm.I2cSensorsRawTelemetry(
-        feet=[tlm.FootRaw(proximity=10, pressure_raw=100)]
-    )
+    i2c = tlm.I2cSensorsRawTelemetry(feet=[tlm.FootRaw(proximity=10, pressure_raw=100)])
     service.telemetry.emit(int(tlm.StreamId.I2C_SENSORS_RAW), i2c)
     assert page.badges["i2c"]._value.text() == "1 sensors"
 

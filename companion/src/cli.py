@@ -85,8 +85,12 @@ def status(
         caps = client.get_capabilities()
         if caps:
             typer.echo(f"  feature_bits=0x{caps.feature_bits:08X}")
-            avail = [api.FEATURE_NAMES[i] for i in api.capability_features(caps.feature_bits)]
-            typer.echo(f"  features_available={', '.join(avail) if avail else '(none)'}")
+            avail = [
+                api.FEATURE_NAMES[i] for i in api.capability_features(caps.feature_bits)
+            ]
+            typer.echo(
+                f"  features_available={', '.join(avail) if avail else '(none)'}"
+            )
     finally:
         client.stop()
 

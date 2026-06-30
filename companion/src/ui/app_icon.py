@@ -48,9 +48,15 @@ def _render(size: int) -> QPixmap:
     p.setPen(leg_pen)
     for i in range(6):
         a = math.radians(30 + 60 * i)
-        knee = QPointF(cx + body_r * 1.25 * math.cos(a), cy + body_r * 1.25 * math.sin(a))
-        foot = QPointF(cx + body_r * 1.95 * math.cos(a), cy + body_r * 1.95 * math.sin(a))
-        hip = QPointF(cx + body_r * 0.85 * math.cos(a), cy + body_r * 0.85 * math.sin(a))
+        knee = QPointF(
+            cx + body_r * 1.25 * math.cos(a), cy + body_r * 1.25 * math.sin(a)
+        )
+        foot = QPointF(
+            cx + body_r * 1.95 * math.cos(a), cy + body_r * 1.95 * math.sin(a)
+        )
+        hip = QPointF(
+            cx + body_r * 0.85 * math.cos(a), cy + body_r * 0.85 * math.sin(a)
+        )
         p.drawLine(hip, knee)
         p.drawLine(knee, foot)
 

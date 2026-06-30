@@ -151,9 +151,7 @@ class ConnectionService(QObject):
         self._run_control("clear_fault", lambda c: c.clear_fault())
 
     def set_arming(self, arm: bool) -> None:
-        self._run_control(
-            "arm" if arm else "disarm", lambda c: c.set_arming(arm)
-        )
+        self._run_control("arm" if arm else "disarm", lambda c: c.set_arming(arm))
 
     def set_mode(self, mode: int) -> None:
         self._run_control("set_mode", lambda c: c.set_mode(mode))
@@ -445,9 +443,7 @@ class ConnectionService(QObject):
         client = self._client
         if client is None:
             return
-        threading.Thread(
-            target=lambda: client and call(client), daemon=True
-        ).start()
+        threading.Thread(target=lambda: client and call(client), daemon=True).start()
 
     # --- internal ---------------------------------------------------------
 

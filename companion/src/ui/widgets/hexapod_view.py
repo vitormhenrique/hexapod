@@ -55,12 +55,26 @@ class HexapodView(QWidget):
         for color in _LEG_COLORS:
             pen = pg.mkPen(color=color, width=3)
             self._top_lines.append(
-                self._top.plot([], [], pen=pen, symbol="o", symbolSize=6,
-                               symbolBrush=color, symbolPen=None)
+                self._top.plot(
+                    [],
+                    [],
+                    pen=pen,
+                    symbol="o",
+                    symbolSize=6,
+                    symbolBrush=color,
+                    symbolPen=None,
+                )
             )
             self._side_lines.append(
-                self._side.plot([], [], pen=pen, symbol="o", symbolSize=6,
-                                symbolBrush=color, symbolPen=None)
+                self._side.plot(
+                    [],
+                    [],
+                    pen=pen,
+                    symbol="o",
+                    symbolSize=6,
+                    symbolBrush=color,
+                    symbolPen=None,
+                )
             )
         self._top_body = self._top.plot(
             [], [], pen=pg.mkPen(color=_BODY, width=2, style=Qt.DashLine)
@@ -128,9 +142,5 @@ class HexapodView(QWidget):
         # Close the hip ring for a body outline in the top-down view.
         if hips_x:
             self._top_body.setData(hips_x + hips_x[:1], hips_y + hips_y[:1])
-        self._top_feet.setData(
-            [p[0] for p in feet_top], [p[1] for p in feet_top]
-        )
-        self._side_feet.setData(
-            [p[0] for p in feet_side], [p[1] for p in feet_side]
-        )
+        self._top_feet.setData([p[0] for p in feet_top], [p[1] for p in feet_top])
+        self._side_feet.setData([p[0] for p in feet_side], [p[1] for p in feet_side])

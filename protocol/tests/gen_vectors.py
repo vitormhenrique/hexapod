@@ -157,6 +157,8 @@ def build() -> dict:
         "config": build_config(),
         "config_cmds": build_config_cmds(),
     }
+
+
 def build_control() -> dict:
     """Deterministic request frames for the safety control command group.
 
@@ -689,7 +691,13 @@ def build_config() -> dict:
     # tick<->angle cases over a few default servos (sign +1 leg0, sign -1 leg1).
     smap = config_mod.ServoMap(cfg)
     tick_cases = []
-    for leg, joint, tick in [(0, 0, 2048), (0, 1, 2389), (1, 0, 2048), (1, 2, 1024), (4, 1, 3072)]:
+    for leg, joint, tick in [
+        (0, 0, 2048),
+        (0, 1, 2389),
+        (1, 0, 2048),
+        (1, 2, 1024),
+        (4, 1, 3072),
+    ]:
         s = smap.servo_for(leg, joint)
         ang = config_mod.tick_to_angle(s, tick)
         tick_cases.append(
@@ -703,7 +711,13 @@ def build_config() -> dict:
         )
 
     angle_cases = []
-    for leg, joint, deg in [(0, 0, 0.0), (0, 1, 30.0), (1, 0, -45.0), (1, 2, 200.0), (4, 1, -200.0)]:
+    for leg, joint, deg in [
+        (0, 0, 0.0),
+        (0, 1, 30.0),
+        (1, 0, -45.0),
+        (1, 2, 200.0),
+        (4, 1, -200.0),
+    ]:
         s = smap.servo_for(leg, joint)
         cmd = config_mod.angle_to_tick(s, deg * config_mod.DEG_TO_RAD)
         angle_cases.append(

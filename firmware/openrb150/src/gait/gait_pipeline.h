@@ -88,6 +88,16 @@ class GaitPipeline {
   // Set the normalised body twist (forward/lateral/yaw, each clamped to +/-1).
   void setTwist(float vx, float vy, float wz);
 
+  // Set a 6-DOF body pose offset applied to the (planted) stance feet so the
+  // body can translate/rotate over fixed footholds -- "move the core without
+  // moving the legs" (oha.3). A neutral (all-zero) pose restores the normal
+  // walking path (with reachability-aware stride limiting); a non-neutral pose
+  // re-expresses each gait foot target in the moved body frame via
+  // BodyKinematics::solveBodyPose. Translation in mm, rotation in radians; the
+  // caller is responsible for clamping to a safe envelope (the bridge clamps to
+  // controller::poselim, which mirrors protocol::motionlim).
+  void setBodyPose(const BodyPose& pose);
+
   // Reset the gait cycle phase to 0 (e.g. when motion is (re)authorised).
   void resetPhase();
 
@@ -102,6 +112,8 @@ class GaitPipeline {
   GaitEngine engine_;
   BodyKinematics body_;
   dxl::ServoMap map_;
+  BodyPose pose_;          // body offset applied to planted feet (oha.3)
+  bool apply_pose_ = false;  // true while pose_ is non-neutral
 };
 
 }  // namespace gait

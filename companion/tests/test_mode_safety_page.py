@@ -33,7 +33,9 @@ def test_feature_cards_reflect_feature_list(qtbot) -> None:
     fl = api.FeatureList(
         state=2,
         features=[
-            api.FeatureState(api.FEATURE_FOOT_CONTACT, True, True, api.FEATURE_REASON_NONE),
+            api.FeatureState(
+                api.FEATURE_FOOT_CONTACT, True, True, api.FEATURE_REASON_NONE
+            ),
             api.FeatureState(
                 api.FEATURE_TERRAIN_LEVELING,
                 False,

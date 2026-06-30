@@ -117,7 +117,9 @@ class FeatureToggleCard(QFrame):
         self._btn = QPushButton("Enable")
         self._btn.setCheckable(True)
         self._btn.setCursor(Qt.PointingHandCursor)
-        self._btn.clicked.connect(lambda checked: self.toggled.emit(self._feature, checked))
+        self._btn.clicked.connect(
+            lambda checked: self.toggled.emit(self._feature, checked)
+        )
         top.addWidget(self._btn)
         lay.addLayout(top)
 

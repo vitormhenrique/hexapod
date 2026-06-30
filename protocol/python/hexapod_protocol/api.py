@@ -135,6 +135,7 @@ def capability_features(feature_bits: int) -> list[int]:
     """
     return [i for i in range(FEATURE_COUNT) if feature_bits & (1 << i)]
 
+
 # Feature unavailability reason byte (mirrors protocol::FeatureReason).
 FEATURE_REASON_NONE = 0
 FEATURE_REASON_HARDWARE_MISSING = 1
@@ -922,9 +923,7 @@ def parse_leveling_params_result(payload: bytes) -> LevelingParamsResult:
     if len(payload) >= 7:
         max_tilt, rate, response = struct.unpack_from("<HHH", payload, 1)
         return LevelingParamsResult(payload[0], max_tilt, rate, response)
-    return LevelingParamsResult(
-        payload[0] if payload else SENSOR_BAD_REQUEST, 0, 0, 0
-    )
+    return LevelingParamsResult(payload[0] if payload else SENSOR_BAD_REQUEST, 0, 0, 0)
 
 
 # --- I2C scan / topology / sensor status / rate / calibrate (ubs.5.2) ------
@@ -1131,9 +1130,7 @@ def parse_sensor_calibrate_result(payload: bytes) -> SensorCalibrateResult:
     """Decode a calibrate response. A 1-byte payload is an error."""
     if len(payload) >= 2:
         return SensorCalibrateResult(payload[0], payload[1])
-    return SensorCalibrateResult(
-        payload[0] if payload else SENSOR_BAD_REQUEST, 0
-    )
+    return SensorCalibrateResult(payload[0] if payload else SENSOR_BAD_REQUEST, 0)
 
 
 # --- Passive pose streaming commands (ubs.6) ------------------------------
@@ -1218,7 +1215,6 @@ def parse_passive_rate_result(payload: bytes) -> PassiveRateResult:
 
 
 # --- Maintenance lock commands --------------------------------------------
-
 
 
 def build_enter_maintenance(seq: int = 0) -> bytes:
@@ -1458,9 +1454,7 @@ def build_dxl_read_register(
     return build_command(
         MSG_DXL_READ_REGISTER,
         seq=seq,
-        payload=struct.pack(
-            "<BHB", servo_id & 0xFF, address & 0xFFFF, length & 0xFF
-        ),
+        payload=struct.pack("<BHB", servo_id & 0xFF, address & 0xFFFF, length & 0xFF),
     )
 
 
@@ -1482,8 +1476,12 @@ def build_dxl_write_register(
         MSG_DXL_WRITE_REGISTER,
         seq=seq,
         payload=struct.pack(
-            "<BHBiB", servo_id & 0xFF, address & 0xFFFF, length & 0xFF,
-            value, flags,
+            "<BHBiB",
+            servo_id & 0xFF,
+            address & 0xFFFF,
+            length & 0xFF,
+            value,
+            flags,
         ),
     )
 
@@ -1640,7 +1638,7 @@ class DxlServoLimitsResult:
 @dataclass
 class DxlRegisterValue:
     address: int
-    length: int      # 1, 2, or 4 bytes
+    length: int  # 1, 2, or 4 bytes
     value: int
 
 
@@ -1746,4 +1744,3 @@ class CfgResult:
 def parse_cfg_result(payload: bytes) -> CfgResult:
     """Decode a single-byte config result payload (validate/commit/reset)."""
     return CfgResult(payload[0] if payload else CFG_VALIDATION_FAILED)
-
