@@ -688,6 +688,261 @@ class GaitLabPage(BasePage):
                 btn.setChecked(False)
 
 
+class LegLabPage(BasePage):
+    title = "Leg Lab"
+    subtitle = (
+        "Per-leg foot and per-joint maintenance controls with live IK and "
+        "clamp feedback. Honored only in Mac Maintenance with the lock held."
+    )
+
+    # Joint roles in firmware order (0=coxa, 1=femur, 2=tibia).
+    JOINTS = [("Coxa", 0), ("Femur", 1), ("Tibia", 2)]
+
+    def build(self) -> None:
+        from hexapod_protocol import config as cfg
+
+        self._num_legs = cfg.NUM_LEGS
+        self._leg_rows: dict[int, int] = {}  # leg index -> live table row
+
+        self.content.addWidget(self._maintenance_box())
+        self.content.addWidget(self._leg_select())
+        self.content.addWidget(self._foot_target())
+        self.content.addWidget(self._joint_target())
+        self.content.addWidget(self._live_legs())
+
+        safety = QGroupBox("Stop")
+        slay = QHBoxLayout(safety)
+        stop = QPushButton("Stop motion (hold Stand)")
+        stop.clicked.connect(self.service.stop_motion)
+        estop = QPushButton("\u23fb  EMERGENCY STOP")
+        estop.setObjectName("EmergencyStop")
+        estop.clicked.connect(self.service.emergency_stop)
+        slay.addWidget(stop)
+        slay.addWidget(estop)
+        slay.addStretch(1)
+        self.content.addWidget(safety)
+
+        self.service.connected.connect(self._on_connected)
+        self.service.maint_result.connect(self._on_maint_result)
+        self.service.leg_target_result.connect(self._on_leg_result)
+        self.service.joint_target_result.connect(self._on_joint_result)
+        self.service.telemetry.connect(self._on_telemetry)
+
+    # --- groups -----------------------------------------------------------
+
+    def _maintenance_box(self) -> QGroupBox:
+        box = QGroupBox("Maintenance lock")
+        lay = QVBoxLayout(box)
+        note = QLabel(
+            "Leg and joint commands are rejected unless the robot is in Mac "
+            "Maintenance with the lock held. Acquire the lock, command slowly, "
+            "and release it when done."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {DRACULA.comment};")
+        lay.addWidget(note)
+
+        row = QHBoxLayout()
+        enter = QPushButton("Enter Maintenance")
+        enter.clicked.connect(self.service.enter_maintenance)
+        leave = QPushButton("Exit Maintenance")
+        leave.clicked.connect(self.service.exit_maintenance)
+        row.addWidget(enter)
+        row.addWidget(leave)
+        row.addStretch(1)
+        lay.addLayout(row)
+
+        self.lock_lbl = QLabel("Maintenance lock: none")
+        self.lock_lbl.setObjectName("MonoLabel")
+        lay.addWidget(self.lock_lbl)
+        return box
+
+    def _leg_select(self) -> QGroupBox:
+        box = QGroupBox("Leg selection")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        self.leg_combo = QComboBox()
+        for leg in range(self._num_legs):
+            self.leg_combo.addItem(f"Leg {leg}", leg)
+        form.addRow("Active leg", self.leg_combo)
+        return box
+
+    def _foot_target(self) -> QGroupBox:
+        box = QGroupBox("Foot target (mm, body frame)")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        self._foot_spins = {}
+        for attr, label in (("x", "X (forward)"), ("y", "Y (left)"), ("z", "Z (up)")):
+            spin = QSpinBox()
+            spin.setRange(-400, 400)
+            spin.setValue(0)
+            spin.setSuffix(" mm")
+            self._foot_spins[attr] = spin
+            form.addRow(label, spin)
+        send = QPushButton("Send foot target")
+        send.setProperty("accent", True)
+        send.clicked.connect(self._send_foot_target)
+        form.addRow("", send)
+        self.foot_result = QLabel("--")
+        self.foot_result.setObjectName("MonoLabel")
+        self.foot_result.setWordWrap(True)
+        form.addRow("Result", self.foot_result)
+        return box
+
+    def _joint_target(self) -> QGroupBox:
+        box = QGroupBox("Joint target (URDF-zero relative)")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+        self.joint_combo = QComboBox()
+        for label, jid in self.JOINTS:
+            self.joint_combo.addItem(label, jid)
+        form.addRow("Joint", self.joint_combo)
+        self.joint_angle = QSpinBox()
+        self.joint_angle.setRange(-180, 180)
+        self.joint_angle.setValue(0)
+        self.joint_angle.setSuffix(" \u00b0")
+        form.addRow("Angle", self.joint_angle)
+        send = QPushButton("Send joint target")
+        send.setProperty("accent", True)
+        send.clicked.connect(self._send_joint_target)
+        form.addRow("", send)
+        self.joint_result = QLabel("--")
+        self.joint_result.setObjectName("MonoLabel")
+        self.joint_result.setWordWrap(True)
+        form.addRow("Result", self.joint_result)
+        return box
+
+    def _live_legs(self) -> QGroupBox:
+        box = QGroupBox("Live leg state")
+        lay = QVBoxLayout(box)
+        self.leg_table = QTableWidget(0, 5)
+        self.leg_table.setHorizontalHeaderLabels(
+            ["Leg", "Foot X", "Foot Y", "Foot Z", "IK"]
+        )
+        self.leg_table.verticalHeader().setVisible(False)
+        self.leg_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.leg_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.leg_table.setMinimumHeight(180)
+        lay.addWidget(self.leg_table)
+        return box
+
+    # --- actions ----------------------------------------------------------
+
+    def _send_foot_target(self) -> None:
+        self.foot_result.setText("sending\u2026")
+        self.service.set_leg_target(
+            self.leg_combo.currentData(),
+            self._foot_spins["x"].value(),
+            self._foot_spins["y"].value(),
+            self._foot_spins["z"].value(),
+        )
+
+    def _send_joint_target(self) -> None:
+        self.joint_result.setText("sending\u2026")
+        # Firmware expects centidegrees; the spinbox is whole degrees.
+        self.service.set_joint_target(
+            self.leg_combo.currentData(),
+            self.joint_combo.currentData(),
+            self.joint_angle.value() * 100,
+        )
+
+    # --- reactions --------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.LEG_STATE), 10)
+        else:
+            self.lock_lbl.setText("Maintenance lock: none")
+            self.foot_result.setText("--")
+            self.joint_result.setText("--")
+            self.leg_table.setRowCount(0)
+            self._leg_rows.clear()
+
+    def _on_maint_result(self, res) -> None:
+        if res.token:
+            self.lock_lbl.setText(f"Maintenance lock: held (token {res.token})")
+        elif res.ok:
+            self.lock_lbl.setText("Maintenance lock: none")
+        else:
+            self.lock_lbl.setText(f"Maintenance lock: rejected (result {res.result})")
+
+    def _on_leg_result(self, res) -> None:
+        if res is None:
+            self.foot_result.setText("failed (rejected or timed out)")
+            return
+        state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
+        if res.ok:
+            c, f, t = res.ticks
+            clamp = self._clamp_text(res.clamp_low, res.clamp_high)
+            self.foot_result.setText(
+                f"reachable \u2014 ticks coxa={c} femur={f} tibia={t}; "
+                f"clamp {clamp}; state {state}"
+            )
+        elif res.result == api.MAINT_TARGET_UNREACHABLE:
+            self.foot_result.setText(f"UNREACHABLE \u2014 not committed; state {state}")
+        else:
+            self.foot_result.setText(f"rejected (result {res.result}); state {state}")
+
+    def _on_joint_result(self, res) -> None:
+        if res is None:
+            self.joint_result.setText("failed (rejected or timed out)")
+            return
+        state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
+        if res.ok:
+            flags = []
+            if res.clamped_low:
+                flags.append("low")
+            if res.clamped_high:
+                flags.append("high")
+            clamp = "+".join(flags) if flags else "none"
+            self.joint_result.setText(
+                f"ok \u2014 tick={res.tick}; clamp {clamp}; state {state}"
+            )
+        else:
+            self.joint_result.setText(f"rejected (result {res.result}); state {state}")
+
+    def _clamp_text(self, low: int, high: int) -> str:
+        names = ("coxa", "femur", "tibia")
+        hit = []
+        for j, name in enumerate(names):
+            if low & (1 << j):
+                hit.append(f"{name}\u2193")
+            if high & (1 << j):
+                hit.append(f"{name}\u2191")
+        return "+".join(hit) if hit else "none"
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id != int(tlm.StreamId.LEG_STATE):
+            return
+        for leg in record.legs:
+            row = self._leg_rows.get(leg.leg)
+            if row is None:
+                row = self.leg_table.rowCount()
+                self.leg_table.insertRow(row)
+                self._leg_rows[leg.leg] = row
+            if leg.reachable:
+                ik = "clamped" if leg.clamped else "reachable"
+            else:
+                ik = "UNREACHABLE"
+            values = [
+                str(leg.leg),
+                str(leg.foot_x_mm),
+                str(leg.foot_y_mm),
+                str(leg.foot_z_mm),
+                ik,
+            ]
+            for col, text in enumerate(values):
+                self.leg_table.setItem(row, col, QTableWidgetItem(text))
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+
 class ServoTuningPage(BasePage):
     title = "Servo Monitor & DXL Tuning"
     subtitle = (

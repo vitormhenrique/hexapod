@@ -33,6 +33,8 @@ class ConnectionService(QObject):
     feature_result = Signal(object)  # api.FeatureSetResult
     feature_list = Signal(object)  # api.FeatureList
     maint_result = Signal(object)  # api.MaintResultMsg
+    leg_target_result = Signal(object)  # api.LegTargetResult (None on failure)
+    joint_target_result = Signal(object)  # api.JointTargetResult (None on failure)
     dxl_result = Signal(str, object)  # kind, api.DxlJobResult (None on failure)
     sensor_feature_result = Signal(str, object)  # kind, api.SensorFeatureResult
     contact_threshold_result = Signal(object)  # api.ContactThresholdResult
@@ -357,6 +359,44 @@ class ConnectionService(QObject):
                 self._maint_token = 0
                 self.event.emit("commit", "maintenance lock released")
             self.maint_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_leg_target(self, leg: int, x_mm: int, y_mm: int, z_mm: int) -> None:
+        """Command one leg's foot to (x, y, z) mm (body frame); emit IK verdict.
+
+        Honored only in MacMaintenance with the lock held; the firmware reports
+        reachability, per-joint clamp masks, and resulting servo ticks.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("leg target: not connected")
+            return
+
+        def worker() -> None:
+            res = client.set_leg_target(leg, x_mm, y_mm, z_mm)
+            if res is None:
+                self.error.emit("leg target: no response")
+            self.leg_target_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_joint_target(self, leg: int, joint: int, angle_cdeg: int) -> None:
+        """Command one joint (leg, joint) to ``angle_cdeg`` centidegrees.
+
+        Honored only in MacMaintenance with the lock held; the firmware reports
+        the travel-limit clamp flags and resulting servo tick.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("joint target: not connected")
+            return
+
+        def worker() -> None:
+            res = client.set_joint_target(leg, joint, angle_cdeg)
+            if res is None:
+                self.error.emit("joint target: no response")
+            self.joint_target_result.emit(res)
 
         threading.Thread(target=worker, daemon=True).start()
 

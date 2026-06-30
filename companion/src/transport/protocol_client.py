@@ -343,6 +343,19 @@ class ProtocolClient:
         r = self._send_built(api.build_exit_maintenance(token))
         return api.parse_maint_result(r.payload) if r else None
 
+    # Maintenance leg/joint targets (MacMaintenance + held lock only).
+    def set_leg_target(
+        self, leg: int, x_mm: int, y_mm: int, z_mm: int
+    ) -> Optional[api.LegTargetResult]:
+        r = self._send_built(api.build_set_leg_target(leg, x_mm, y_mm, z_mm))
+        return api.parse_leg_target_result(r.payload) if r else None
+
+    def set_joint_target(
+        self, leg: int, joint: int, angle_cdeg: int
+    ) -> Optional[api.JointTargetResult]:
+        r = self._send_built(api.build_set_joint_target(leg, joint, angle_cdeg))
+        return api.parse_joint_target_result(r.payload) if r else None
+
     # --- DXL async job helpers -------------------------------------------
     #
     # DXL maintenance runs on a single-slot firmware job queue: submit a job,
