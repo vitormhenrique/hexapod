@@ -11,6 +11,7 @@
 #include "../dxl/dxl_params.h"
 #include "../dxl/servo_map.h"
 #include "../gait/gait_pipeline.h"
+#include "../gait/trick_engine.h"
 #include "../input/controller_bridge.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
@@ -301,6 +302,11 @@ config::ConfigApi g_configApi(g_configPersist);
 // reference, while the gait engine + body transform are re-seeded from config
 // on adopt/commit (lmt.7).
 gait::GaitPipeline g_pipeline(g_configApi.config());
+
+// Trick / choreography engine (oha.5), owned by controlTask. Plays the
+// controller bridge's edge-triggered TrickId as a bounded body-pose/twist
+// sequence through the same gait pipeline + safety gate (no raw servo writes).
+gait::TrickEngine g_trickEngine;
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -774,6 +780,7 @@ void controlTask(void*) {
       }
       // Keep the gait pipeline parked so a later walking authorisation restarts
       // from a clean cycle (mirrors the gate-closed reset below).
+      g_trickEngine.cancel();
       applied_intent_seq = 0xFFFFFFFFu;
       applied_gait = 0xFF;
     } else if (g_motionGate) {
@@ -790,7 +797,44 @@ void controlTask(void*) {
         // The controller bridge is the RC command source (oha.3). Snapshot it
         // once so a mid-cycle rcTask write cannot tear the read.
         const controller::ControllerCommand cc = g_ctrlCmd;
-        if (cc.mode == controller::ControlMode::Walk) {
+
+        // --- Trick / choreography engine (oha.5) ---------------------------
+        // The bridge emits a one-shot TrickId on a single rising-edge frame.
+        // Fire the engine on the None->trick transition of the snapshot so a
+        // held duplicate does not re-trigger, while distinct presses (always
+        // separated by a None frame) each arm their choreography.
+        static controller::TrickId prev_snap_trick = controller::TrickId::None;
+        if (cc.trick != controller::TrickId::None &&
+            prev_snap_trick == controller::TrickId::None) {
+          g_trickEngine.trigger(cc.trick, cc.body_height, now_ms);
+        }
+        prev_snap_trick = cc.trick;
+        // Any deliberate stick / pose input reclaims control and cancels the
+        // trick (the bridge already applied deadbands, so a centred stick reads
+        // ~0). E-stop / gate close cancels via the branches below.
+        const bool sticks_active =
+            fabsf(cc.twist_vx) > 0.12f || fabsf(cc.twist_vy) > 0.12f ||
+            fabsf(cc.twist_wz) > 0.12f || fabsf(cc.pose_x_mm) > 5.0f ||
+            fabsf(cc.pose_y_mm) > 5.0f || fabsf(cc.pose_z_mm) > 5.0f ||
+            fabsf(cc.pose_roll) > 0.05f || fabsf(cc.pose_pitch) > 0.05f ||
+            fabsf(cc.pose_yaw) > 0.05f;
+        const gait::TrickOutput& tk =
+            g_trickEngine.update(period_ms::kControl, sticks_active);
+
+        // Body-height fraction fed to setParams: the live POT2 knob, unless a
+        // trick is overriding height (stand/sit/crouch/stretch/dance).
+        float height_frac = cc.body_height;
+        if (tk.active) {
+          // Choreography drives the body; the sticks are ignored until it
+          // finishes or is cancelled. It only shapes gait/twist/pose/height,
+          // so IK + servo-map + the safety gate still validate every joint.
+          eff_gait = static_cast<uint8_t>(tk.gait);
+          eff_vx = tk.twist_vx;
+          eff_vy = tk.twist_vy;
+          eff_wz = tk.twist_wz;
+          body_pose = tk.pose;
+          if (tk.override_height) height_frac = tk.body_height_frac;
+        } else if (cc.mode == controller::ControlMode::Walk) {
           // WALK: gimbals -> gait body twist, SW_F selects the gait family.
           eff_gait = static_cast<uint8_t>(rcGaitToId(cc.gait_index));
           eff_vx = cc.twist_vx;  // forward/back
@@ -808,15 +852,18 @@ void controlTask(void*) {
           body_pose.pitch = cc.pose_pitch;
           body_pose.yaw = cc.pose_yaw;
         }
-        // NAV1 pose trim adds a persistent lean on top of any RC mode.
-        body_pose.roll += cc.trim_roll;
-        body_pose.pitch += cc.trim_pitch;
+        // NAV1 pose trim adds a persistent lean on top of a manual RC mode, but
+        // never fights an active trick.
+        if (!tk.active) {
+          body_pose.roll += cc.trim_roll;
+          body_pose.pitch += cc.trim_pitch;
+        }
         // RC knobs drive the gait shape live (POT1 speed, POT2 body height,
         // ENC1 stride, ENC2 step height). Map the bridge 0..1 scalars onto the
         // config-validated safe ranges; duty stays on the host/config value.
         const uint16_t bh = static_cast<uint16_t>(
             config::kMinGaitBodyHeightMm +
-            cc.body_height *
+            height_frac *
                 (config::kMaxGaitBodyHeightMm - config::kMinGaitBodyHeightMm));
         const uint16_t st =
             static_cast<uint16_t>(cc.stride * config::kMaxGaitStrideMm);
@@ -826,11 +873,16 @@ void controlTask(void*) {
         g_pipeline.setParams(bh, st, sh, intent.duty_x255, sp);
         applied_intent_seq = 0xFFFFFFFFu;  // force host re-seed when RC yields
       } else if (intent.seq != applied_intent_seq) {
-        // Host (Mac/Jetson) drives: re-seed shape params when its intent changes.
+        // Host (Mac/Jetson) drives: tricks are RC-only, so cancel any runner.
+        g_trickEngine.cancel();
+        // re-seed shape params when its intent changes.
         g_pipeline.setParams(intent.body_height_mm, intent.stride_len_mm,
                              intent.step_height_mm, intent.duty_x255,
                              intent.speed_x255);
         applied_intent_seq = intent.seq;
+      } else {
+        // Host drives, intent unchanged: keep any RC trick cancelled.
+        g_trickEngine.cancel();
       }
 
       // Apply the body pose every cycle (neutral restores the normal walk path).
@@ -864,6 +916,7 @@ void controlTask(void*) {
       }
     } else {
       g_goalValid = false;
+      g_trickEngine.cancel();            // gate closed / E-stop: drop any trick
       applied_intent_seq = 0xFFFFFFFFu;  // force re-apply on next authorisation
       applied_gait = 0xFF;               // force gait re-apply on next auth
     }
