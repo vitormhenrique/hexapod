@@ -166,7 +166,7 @@ void test_handle_get_stream_stats() {
   m.subscribe(StreamId::Health, 10);
   m.shouldEmit(StreamId::Health, 0);    // emit 1
   m.noteTxBacklog();                    // backlog 1
-  uint8_t out[128];
+  uint8_t out[256];
   uint16_t out_len = 0;
   uint8_t out_flags = 0xFF;
   const bool handled = m.handle(telemsg::kGetStreamStats, nullptr, 0, out,

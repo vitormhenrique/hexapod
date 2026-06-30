@@ -110,6 +110,14 @@ namespace protocol {
 class PassiveApi;
 }
 
+// Forward declaration: the controller command group (CONTROLLER_GET_STATE /
+// GET_BINDINGS / SET_BINDINGS) is handled by a portable ControllerApi in
+// protocol/controller_api.h. handleRequest delegates its 0x90-0x9F msg-id block
+// to it when a non-null instance is supplied.
+namespace protocol {
+class ControllerApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -178,6 +186,10 @@ constexpr uint8_t kSensorMsgLast = 0x7F;
 constexpr uint8_t kPassiveMsgFirst = 0x80;
 constexpr uint8_t kPassiveMsgLast = 0x83;
 
+// Controller command msg-id block (0x90..0x9F), from protocol::controllermsg.
+constexpr uint8_t kControllerMsgFirst = 0x90;
+constexpr uint8_t kControllerMsgLast = 0x9F;
+
 constexpr size_t kDeviceNameLen = 16;
 
 // Description of this firmware build. fw_* and device_name are filled once at
@@ -222,7 +234,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      DxlJobApi* dxl_jobs = nullptr,
                      FeatureApi* features = nullptr,
                      SensorApi* sensors = nullptr,
-                     PassiveApi* passive = nullptr);
+                     PassiveApi* passive = nullptr,
+                     ControllerApi* controller = nullptr);
 
 }  // namespace api
 }  // namespace protocol

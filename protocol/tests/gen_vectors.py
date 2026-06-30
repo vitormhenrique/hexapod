@@ -153,6 +153,7 @@ def build() -> dict:
         "maintenance": build_maintenance(),
         "dxl": build_dxl(),
         "passive": build_passive(),
+        "controller": build_controller(),
         "telemetry": build_telemetry(),
         "config": build_config(),
         "config_cmds": build_config_cmds(),
@@ -500,6 +501,37 @@ def build_passive() -> dict:
     return {"cases": cases}
 
 
+def build_controller() -> dict:
+    """Deterministic request frames for the controller command group
+    (CONTROLLER_GET_STATE / GET_BINDINGS / SET_BINDINGS).
+
+    GET_STATE / GET_BINDINGS responses are live snapshots (firmware
+    test_controller_api covers them), so only the request encoding is pinned.
+    SET_BINDINGS carries a deterministic 81-byte default-bindings payload.
+    """
+    default_bindings = api_mod.ControllerBindings()
+    cases = [
+        {
+            "name": "controller_get_state",
+            "request": api_mod.build_controller_get_state(seq=1).hex(),
+        },
+        {
+            "name": "controller_get_bindings",
+            "request": api_mod.build_controller_get_bindings(seq=2).hex(),
+        },
+        {
+            "name": "controller_set_bindings_default",
+            "request": api_mod.build_controller_set_bindings(
+                default_bindings, seq=3
+            ).hex(),
+            "bindings": api_mod.serialize_controller_bindings(
+                default_bindings
+            ).hex(),
+        },
+    ]
+    return {"cases": cases}
+
+
 def build_config_cmds() -> dict:
     """Deterministic request frames for the config command group
     (CFG_GET_SUMMARY / GET_BLOCK / SET_BLOCK / VALIDATE / COMMIT /
@@ -671,6 +703,66 @@ def build_telemetry() -> dict:
             "stream": "leg_state",
             "payload": _hex(bytes(lpayload)),
             "legs": legs,
+        }
+    )
+    # controller_state payload (oha.4): 31-byte decoded command + 26-byte raw
+    # inputs = 57 bytes, identical to the CONTROLLER_GET_STATE response. Mirrors
+    # protocol::ControllerApi::encodeState; the values below match the firmware
+    # native golden test (test_controller_api).
+    cpayload = bytearray()
+    cpayload += struct.pack("<BB", 0x6D, 0x01)  # flags1, flags2
+    cpayload += struct.pack("<BBB", 2, 1, 3)  # mode, gait, trick
+    cpayload += struct.pack("<hhh", 500, -250, 1000)  # twist vx/vy/wz (milli)
+    cpayload += struct.pack("<hhh", 10, -20, 5)  # pose x/y/z (mm)
+    cpayload += struct.pack("<hhh", 100, -200, 0)  # pose roll/pitch/yaw (milli-rad)
+    cpayload += struct.pack("<hh", 50, -50)  # trim roll/pitch (milli-rad)
+    cpayload += struct.pack("<BBBB", 255, 128, 0, 64)  # speed/height/stride/step
+    cpayload += struct.pack("<hhhh", 100, -200, 300, -400)  # gimbal
+    cpayload += struct.pack("<hh", 500, 600)  # pot
+    cpayload += struct.pack("<ii", 1000, -2000)  # encoder
+    cpayload += struct.pack("<BB", 0x21, 0x02)  # switches, buttons
+    cpayload += struct.pack("<BB", 2, 0)  # toggles
+    cpayload += struct.pack("<BB", 0x11, 0x04)  # nav1, nav2
+    cases.append(
+        {
+            "name": "controller_state",
+            "stream": "controller_state",
+            "payload": _hex(bytes(cpayload)),
+            "expect": {
+                "valid": True,
+                "failsafe": False,
+                "ever_seen": True,
+                "arm_request": True,
+                "estop": False,
+                "host_authority": True,
+                "feat_foot_contact": True,
+                "feat_terrain_leveling": False,
+                "feat_passive_pose": True,
+                "mode": 2,
+                "gait_index": 1,
+                "trick": 3,
+                "twist_vx": 0.5,
+                "twist_vy": -0.25,
+                "twist_wz": 1.0,
+                "pose_x_mm": 10.0,
+                "pose_y_mm": -20.0,
+                "pose_z_mm": 5.0,
+                "pose_roll": 0.1,
+                "pose_pitch": -0.2,
+                "pose_yaw": 0.0,
+                "trim_roll": 0.05,
+                "trim_pitch": -0.05,
+                "speed": 1.0,
+                "stride": 0.0,
+            },
+            "raw": {
+                "gimbal": [100, -200, 300, -400],
+                "pot": [500, 600],
+                "encoder": [1000, -2000],
+                "switches": [True, False, False, False, False, True, False, False],
+                "buttons": [False, True, False, False],
+                "toggles": [2, 0],
+            },
         }
     )
     return {"cases": cases}

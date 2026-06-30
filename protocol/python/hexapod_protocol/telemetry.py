@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 10
+NUM_STREAMS = 11
 
 
 class StreamId(IntEnum):
@@ -28,6 +28,7 @@ class StreamId(IntEnum):
     JOINT_STATE = 7
     SERVO_GOALS = 8
     LEG_STATE = 9
+    CONTROLLER_STATE = 10
 
 
 STREAM_NAMES = {
@@ -41,6 +42,7 @@ STREAM_NAMES = {
     StreamId.JOINT_STATE: "joint_state",
     StreamId.SERVO_GOALS: "servo_goals",
     StreamId.LEG_STATE: "leg_state",
+    StreamId.CONTROLLER_STATE: "controller_state",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -272,6 +274,60 @@ class LegStateTelemetry:
     legs: list[LegTarget] = field(default_factory=list)
 
 
+@dataclass
+class ControllerRawInputs:
+    """Raw ChannelPack inputs carried alongside the decoded controller state."""
+
+    gimbal: list[int] = field(default_factory=lambda: [0, 0, 0, 0])
+    pot: list[int] = field(default_factory=lambda: [0, 0])
+    encoder: list[int] = field(default_factory=lambda: [0, 0])
+    switches: list[bool] = field(default_factory=lambda: [False] * 8)
+    buttons: list[bool] = field(default_factory=lambda: [False] * 4)
+    toggles: list[int] = field(default_factory=lambda: [0, 0])
+    nav: list[list[bool]] = field(
+        default_factory=lambda: [[False] * 5, [False] * 5]
+    )
+
+
+@dataclass
+class ControllerStateTelemetry:
+    """Decoded hand-controller intent + raw inputs (oha.4).
+
+    Mirrors ``ControllerApi::encodeState`` and the CONTROLLER_GET_STATE response.
+    Scaled fields are restored to engineering units: twist [-1, 1], pose
+    translation mm, pose/trim rotation rad, shape scalars [0, 1].
+    """
+
+    valid: bool = False
+    failsafe: bool = True
+    ever_seen: bool = False
+    arm_request: bool = False
+    estop: bool = True
+    host_authority: bool = False
+    feat_foot_contact: bool = False
+    feat_terrain_leveling: bool = False
+    feat_passive_pose: bool = False
+    mode: int = 0
+    gait_index: int = 0
+    trick: int = 0
+    twist_vx: float = 0.0
+    twist_vy: float = 0.0
+    twist_wz: float = 0.0
+    pose_x_mm: float = 0.0
+    pose_y_mm: float = 0.0
+    pose_z_mm: float = 0.0
+    pose_roll: float = 0.0
+    pose_pitch: float = 0.0
+    pose_yaw: float = 0.0
+    trim_roll: float = 0.0
+    trim_pitch: float = 0.0
+    speed: float = 0.0
+    body_height: float = 0.0
+    stride: float = 0.0
+    step_height: float = 0.0
+    raw: ControllerRawInputs = field(default_factory=ControllerRawInputs)
+
+
 def _u16(buf: bytes, off: int) -> int:
     return struct.unpack_from("<H", buf, off)[0]
 
@@ -451,6 +507,67 @@ def decode_leg_state(p: bytes) -> LegStateTelemetry:
     return LegStateTelemetry(legs)
 
 
+def _i16(buf: bytes, off: int) -> int:
+    return struct.unpack_from("<h", buf, off)[0]
+
+
+def decode_controller_state(p: bytes) -> ControllerStateTelemetry:
+    """Decoded hand-controller intent + raw inputs (oha.4): a fixed 57-byte
+    layout (31 decoded + 26 raw) mirroring ``ControllerApi::encodeState``.
+    Defensive on short payloads (returns a partial/default record)."""
+    out = ControllerStateTelemetry()
+    if len(p) < 31:
+        return out
+    f1 = p[0]
+    f2 = p[1]
+    out.valid = bool(f1 & 0x01)
+    out.failsafe = bool(f1 & 0x02)
+    out.ever_seen = bool(f1 & 0x04)
+    out.arm_request = bool(f1 & 0x08)
+    out.estop = bool(f1 & 0x10)
+    out.host_authority = bool(f1 & 0x20)
+    out.feat_foot_contact = bool(f1 & 0x40)
+    out.feat_terrain_leveling = bool(f1 & 0x80)
+    out.feat_passive_pose = bool(f2 & 0x01)
+    out.mode = p[2]
+    out.gait_index = p[3]
+    out.trick = p[4]
+    out.twist_vx = _i16(p, 5) / 1000.0
+    out.twist_vy = _i16(p, 7) / 1000.0
+    out.twist_wz = _i16(p, 9) / 1000.0
+    out.pose_x_mm = float(_i16(p, 11))
+    out.pose_y_mm = float(_i16(p, 13))
+    out.pose_z_mm = float(_i16(p, 15))
+    out.pose_roll = _i16(p, 17) / 1000.0
+    out.pose_pitch = _i16(p, 19) / 1000.0
+    out.pose_yaw = _i16(p, 21) / 1000.0
+    out.trim_roll = _i16(p, 23) / 1000.0
+    out.trim_pitch = _i16(p, 25) / 1000.0
+    out.speed = p[27] / 255.0
+    out.body_height = p[28] / 255.0
+    out.stride = p[29] / 255.0
+    out.step_height = p[30] / 255.0
+    if len(p) < 57:
+        return out
+    raw = ControllerRawInputs()
+    raw.gimbal = [_i16(p, 31 + 2 * i) for i in range(4)]
+    raw.pot = [_i16(p, 39 + 2 * i) for i in range(2)]
+    raw.encoder = [struct.unpack_from("<i", p, 43 + 4 * i)[0] for i in range(2)]
+    sw = p[51]
+    raw.switches = [bool(sw & (1 << i)) for i in range(8)]
+    btn = p[52]
+    raw.buttons = [bool(btn & (1 << i)) for i in range(4)]
+    raw.toggles = [p[53], p[54]]
+    nav1 = p[55]
+    nav2 = p[56]
+    raw.nav = [
+        [bool(nav1 & (1 << i)) for i in range(5)],
+        [bool(nav2 & (1 << i)) for i in range(5)],
+    ]
+    out.raw = raw
+    return out
+
+
 _DECODERS = {
     StreamId.HEALTH: decode_health,
     StreamId.CONTROL_STATE: decode_control_state,
@@ -462,6 +579,7 @@ _DECODERS = {
     StreamId.JOINT_STATE: decode_joint_state,
     StreamId.SERVO_GOALS: decode_servo_goals,
     StreamId.LEG_STATE: decode_leg_state,
+    StreamId.CONTROLLER_STATE: decode_controller_state,
 }
 
 

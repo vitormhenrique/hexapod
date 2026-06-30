@@ -7,7 +7,7 @@ a command frame and ``parse_*`` to decode a response payload.
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Optional
 
 from .framing import Header, MsgType, decode_frame_body, encode_frame
@@ -209,6 +209,21 @@ PASSIVE_BAD_REQUEST = 2
 PASSIVE_RATE_DEFAULT_HZ = 50
 PASSIVE_RATE_MIN_HZ = 1
 PASSIVE_RATE_MAX_HZ = 200
+
+# Controller commands (mirror protocol::controllermsg, 0x90-0x9F).
+MSG_CONTROLLER_GET_STATE = 0x90
+MSG_CONTROLLER_GET_BINDINGS = 0x91
+MSG_CONTROLLER_SET_BINDINGS = 0x92
+
+# Controller response result byte (mirrors protocol::ControllerResult).
+CONTROLLER_OK = 0
+CONTROLLER_REJECTED = 1
+CONTROLLER_BAD_REQUEST = 2
+
+# Serialized payload sizes (mirror controller_api.h kController*Len).
+CONTROLLER_STATE_LEN = 57
+CONTROLLER_BINDINGS_LEN = 81
+CONTROLLER_NUM_TRICKS = 8
 
 # Sensor response result byte (mirrors protocol::SensorResult).
 SENSOR_OK = 0
@@ -1744,3 +1759,294 @@ class CfgResult:
 def parse_cfg_result(payload: bytes) -> CfgResult:
     """Decode a single-byte config result payload (validate/commit/reset)."""
     return CfgResult(payload[0] if payload else CFG_VALIDATION_FAILED)
+
+
+# --- Controller commands (oha.4) ------------------------------------------
+#
+# Mirrors firmware/openrb150/src/protocol/controller_api.{h,cpp}. The decoded
+# controller state payload (CONTROLLER_GET_STATE response) is identical to the
+# controller_state telemetry stream, so it is decoded by
+# telemetry.decode_controller_state.
+
+# Logical input source enums (mirror controller::AxisSource/BoolSource/TriSource
+# and controller::TrickId). Values are wire-stable.
+AXIS_NONE = 0
+AXIS_GIMBAL_LX = 1
+AXIS_GIMBAL_LY = 2
+AXIS_GIMBAL_RX = 3
+AXIS_GIMBAL_RY = 4
+AXIS_POT1 = 5
+AXIS_POT2 = 6
+AXIS_ENC1 = 7
+AXIS_ENC2 = 8
+
+BOOL_NONE = 0
+BOOL_SW_A = 1
+BOOL_SW_B = 2
+BOOL_SW_C = 3
+BOOL_SW_D = 4
+BOOL_SW_G = 5
+BOOL_SW_H = 6
+BOOL_BTN1 = 7
+BOOL_BTN2 = 8
+BOOL_BTN3 = 9
+BOOL_BTN4 = 10
+BOOL_NAV1_UP = 11
+BOOL_NAV1_DOWN = 12
+BOOL_NAV1_LEFT = 13
+BOOL_NAV1_RIGHT = 14
+BOOL_NAV1_CENTER = 15
+BOOL_NAV2_UP = 16
+BOOL_NAV2_DOWN = 17
+BOOL_NAV2_LEFT = 18
+BOOL_NAV2_RIGHT = 19
+BOOL_NAV2_CENTER = 20
+
+TRI_NONE = 0
+TRI_SW_E = 1
+TRI_SW_F = 2
+
+TRICK_NONE = 0
+TRICK_STAND_UP = 1
+TRICK_SIT_DOWN = 2
+TRICK_WAVE = 3
+TRICK_CROUCH_TOGGLE = 4
+TRICK_TWIRL = 5
+TRICK_STRETCH = 6
+TRICK_LEAN_LOOK = 7
+TRICK_DANCE_LOOP = 8
+
+
+@dataclass
+class ControllerAxisBinding:
+    """One proportional binding (source, invert, deadband 0..1)."""
+
+    source: int = AXIS_NONE
+    invert: bool = False
+    deadband: float = 0.0
+
+
+@dataclass
+class ControllerTrickBinding:
+    """One trick trigger (boolean source -> trick id)."""
+
+    source: int = BOOL_NONE
+    trick: int = TRICK_NONE
+
+
+@dataclass
+class ControllerBindings:
+    """The full controller->action remap table (mirror controller::BindingConfig).
+
+    Field defaults mirror controller::defaultBindings()."""
+
+    walk_forward: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.05)
+    )
+    walk_strafe: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.05)
+    )
+    walk_yaw: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.05)
+    )
+    body_x: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.05)
+    )
+    body_y: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.05)
+    )
+    body_z: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.05)
+    )
+    body_roll: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.05)
+    )
+    body_pitch: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.05)
+    )
+    body_yaw: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.05)
+    )
+    speed: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_POT1, False, 0.0)
+    )
+    body_height: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_POT2, False, 0.0)
+    )
+    stride: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_ENC1, False, 0.0)
+    )
+    step_height: ControllerAxisBinding = field(
+        default_factory=lambda: ControllerAxisBinding(AXIS_ENC2, False, 0.0)
+    )
+    mode_select: int = TRI_SW_E
+    gait_select: int = TRI_SW_F
+    arm: int = BOOL_SW_A
+    estop: int = BOOL_SW_B
+    feat_foot_contact: int = BOOL_SW_C
+    feat_terrain_leveling: int = BOOL_SW_D
+    feat_passive_pose: int = BOOL_SW_G
+    host_authority: int = BOOL_SW_H
+    trim_pitch_up: int = BOOL_NAV1_UP
+    trim_pitch_down: int = BOOL_NAV1_DOWN
+    trim_roll_left: int = BOOL_NAV1_LEFT
+    trim_roll_right: int = BOOL_NAV1_RIGHT
+    trim_reset: int = BOOL_NAV1_CENTER
+    tricks: List[ControllerTrickBinding] = field(
+        default_factory=lambda: [
+            ControllerTrickBinding(BOOL_BTN1, TRICK_STAND_UP),
+            ControllerTrickBinding(BOOL_BTN2, TRICK_SIT_DOWN),
+            ControllerTrickBinding(BOOL_BTN3, TRICK_WAVE),
+            ControllerTrickBinding(BOOL_BTN4, TRICK_CROUCH_TOGGLE),
+            ControllerTrickBinding(BOOL_NAV2_UP, TRICK_TWIRL),
+            ControllerTrickBinding(BOOL_NAV2_DOWN, TRICK_STRETCH),
+            ControllerTrickBinding(BOOL_NAV2_LEFT, TRICK_LEAN_LOOK),
+            ControllerTrickBinding(BOOL_NAV2_CENTER, TRICK_DANCE_LOOP),
+        ]
+    )
+
+
+def _pack_axis(a: ControllerAxisBinding) -> bytes:
+    db = int(max(0.0, min(1.0, a.deadband)) * 1000.0 + 0.5)
+    return struct.pack("<BBh", a.source & 0xFF, 1 if a.invert else 0, db)
+
+
+def serialize_controller_bindings(b: ControllerBindings) -> bytes:
+    """Serialize a ControllerBindings into the 81-byte wire payload."""
+    out = bytearray()
+    for axis in (
+        b.walk_forward,
+        b.walk_strafe,
+        b.walk_yaw,
+        b.body_x,
+        b.body_y,
+        b.body_z,
+        b.body_roll,
+        b.body_pitch,
+        b.body_yaw,
+        b.speed,
+        b.body_height,
+        b.stride,
+        b.step_height,
+    ):
+        out += _pack_axis(axis)
+    out += struct.pack("<BB", b.mode_select & 0xFF, b.gait_select & 0xFF)
+    for src in (
+        b.arm,
+        b.estop,
+        b.feat_foot_contact,
+        b.feat_terrain_leveling,
+        b.feat_passive_pose,
+        b.host_authority,
+        b.trim_pitch_up,
+        b.trim_pitch_down,
+        b.trim_roll_left,
+        b.trim_roll_right,
+        b.trim_reset,
+    ):
+        out += struct.pack("<B", src & 0xFF)
+    tricks = list(b.tricks) + [ControllerTrickBinding()] * CONTROLLER_NUM_TRICKS
+    for t in tricks[:CONTROLLER_NUM_TRICKS]:
+        out += struct.pack("<BB", t.source & 0xFF, t.trick & 0xFF)
+    return bytes(out)
+
+
+def parse_controller_bindings(payload: bytes) -> ControllerBindings:
+    """Parse an 81-byte CONTROLLER_GET_BINDINGS response into ControllerBindings."""
+    if len(payload) < CONTROLLER_BINDINGS_LEN:
+        raise ValueError("controller bindings payload too short")
+    off = 0
+
+    def axis() -> ControllerAxisBinding:
+        nonlocal off
+        source, invert, db = struct.unpack_from("<BBh", payload, off)
+        off += 4
+        return ControllerAxisBinding(source, bool(invert), db / 1000.0)
+
+    b = ControllerBindings(
+        walk_forward=axis(),
+        walk_strafe=axis(),
+        walk_yaw=axis(),
+        body_x=axis(),
+        body_y=axis(),
+        body_z=axis(),
+        body_roll=axis(),
+        body_pitch=axis(),
+        body_yaw=axis(),
+        speed=axis(),
+        body_height=axis(),
+        stride=axis(),
+        step_height=axis(),
+    )
+    b.mode_select = payload[off]
+    b.gait_select = payload[off + 1]
+    off += 2
+    (
+        b.arm,
+        b.estop,
+        b.feat_foot_contact,
+        b.feat_terrain_leveling,
+        b.feat_passive_pose,
+        b.host_authority,
+        b.trim_pitch_up,
+        b.trim_pitch_down,
+        b.trim_roll_left,
+        b.trim_roll_right,
+        b.trim_reset,
+    ) = struct.unpack_from("<11B", payload, off)
+    off += 11
+    tricks: List[ControllerTrickBinding] = []
+    for _ in range(CONTROLLER_NUM_TRICKS):
+        src, trick = struct.unpack_from("<BB", payload, off)
+        off += 2
+        tricks.append(ControllerTrickBinding(src, trick))
+    b.tricks = tricks
+    return b
+
+
+def build_controller_get_state(seq: int = 0) -> bytes:
+    """Build a CONTROLLER_GET_STATE command. The response carries the same
+    57-byte payload as the controller_state telemetry stream (decode with
+    telemetry.decode_controller_state)."""
+    return build_command(MSG_CONTROLLER_GET_STATE, seq=seq)
+
+
+def build_controller_get_bindings(seq: int = 0) -> bytes:
+    """Build a CONTROLLER_GET_BINDINGS command (response = 81-byte bindings)."""
+    return build_command(MSG_CONTROLLER_GET_BINDINGS, seq=seq)
+
+
+def build_controller_set_bindings(
+    bindings: ControllerBindings, seq: int = 0
+) -> bytes:
+    """Build a CONTROLLER_SET_BINDINGS command staging a new remap table. The
+    firmware validates every source/trick range and rejects bad payloads."""
+    return build_command(
+        MSG_CONTROLLER_SET_BINDINGS,
+        seq=seq,
+        payload=serialize_controller_bindings(bindings),
+    )
+
+
+@dataclass
+class ControllerResultMsg:
+    """Response to CONTROLLER_SET_BINDINGS (single result byte)."""
+
+    result: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == CONTROLLER_OK
+
+
+def parse_controller_result(payload: bytes) -> ControllerResultMsg:
+    """Decode a CONTROLLER_SET_BINDINGS result byte."""
+    return ControllerResultMsg(payload[0] if payload else CONTROLLER_BAD_REQUEST)
+
+
+def parse_controller_state(payload: bytes):
+    """Decode a CONTROLLER_GET_STATE response (same layout as the
+    controller_state telemetry stream)."""
+    from .telemetry import decode_controller_state
+
+    return decode_controller_state(payload)

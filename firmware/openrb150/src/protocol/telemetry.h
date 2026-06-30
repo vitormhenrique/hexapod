@@ -37,9 +37,10 @@ enum class StreamId : uint8_t {
   JointState = 7,     // mapped per-leg/joint present angle (centidegrees)
   ServoGoals = 8,     // per-joint commanded angle after IK + clamp flags
   LegState = 9,       // per-leg commanded foot target + IK reachability/clamp
+  ControllerState = 10,  // decoded hand-controller intent + raw inputs (oha.4)
 };
 
-constexpr uint8_t kNumStreams = 10;
+constexpr uint8_t kNumStreams = 11;
 
 // Telemetry frame msg-id base: a telemetry frame for StreamId s uses header
 // msg_id = kTelemetryFrameMsgBase + s. Chosen above the command ranges

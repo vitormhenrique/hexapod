@@ -2,6 +2,7 @@
 
 #include "../config/config_api.h"
 #include "control_api.h"
+#include "controller_api.h"
 #include "dxl_job_api.h"
 #include "feature_api.h"
 #include "framing.h"
@@ -62,7 +63,7 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      MotionApi* motion, MaintenanceApi* maint,
                      MaintTargetApi* maint_target, DxlJobApi* dxl_jobs,
                      FeatureApi* features, SensorApi* sensors,
-                     PassiveApi* passive) {
+                     PassiveApi* passive, ControllerApi* controller) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -257,6 +258,21 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                             kMaxPayload, &pas_len, &pas_flags)) {
           payload_len = pas_len;
           flags = pas_flags;
+          break;
+        }
+      }
+      // Delegate the controller group (CONTROLLER_GET_STATE/GET_BINDINGS/
+      // SET_BINDINGS) to the ControllerApi when present. Its ids occupy the
+      // 0x90-0x9F block.
+      if (controller != nullptr && req.msg_id >= kControllerMsgFirst &&
+          req.msg_id <= kControllerMsgLast) {
+        uint16_t ctl_len = 0;
+        uint8_t ctl_flags = 0;
+        if (controller->handle(req.msg_id, req_payload,
+                               static_cast<uint16_t>(req_len), payload,
+                               kMaxPayload, &ctl_len, &ctl_flags)) {
+          payload_len = ctl_len;
+          flags = ctl_flags;
           break;
         }
       }

@@ -15,6 +15,7 @@
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
+#include "../protocol/controller_api.h"
 #include "../protocol/dxl_job_api.h"
 #include "../protocol/feature_api.h"
 #include "../protocol/frame_reader.h"
@@ -171,6 +172,28 @@ protocol::StatusSnapshot g_sensorStatusSnap;
 // PassivePoseStream once torque is confirmed off) and force-clears it on
 // E-stop / fault.
 protocol::PassiveApi g_passiveApi;
+
+// Host controller command surface (CONTROLLER_GET_STATE/GET_BINDINGS/
+// SET_BINDINGS, oha.4). apiTask refreshes its reported snapshot (decoded
+// command + raw inputs + active bindings) before each request and, after a
+// SET_BINDINGS, hands the staged BindingConfig to rcTask via the pending
+// hand-off below (rcTask owns the ControllerBridge, so apiTask never touches
+// it directly). Also feeds the controller_state telemetry stream.
+protocol::ControllerApi g_controllerApi;
+
+// Published controller snapshots (single writer rcTask, reader apiTask). Raw
+// decoded ChannelPack inputs + the bridge's active binding map, copied each RC
+// cycle so apiTask can report them without touching the bridge.
+ChannelPackInputs_t g_ctrlRaw{};
+controller::BindingConfig g_ctrlBindings;
+
+// Lock-free bindings hand-off: apiTask stages a validated BindingConfig and
+// sets the flag; rcTask adopts it into the bridge and clears the flag. Single
+// producer (apiTask) / single consumer (rcTask); a SET_BINDINGS is rare and
+// human-driven, and the bridge re-clamps all motion regardless, so a one-frame
+// torn read is benign and self-corrected by the next adoption.
+controller::BindingConfig g_ctrlPendingBindings;
+volatile bool g_ctrlPendingBindingsValid = false;
 
 // Torque-off confirmation published by dxlTask. The control task feeds this to
 // the safety FSM as StateInputs.torque_off so PassivePoseStream is only entered
@@ -445,6 +468,15 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // 6 legs -> 1 + 6*8 = 49 bytes, within the 256 payload cap. Byte layout
       // lives in the portable encoder (lmt.12).
       o = protocol::encodeLegState(g_maintTargetApi.target(), p);
+      break;
+    }
+    case StreamId::ControllerState: {
+      // Decoded hand-controller intent + raw ChannelPack inputs (oha.4). Mirrors
+      // the CONTROLLER_GET_STATE response so a host can watch the live remote
+      // (modes, twist, body pose, shape, tricks, arm/estop) and every raw
+      // gimbal/pot/encoder/switch/button/nav input. 57-byte fixed layout lives
+      // in the portable ControllerApi codec; rcTask publishes g_ctrlCmd/g_ctrlRaw.
+      o = protocol::ControllerApi::encodeState(g_ctrlCmd, g_ctrlRaw, p);
       break;
     }
   }
@@ -1363,9 +1395,20 @@ void rcTask(void*) {
     // Trip failsafe if no fresh frame arrived within the timeout (or the link
     // has never been seen) -- forces a safe disarmed/estop hold.
     g_bridge.evaluateFailsafe(now_ms);
+    // Adopt a host-staged binding map before publishing this cycle's command so
+    // a SET_BINDINGS takes effect immediately (rcTask is the sole writer of the
+    // bridge; apiTask only stages).
+    if (g_ctrlPendingBindingsValid) {
+      g_bridge.setBindings(g_ctrlPendingBindings);
+      g_ctrlPendingBindingsValid = false;
+    }
     // Publish the decoded command snapshot for controlTask and derive the
     // legacy RcStatus the safety FSM / arbiter / telemetry consume.
     g_ctrlCmd = g_bridge.command();
+    // Publish the raw inputs + active bindings for the controller USB API /
+    // controller_state telemetry (apiTask is a reader only).
+    g_ctrlRaw = g_bridge.rawInputs();
+    g_ctrlBindings = g_bridge.bindings();
     deriveRcStatus(g_ctrlCmd, frame, fresh, now_ms, g_rcStatus);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kRc));
   }
@@ -1431,6 +1474,12 @@ void apiTask(void*) {
       // current safety state (control task also keeps this current each cycle).
       g_passiveApi.setLiveState(g_safetyState);
 
+      // Refresh the controller API's reported snapshot from rcTask's published
+      // decoded command + raw inputs + active bindings (oha.4). Read-only
+      // copies; the bridge itself stays owned by rcTask.
+      g_controllerApi.setSnapshot(g_ctrlCmd, g_ctrlRaw);
+      g_controllerApi.setBindings(g_ctrlBindings);
+
       // Report honest runtime capabilities: feature_bits mirrors the per-
       // feature availability the control task publishes each cycle (bit index
       // == Feature enum order), so GET_CAPABILITIES is no longer a zero stub
@@ -1441,9 +1490,20 @@ void apiTask(void*) {
           reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
           &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
           &g_maintTargetApi, &g_dxlJobApi, &g_featureApi, &g_sensorApi,
-          &g_passiveApi);
+          &g_passiveApi, &g_controllerApi);
       if (n > 0) {
         Serial.write(out, n);
+      }
+
+      // If a CONTROLLER_SET_BINDINGS just validated a new map, stage it for
+      // rcTask to adopt (it owns the bridge). Drop if a previous stage is still
+      // pending to keep the single-slot hand-off lock-free.
+      if (!g_ctrlPendingBindingsValid) {
+        controller::BindingConfig nb;
+        if (g_controllerApi.takePending(&nb)) {
+          g_ctrlPendingBindings = nb;
+          g_ctrlPendingBindingsValid = true;
+        }
       }
     }
 

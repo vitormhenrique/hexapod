@@ -363,6 +363,23 @@
       }
     ]
   },
+  "controller": {
+    "cases": [
+      {
+        "name": "controller_get_state",
+        "request": "0002a5020102900201010101010101031bd100"
+      },
+      {
+        "name": "controller_get_bindings",
+        "request": "0002a5020102910202010101010101032b7600"
+      },
+      {
+        "name": "controller_set_bindings_default",
+        "request": "0002a5020102920203010101010251020202320203023202010232020402320203023202020232020302320204023202010232020501010206010102070101020801012001020102030405060b0c0d0e0f0701080209030a041005110612071408353000",
+        "bindings": "0200320003003200010032000400320003003200020032000300320004003200010032000500000006000000070000000800000001020102030405060b0c0d0e0f0701080209030a041005110612071408"
+      }
+    ]
+  },
   "telemetry": {
     "cases": [
       {
@@ -461,6 +478,74 @@
             "clamped": true
           }
         ]
+      },
+      {
+        "name": "controller_state",
+        "stream": "controller_state",
+        "payload": "6d01020103f40106ffe8030a00ecff0500640038ff00003200ceffff800040640038ff2c0170fef4015802e803000030f8ffff210202001104",
+        "expect": {
+          "valid": true,
+          "failsafe": false,
+          "ever_seen": true,
+          "arm_request": true,
+          "estop": false,
+          "host_authority": true,
+          "feat_foot_contact": true,
+          "feat_terrain_leveling": false,
+          "feat_passive_pose": true,
+          "mode": 2,
+          "gait_index": 1,
+          "trick": 3,
+          "twist_vx": 0.5,
+          "twist_vy": -0.25,
+          "twist_wz": 1.0,
+          "pose_x_mm": 10.0,
+          "pose_y_mm": -20.0,
+          "pose_z_mm": 5.0,
+          "pose_roll": 0.1,
+          "pose_pitch": -0.2,
+          "pose_yaw": 0.0,
+          "trim_roll": 0.05,
+          "trim_pitch": -0.05,
+          "speed": 1.0,
+          "stride": 0.0
+        },
+        "raw": {
+          "gimbal": [
+            100,
+            -200,
+            300,
+            -400
+          ],
+          "pot": [
+            500,
+            600
+          ],
+          "encoder": [
+            1000,
+            -2000
+          ],
+          "switches": [
+            true,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false
+          ],
+          "buttons": [
+            false,
+            true,
+            false,
+            false
+          ],
+          "toggles": [
+            2,
+            0
+          ]
+        }
       }
     ]
   },

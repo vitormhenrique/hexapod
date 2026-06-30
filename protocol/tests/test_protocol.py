@@ -875,6 +875,21 @@ def test_telemetry_golden_decode(case):
             assert got.foot_z_mm == want["foot_z_mm"]
             assert got.reachable == want["reachable"]
             assert got.clamped == want["clamped"]
+    elif case["name"] == "controller_state":
+        assert isinstance(rec, telemetry.ControllerStateTelemetry)
+        for field_name, want in case["expect"].items():
+            got = getattr(rec, field_name)
+            if isinstance(want, float):
+                assert got == pytest.approx(want, abs=1e-6)
+            else:
+                assert got == want
+        raw = case["raw"]
+        assert rec.raw.gimbal == raw["gimbal"]
+        assert rec.raw.pot == raw["pot"]
+        assert rec.raw.encoder == raw["encoder"]
+        assert rec.raw.switches == raw["switches"]
+        assert rec.raw.buttons == raw["buttons"]
+        assert rec.raw.toggles == raw["toggles"]
 
 
 def test_decode_joint_state_fields():
@@ -977,8 +992,8 @@ def test_decode_hw_error_bits():
 
 def test_telemetry_stream_count_includes_joint_state():
     # api_stats carries one dropped counter per stream; joint_state, servo_goals,
-    # and leg_state grow it to 10.
-    assert telemetry.NUM_STREAMS == 10
+    # leg_state, and controller_state grow it to 11.
+    assert telemetry.NUM_STREAMS == 11
     assert (
         telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
     )
@@ -986,6 +1001,80 @@ def test_telemetry_stream_count_includes_joint_state():
         telemetry.stream_id_from_name("servo_goals") == telemetry.StreamId.SERVO_GOALS
     )
     assert telemetry.stream_id_from_name("leg_state") == telemetry.StreamId.LEG_STATE
+    assert (
+        telemetry.stream_id_from_name("controller_state")
+        == telemetry.StreamId.CONTROLLER_STATE
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Controller command group (oha.4)
+# --------------------------------------------------------------------------- #
+_CONTROLLER_BUILDERS = {
+    "controller_get_state": lambda: api.build_controller_get_state(seq=1),
+    "controller_get_bindings": lambda: api.build_controller_get_bindings(seq=2),
+    "controller_set_bindings_default": lambda: api.build_controller_set_bindings(
+        api.ControllerBindings(), seq=3
+    ),
+}
+
+
+@pytest.mark.parametrize("case", VECTORS["controller"]["cases"])
+def test_controller_request_golden(case):
+    # The controller builders must reproduce the golden request bytes.
+    wire = _CONTROLLER_BUILDERS[case["name"]]()
+    assert wire.hex() == case["request"]
+
+
+def test_controller_bindings_round_trip():
+    # serialize -> parse must reproduce the binding table exactly (81 bytes).
+    b = api.ControllerBindings()
+    wire = api.serialize_controller_bindings(b)
+    assert len(wire) == api.CONTROLLER_BINDINGS_LEN
+    back = api.parse_controller_bindings(wire)
+    assert back == b
+    # A non-default table also round-trips, including invert + deadband scaling.
+    b.walk_forward = api.ControllerAxisBinding(api.AXIS_POT2, True, 0.123)
+    b.tricks[0] = api.ControllerTrickBinding(api.BOOL_NAV2_RIGHT, api.TRICK_DANCE_LOOP)
+    back2 = api.parse_controller_bindings(api.serialize_controller_bindings(b))
+    assert back2.walk_forward.source == api.AXIS_POT2
+    assert back2.walk_forward.invert is True
+    assert back2.walk_forward.deadband == pytest.approx(0.123, abs=1e-3)
+    assert back2.tricks[0].source == api.BOOL_NAV2_RIGHT
+    assert back2.tricks[0].trick == api.TRICK_DANCE_LOOP
+
+
+def test_controller_default_bindings_match_set_payload():
+    # The SET_BINDINGS golden payload carries the serialized default table.
+    case = next(
+        c
+        for c in VECTORS["controller"]["cases"]
+        if c["name"] == "controller_set_bindings_default"
+    )
+    payload = api.serialize_controller_bindings(api.ControllerBindings())
+    assert payload.hex() == case["bindings"]
+
+
+def test_parse_controller_result():
+    ok = api.parse_controller_result(bytes([api.CONTROLLER_OK]))
+    assert ok.ok and ok.result == api.CONTROLLER_OK
+    bad = api.parse_controller_result(bytes([api.CONTROLLER_BAD_REQUEST]))
+    assert not bad.ok and bad.result == api.CONTROLLER_BAD_REQUEST
+    empty = api.parse_controller_result(b"")
+    assert empty.result == api.CONTROLLER_BAD_REQUEST
+
+
+def test_parse_controller_state_matches_telemetry():
+    # The CONTROLLER_GET_STATE response payload is identical to the
+    # controller_state telemetry stream, so api.parse_controller_state reuses
+    # the telemetry decoder.
+    case = next(
+        c for c in VECTORS["telemetry"]["cases"] if c["name"] == "controller_state"
+    )
+    rec = api.parse_controller_state(bytes.fromhex(case["payload"]))
+    assert isinstance(rec, telemetry.ControllerStateTelemetry)
+    assert rec.mode == case["expect"]["mode"]
+    assert rec.twist_vx == pytest.approx(case["expect"]["twist_vx"], abs=1e-6)
 
 
 # --------------------------------------------------------------------------- #
