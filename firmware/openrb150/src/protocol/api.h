@@ -127,6 +127,10 @@ constexpr uint8_t kHello = 0x01;
 constexpr uint8_t kHeartbeat = 0x02;
 constexpr uint8_t kGetStatus = 0x03;
 constexpr uint8_t kGetCapabilities = 0x04;
+// JETSON_HEARTBEAT (lmt.13): liveness from the Jetson autonomy client only.
+// Distinct from the generic kHeartbeat so a Mac/CLI heartbeat never refreshes
+// Jetson authority. Response mirrors kHeartbeat: uptime_ms(4), state(1).
+constexpr uint8_t kJetsonHeartbeat = 0x05;
 }  // namespace msg
 
 // Header flag bits.

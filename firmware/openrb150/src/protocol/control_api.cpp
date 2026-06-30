@@ -6,6 +6,7 @@ void ControlApi::reset() {
   estop_ = false;
   disarm_ = false;
   clear_fault_ = false;
+  jetson_hb_ = false;
   live_state_ = 0;
   live_fault_ = 0;
 }
@@ -13,6 +14,12 @@ void ControlApi::reset() {
 bool ControlApi::consumeClearFault() {
   const bool pending = clear_fault_;
   clear_fault_ = false;
+  return pending;
+}
+
+bool ControlApi::consumeJetsonHeartbeat() {
+  const bool pending = jetson_hb_;
+  jetson_hb_ = false;
   return pending;
 }
 

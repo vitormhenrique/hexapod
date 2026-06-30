@@ -504,7 +504,8 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
 //   * PassivePose     - torque-off pose streaming lands in ubs.6; available
 //                        once wired (the passive command group enters the
 //                        torque-off PassivePoseStream state).
-//   * JetsonControl   - Jetson bridge lands later; NotImplemented.
+//   * JetsonControl   - Jetson heartbeat -> arbiter authority is wired
+//                        (lmt.13); available, defaults off, gated by RC.
 void updateFeatureFlags(uint32_t /*now_ms*/) {
   using protocol::Feature;
   using protocol::FeatureReason;
@@ -541,9 +542,12 @@ void updateFeatureFlags(uint32_t /*now_ms*/) {
   // passive command group + safety FSM own the actual mode; this just reports
   // the capability as available so GET_CAPABILITIES / feature_state are honest.
   g_featureApi.setAvailability(Feature::PassivePose, true, FeatureReason::None);
-  // JetsonControl: not yet wired in this build.
-  g_featureApi.setAvailability(Feature::JetsonControl, false,
-                               FeatureReason::NotImplemented);
+  // JetsonControl: the Jetson heartbeat -> arbiter authority path is wired
+  // (lmt.13). Report the capability as available so a host can opt in via
+  // FEATURE_SET; it defaults off and only becomes effective authority when the
+  // RC autonomy switch + RC arm + a fresh Jetson heartbeat all agree.
+  g_featureApi.setAvailability(Feature::JetsonControl, true,
+                               FeatureReason::None);
 
   g_featureApi.setLiveState(g_safetyState);
 
@@ -603,6 +607,18 @@ void controlTask(void*) {
     // robot this cycle; the result gates the DXL goal-write path in dxlTask.
     const uint32_t now_ms =
         static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    // Forward a fresh Jetson autonomy heartbeat (JETSON_HEARTBEAT USB command)
+    // into the arbiter, but only while the host has enabled the JetsonControl
+    // feature (a software master-enable, default off). The arbiter still
+    // requires RC armed + the RC autonomy switch before it ever hands authority
+    // to the Jetson, and any RC kill / disarm revokes it immediately
+    // (AGENTS.md 1.1 / 6.4). The feature gate reads the prior cycle's effective
+    // state (refreshed at the loop tail); a one-tick lag is negligible against
+    // the 250 ms heartbeat TTL. Always consume so a stale flag cannot linger.
+    if (g_controlApi.consumeJetsonHeartbeat() &&
+        g_featureApi.effectiveEnabled(protocol::Feature::JetsonControl)) {
+      g_arbiter.jetsonHeartbeat(now_ms);
+    }
     safety::RcInputs rc_in;
     rc_in.ever_seen = g_rcStatus.ever_seen;
     rc_in.kill = g_rcStatus.kill;

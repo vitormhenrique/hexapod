@@ -97,6 +97,18 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       payload_len = 5;
       break;
     }
+    case msg::kJetsonHeartbeat: {
+      // Jetson autonomy liveness (lmt.13). Record it on the ControlApi so the
+      // control task can stamp the arbiter (gated by the JetsonControl feature
+      // + RC autonomy switch). The response mirrors kHeartbeat so the Jetson
+      // can read back the live state and tell whether it holds authority
+      // (JetsonAssisted) yet.
+      if (ctrl != nullptr) ctrl->noteJetsonHeartbeat();
+      putU32(&payload[0], status.uptime_ms);
+      payload[4] = status.state;
+      payload_len = 5;
+      break;
+    }
     case msg::kGetStatus: {
       putU32(&payload[0], status.uptime_ms);
       payload[4] = status.state;

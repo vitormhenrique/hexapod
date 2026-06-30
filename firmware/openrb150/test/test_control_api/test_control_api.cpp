@@ -173,6 +173,60 @@ void test_unknown_without_ctrl_is_error() {
   TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(api::Error::UnknownMsg), p[0]);
 }
 
+void test_jetson_heartbeat_notes_once_and_echoes_state() {
+  // JETSON_HEARTBEAT (lmt.13) records a one-shot liveness flag on the ControlApi
+  // and answers with uptime_ms(4) + state(1) so the Jetson can read back the
+  // live state and learn whether it has authority yet.
+  ControlApi ctrl;
+  ctrl.setLiveState(7, 0);  // JetsonAssisted
+  // No heartbeat yet.
+  TEST_ASSERT_FALSE(ctrl.consumeJetsonHeartbeat());
+
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  uint8_t req[kMaxWireFrame];
+  const size_t req_n =
+      buildRequest(api::msg::kJetsonHeartbeat, 9, nullptr, 0, req, sizeof(req));
+  uint8_t resp[kMaxWireFrame];
+  const api::DeviceInfo info = makeInfo();
+  const api::StatusSnapshot st = makeStatus(7);
+  const size_t resp_n =
+      api::handleRequest(req + 1, req_n - 2, info, st, resp, sizeof(resp),
+                         nullptr, nullptr, &ctrl);
+  TEST_ASSERT_TRUE(resp_n > 0);
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    decodeFrameBody(resp + 1, resp_n - 2, &h, p, kMaxPayload,
+                                    &len));
+  TEST_ASSERT_EQUAL_UINT(5, len);
+  TEST_ASSERT_EQUAL_HEX8(7, p[4]);  // echoes the live state
+  // The flag is one-shot: drained exactly once.
+  TEST_ASSERT_TRUE(ctrl.consumeJetsonHeartbeat());
+  TEST_ASSERT_FALSE(ctrl.consumeJetsonHeartbeat());
+}
+
+void test_jetson_heartbeat_without_ctrl_still_answers() {
+  // The dispatcher answers JETSON_HEARTBEAT even without a ControlApi (it just
+  // cannot record liveness); it must not be reported as an unknown message.
+  uint8_t req[kMaxWireFrame];
+  const size_t req_n =
+      buildRequest(api::msg::kJetsonHeartbeat, 1, nullptr, 0, req, sizeof(req));
+  uint8_t resp[kMaxWireFrame];
+  const api::DeviceInfo info = makeInfo();
+  const api::StatusSnapshot st = makeStatus();
+  const size_t resp_n = api::handleRequest(req + 1, req_n - 2, info, st, resp,
+                                           sizeof(resp));
+  Header h;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+  TEST_ASSERT_TRUE(resp_n > 0);
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                    decodeFrameBody(resp + 1, resp_n - 2, &h, p, kMaxPayload,
+                                    &len));
+  TEST_ASSERT_FALSE((h.flags & api::flag::kError) != 0);
+  TEST_ASSERT_EQUAL_UINT(5, len);
+}
+
 }  // namespace
 
 int main(int, char**) {
@@ -183,5 +237,7 @@ int main(int, char**) {
   RUN_TEST(test_set_arming_bad_request);
   RUN_TEST(test_set_mode_honors_disarm_and_estop_rejects_others);
   RUN_TEST(test_unknown_without_ctrl_is_error);
+  RUN_TEST(test_jetson_heartbeat_notes_once_and_echoes_state);
+  RUN_TEST(test_jetson_heartbeat_without_ctrl_still_answers);
   return UNITY_END();
 }

@@ -86,6 +86,18 @@ class ControlApi {
   // then auto-clears. Drive safety::StateMachine::requestClearFault() with it.
   bool consumeClearFault();
 
+  // --- Jetson autonomy heartbeat (lmt.13) ----------------------------------
+  // Record a fresh Jetson autonomy heartbeat (JETSON_HEARTBEAT session command,
+  // api::msg::kJetsonHeartbeat). The control task drains this each cycle and
+  // stamps the CommandArbiter -- but only while the host has enabled the
+  // JetsonControl feature, and the arbiter still requires RC arm + the RC
+  // autonomy switch before Jetson ever gains authority. This is distinct from
+  // the generic session HEARTBEAT (any client) so a Mac heartbeat can never
+  // grant Jetson authority.
+  void noteJetsonHeartbeat() { jetson_hb_ = true; }
+  // One-shot: returns true at most once per received heartbeat, then clears.
+  bool consumeJetsonHeartbeat();
+
   // --- Command handling ----------------------------------------------------
   // Handle one control command. Returns true if `msg_id` is in the control
   // group (response written to out/out_len/out_flags), false otherwise.
@@ -100,6 +112,7 @@ class ControlApi {
   bool estop_ = false;
   bool disarm_ = false;
   bool clear_fault_ = false;
+  bool jetson_hb_ = false;
   uint8_t live_state_ = 0;
   uint8_t live_fault_ = 0;
 };

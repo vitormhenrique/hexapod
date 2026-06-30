@@ -17,6 +17,10 @@ MSG_HELLO = 0x01
 MSG_HEARTBEAT = 0x02
 MSG_GET_STATUS = 0x03
 MSG_GET_CAPABILITIES = 0x04
+# JETSON_HEARTBEAT (lmt.13): Jetson-autonomy-only liveness ping. Distinct from
+# the generic HEARTBEAT so a Mac/CLI heartbeat never refreshes Jetson authority.
+# Reply mirrors HEARTBEAT (uptime_ms, state).
+MSG_JETSON_HEARTBEAT = 0x05
 
 # Telemetry / logging command group (mirrors src/protocol/telemetry.h).
 MSG_SUBSCRIBE = 0x10
@@ -352,6 +356,17 @@ def build_hello(seq: int = 0) -> bytes:
 def build_heartbeat(seq: int = 0) -> bytes:
     """Build a HEARTBEAT command (liveness ping; replies uptime + state)."""
     return build_command(MSG_HEARTBEAT, seq=seq)
+
+
+def build_jetson_heartbeat(seq: int = 0) -> bytes:
+    """Build a JETSON_HEARTBEAT command (Jetson autonomy liveness, lmt.13).
+
+    Refreshes Jetson authority on the firmware arbiter -- but only while the
+    host has enabled the JetsonControl feature and the RC autonomy switch +
+    RC arm agree. Reply mirrors HEARTBEAT (uptime_ms, state); the returned
+    state byte reveals whether the Jetson holds authority (JetsonAssisted).
+    """
+    return build_command(MSG_JETSON_HEARTBEAT, seq=seq)
 
 
 def build_get_status(seq: int = 0) -> bytes:

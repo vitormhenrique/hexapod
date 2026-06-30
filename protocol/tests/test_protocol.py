@@ -264,6 +264,7 @@ def test_api_unknown_is_error():
 _SESSION_BUILDERS = {
     "hello": api.build_hello,
     "heartbeat": api.build_heartbeat,
+    "jetson_heartbeat": api.build_jetson_heartbeat,
     "get_status": api.build_get_status,
     "get_capabilities": api.build_get_capabilities,
 }
@@ -275,6 +276,18 @@ def test_session_builders_match_golden(name):
     case = next(c for c in VECTORS["api"]["cases"] if c["name"] == name)
     wire = _SESSION_BUILDERS[name](seq=case["seq"])
     assert wire.hex() == case["request"]
+
+
+def test_jetson_heartbeat_response_decodes_like_heartbeat():
+    # The JETSON_HEARTBEAT reply mirrors HEARTBEAT (uptime_ms, state); the state
+    # byte is how the Jetson learns whether it holds authority (JetsonAssisted).
+    case = next(c for c in VECTORS["api"]["cases"] if c["name"] == "jetson_heartbeat")
+    header, payload = api.parse_response(bytes.fromhex(case["response"]))
+    uptime_ms, state = api.parse_heartbeat(payload)
+    want = VECTORS["api"]["status"]
+    assert header.seq == case["seq"]
+    assert uptime_ms == want["uptime_ms"]
+    assert state == want["state"]
 
 
 _CONFIG_CMD_BUILDERS = {

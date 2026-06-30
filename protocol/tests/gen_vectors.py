@@ -57,6 +57,9 @@ def _api_response(msg_id: int, seq: int) -> bytes:
         payload += _name_bytes(dev["device_name"])
     elif msg_id == api_mod.MSG_HEARTBEAT:
         payload = struct.pack("<I", st["uptime_ms"]) + bytes([st["state"]])
+    elif msg_id == api_mod.MSG_JETSON_HEARTBEAT:
+        # Jetson liveness reply mirrors HEARTBEAT (uptime_ms, state).
+        payload = struct.pack("<I", st["uptime_ms"]) + bytes([st["state"]])
     elif msg_id == api_mod.MSG_GET_STATUS:
         sflags = (0x01 if st["dxl_power"] else 0) | (
             0x02 if st["dxl_power_control"] else 0
@@ -428,6 +431,7 @@ def build_api() -> dict:
     specs = [
         ("hello", api_mod.MSG_HELLO, 1),
         ("heartbeat", api_mod.MSG_HEARTBEAT, 2),
+        ("jetson_heartbeat", api_mod.MSG_JETSON_HEARTBEAT, 5),
         ("get_status", api_mod.MSG_GET_STATUS, 3),
         ("get_capabilities", api_mod.MSG_GET_CAPABILITIES, 4),
     ]
