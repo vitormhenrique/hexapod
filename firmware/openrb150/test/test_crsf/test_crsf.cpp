@@ -41,6 +41,27 @@ uint8_t buildRcFrame(const uint16_t ch[kNumChannels], uint8_t* frame) {
   return static_cast<uint8_t>(3 + kRcPayloadBytes + 1);
 }
 
+// Build a CRSF LINK_STATISTICS (0x14) frame from a LinkStatistics struct.
+uint8_t buildLinkStatsFrame(const LinkStatistics& ls, uint8_t* frame) {
+  frame[0] = kSyncByte;
+  frame[1] = kLinkStatsPayloadBytes + 2;  // type + payload + crc
+  frame[2] = kFrameTypeLinkStats;
+  uint8_t* d = &frame[3];
+  d[0] = ls.up_rssi_ant1;
+  d[1] = ls.up_rssi_ant2;
+  d[2] = ls.up_link_quality;
+  d[3] = static_cast<uint8_t>(ls.up_snr);
+  d[4] = ls.active_antenna;
+  d[5] = ls.rf_mode;
+  d[6] = ls.up_tx_power;
+  d[7] = ls.down_rssi;
+  d[8] = ls.down_link_quality;
+  d[9] = static_cast<uint8_t>(ls.down_snr);
+  frame[3 + kLinkStatsPayloadBytes] =
+      crc8(&frame[2], kLinkStatsPayloadBytes + 1);
+  return static_cast<uint8_t>(3 + kLinkStatsPayloadBytes + 1);
+}
+
 }  // namespace
 
 void test_crc8_known_vector() {
@@ -113,6 +134,76 @@ void test_parser_rejects_bad_crc() {
   TEST_ASSERT_FALSE(got);
   TEST_ASSERT_EQUAL_UINT32(1, p.crcErrors());
   TEST_ASSERT_EQUAL_UINT32(0, p.framesDecoded());
+}
+
+void test_parser_decodes_link_statistics() {
+  // a8n: LINK_STATISTICS (0x14) is decoded into the internal snapshot but is not
+  // an RC channels frame, so push() returns false and framesDecoded stays 0.
+  LinkStatistics ls;
+  ls.up_rssi_ant1 = 70;  // -70 dBm
+  ls.up_rssi_ant2 = 85;
+  ls.up_link_quality = 100;
+  ls.up_snr = -5;
+  ls.active_antenna = 1;
+  ls.rf_mode = 6;
+  ls.up_tx_power = 3;
+  ls.down_rssi = 60;
+  ls.down_link_quality = 99;
+  ls.down_snr = 8;
+  uint8_t frame[kMaxFrameLen];
+  const uint8_t len = buildLinkStatsFrame(ls, frame);
+
+  Parser p;
+  ChannelData out;
+  TEST_ASSERT_FALSE(p.hasLinkStats());
+  bool got = false;
+  for (uint8_t i = 0; i < len; ++i) {
+    if (p.push(frame[i], out)) got = true;
+  }
+  TEST_ASSERT_FALSE(got);
+  TEST_ASSERT_EQUAL_UINT32(0, p.framesDecoded());
+  TEST_ASSERT_EQUAL_UINT32(0, p.crcErrors());
+  TEST_ASSERT_TRUE(p.hasLinkStats());
+  TEST_ASSERT_EQUAL_UINT32(1, p.linkStatsCount());
+  const LinkStatistics& g = p.linkStats();
+  TEST_ASSERT_EQUAL_UINT8(70, g.up_rssi_ant1);
+  TEST_ASSERT_EQUAL_UINT8(85, g.up_rssi_ant2);
+  TEST_ASSERT_EQUAL_UINT8(100, g.up_link_quality);
+  TEST_ASSERT_EQUAL_INT8(-5, g.up_snr);
+  TEST_ASSERT_EQUAL_UINT8(1, g.active_antenna);
+  TEST_ASSERT_EQUAL_UINT8(6, g.rf_mode);
+  TEST_ASSERT_EQUAL_UINT8(3, g.up_tx_power);
+  TEST_ASSERT_EQUAL_UINT8(60, g.down_rssi);
+  TEST_ASSERT_EQUAL_UINT8(99, g.down_link_quality);
+  TEST_ASSERT_EQUAL_INT8(8, g.down_snr);
+}
+
+void test_parser_rc_after_link_stats() {
+  // Mixed telemetry: a LINK_STATISTICS frame must not wedge the RC channel path.
+  LinkStatistics ls;
+  memset(&ls, 0, sizeof(ls));
+  ls.up_link_quality = 50;
+  uint8_t lframe[kMaxFrameLen];
+  const uint8_t llen = buildLinkStatsFrame(ls, lframe);
+
+  uint16_t ch[kNumChannels];
+  for (uint8_t i = 0; i < kNumChannels; ++i) ch[i] = kTicksMid;
+  ch[0] = kTicksMax;
+  uint8_t rframe[kMaxFrameLen];
+  const uint8_t rlen = buildRcFrame(ch, rframe);
+
+  Parser p;
+  ChannelData out;
+  for (uint8_t i = 0; i < llen; ++i) p.push(lframe[i], out);
+  bool got = false;
+  for (uint8_t i = 0; i < rlen; ++i) {
+    if (p.push(rframe[i], out)) got = true;
+  }
+  TEST_ASSERT_TRUE(got);
+  TEST_ASSERT_EQUAL_UINT16(kTicksMax, out.channels[0]);
+  TEST_ASSERT_EQUAL_UINT32(1, p.framesDecoded());
+  TEST_ASSERT_TRUE(p.hasLinkStats());
+  TEST_ASSERT_EQUAL_UINT8(50, p.linkStats().up_link_quality);
 }
 
 void test_rc_status_arm_kill_gait_mapping() {
@@ -218,6 +309,8 @@ int main(int, char**) {
   RUN_TEST(test_parser_decodes_full_frame);
   RUN_TEST(test_parser_resyncs_after_garbage);
   RUN_TEST(test_parser_rejects_bad_crc);
+  RUN_TEST(test_parser_decodes_link_statistics);
+  RUN_TEST(test_parser_rc_after_link_stats);
   RUN_TEST(test_rc_status_arm_kill_gait_mapping);
   RUN_TEST(test_rc_status_failsafe_on_stale);
   RUN_TEST(test_rc_status_init_is_safe);

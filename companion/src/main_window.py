@@ -22,6 +22,7 @@ from ui.pages import (
     OverviewPage,
     PassivePosePage,
     PlotWorkbenchPage,
+    RcTroubleshootingPage,
     ServoConfigPage,
     ServoTuningPage,
     SensorDashboardPage,
@@ -65,6 +66,7 @@ class MainWindow(QMainWindow):
         self.nav.add_item("urdf", "URDF Viewer")
         self.nav.add_section("Diagnose")
         self.nav.add_item("sensors", "Sensor Dashboard")
+        self.nav.add_item("rc_troubleshooting", "RC Troubleshooting")
         self.nav.add_item("diagnostics", "Diagnostics")
         self.nav.finish()
         self.nav.navigated.connect(self._navigate)
@@ -104,6 +106,7 @@ class MainWindow(QMainWindow):
             ("model", ModelViewerPage(self.service)),
             ("urdf", UrdfViewerPage(self.service)),
             ("sensors", SensorDashboardPage(self.service)),
+            ("rc_troubleshooting", RcTroubleshootingPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),
         ):
             self._pages[key] = self.stack.addWidget(page)

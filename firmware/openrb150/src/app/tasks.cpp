@@ -63,6 +63,24 @@ volatile uint8_t g_servoStatusCount = 0;
 crsf::Parser g_crsfParser;
 crsf::RcStatus g_rcStatus;
 
+// Raw RC diagnostics snapshot (a8n): the CRSF layer the parsed g_rcStatus hides
+// -- raw 11-bit ticks, frame-health counters, and decoded LINK_STATISTICS. Sole
+// writer is rcTask; telemetry reads a copy for the rc_diagnostics stream and the
+// companion RC troubleshooting page. Plain aggregate so {} value-initializes it
+// to a safe zero state (no link seen, ticks 0).
+struct RcDiagSnapshot {
+  uint16_t raw_ticks[crsf::kNumChannels];
+  uint32_t frames_decoded;
+  uint32_t crc_errors;
+  uint32_t link_stats_count;
+  uint32_t last_frame_ms;
+  bool ever_seen;
+  bool failsafe;
+  bool has_link_stats;
+  crsf::LinkStatistics link_stats;
+};
+RcDiagSnapshot g_rcDiag{};
+
 // Controller bridge (oha.2/oha.3): decodes the ChannelPack CRSF frame into a
 // high-level ControllerCommand (modes, twist, body pose, gait, shape, tricks,
 // arm/estop, feature requests). rcTask is the sole writer; controlTask reads a
@@ -483,6 +501,45 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       // gimbal/pot/encoder/switch/button/nav input. 57-byte fixed layout lives
       // in the portable ControllerApi codec; rcTask publishes g_ctrlCmd/g_ctrlRaw.
       o = protocol::ControllerApi::encodeState(g_ctrlCmd, g_ctrlRaw, p);
+      break;
+    }
+    case StreamId::RcDiagnostics: {
+      // Raw CRSF layer for RC troubleshooting (a8n): the raw 11-bit ticks, frame
+      // health counters, last-frame age, and decoded LINK_STATISTICS signal
+      // quality. Complements the parsed RcInput stream (microsecond channels +
+      // decoded arm/kill/gait/autonomy flags) so the host can show both.
+      // Layout: flags(1), 16 x raw_tick(u16), frames_decoded(u32),
+      // crc_errors(u32), link_stats_count(u32), last_frame_age_ms(u16), then the
+      // 10-byte link-stats block = 57 bytes, within the 256 payload cap.
+      // flags: bit0 ever_seen, bit1 failsafe, bit2 link_stats_valid.
+      uint8_t flags = 0;
+      if (g_rcDiag.ever_seen) flags |= 0x01;
+      if (g_rcDiag.failsafe) flags |= 0x02;
+      if (g_rcDiag.has_link_stats) flags |= 0x04;
+      p[o++] = flags;
+      for (uint8_t i = 0; i < crsf::kNumChannels; ++i) {
+        o += put16(&p[o], g_rcDiag.raw_ticks[i]);
+      }
+      o += put32(&p[o], g_rcDiag.frames_decoded);
+      o += put32(&p[o], g_rcDiag.crc_errors);
+      o += put32(&p[o], g_rcDiag.link_stats_count);
+      // Elapsed ms since the last valid RC frame, capped at 0xFFFF; 0xFFFF also
+      // encodes "never seen" so the host can show a clear dropout indicator.
+      uint32_t age = g_rcDiag.ever_seen ? (now_ms - g_rcDiag.last_frame_ms)
+                                        : 0xFFFFu;
+      if (age > 0xFFFFu) age = 0xFFFFu;
+      o += put16(&p[o], static_cast<uint16_t>(age));
+      const crsf::LinkStatistics& ls = g_rcDiag.link_stats;
+      p[o++] = ls.up_rssi_ant1;
+      p[o++] = ls.up_rssi_ant2;
+      p[o++] = ls.up_link_quality;
+      p[o++] = static_cast<uint8_t>(ls.up_snr);
+      p[o++] = ls.active_antenna;
+      p[o++] = ls.rf_mode;
+      p[o++] = ls.up_tx_power;
+      p[o++] = ls.down_rssi;
+      p[o++] = ls.down_link_quality;
+      p[o++] = static_cast<uint8_t>(ls.down_snr);
       break;
     }
   }
@@ -1479,6 +1536,24 @@ void rcTask(void*) {
     g_ctrlRaw = g_bridge.rawInputs();
     g_ctrlBindings = g_bridge.bindings();
     deriveRcStatus(g_ctrlCmd, frame, fresh, now_ms, g_rcStatus);
+    // Publish the raw RC diagnostics snapshot (a8n). Raw ticks refresh only on a
+    // fresh frame (so a dropout freezes the last-known sticks); the parser's
+    // frame-health counters and link statistics are always current.
+    if (fresh) {
+      for (uint8_t i = 0; i < crsf::kNumChannels; ++i) {
+        g_rcDiag.raw_ticks[i] = frame.channels[i];
+      }
+    }
+    g_rcDiag.frames_decoded = g_crsfParser.framesDecoded();
+    g_rcDiag.crc_errors = g_crsfParser.crcErrors();
+    g_rcDiag.link_stats_count = g_crsfParser.linkStatsCount();
+    g_rcDiag.has_link_stats = g_crsfParser.hasLinkStats();
+    if (g_rcDiag.has_link_stats) {
+      g_rcDiag.link_stats = g_crsfParser.linkStats();
+    }
+    g_rcDiag.last_frame_ms = g_rcStatus.last_frame_ms;
+    g_rcDiag.ever_seen = g_rcStatus.ever_seen;
+    g_rcDiag.failsafe = g_rcStatus.failsafe;
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kRc));
   }
 }

@@ -218,6 +218,30 @@ void test_servo_goals_stream_is_subscribable() {
   TEST_ASSERT_TRUE(m.shouldEmit(StreamId::ServoGoals, 0));  // primes + emits
 }
 
+void test_controller_state_stream_is_subscribable() {
+  // ControllerState (oha.4) is stream id 10. a8n backfilled its missing kMaxRate
+  // entry (previously implicitly zero -> unsubscribable), capping it at 50 Hz.
+  SubscriptionManager m;
+  TEST_ASSERT_EQUAL_UINT16(
+      50, SubscriptionManager::maxRateHz(StreamId::ControllerState));
+  const uint16_t eff = m.subscribe(StreamId::ControllerState, 200);
+  TEST_ASSERT_EQUAL_UINT16(50, eff);
+  TEST_ASSERT_TRUE(m.enabled(StreamId::ControllerState));
+  TEST_ASSERT_TRUE(m.shouldEmit(StreamId::ControllerState, 0));
+}
+
+void test_rc_diagnostics_stream_is_subscribable() {
+  // RcDiagnostics (a8n) is stream id 11, appended without renumbering, and caps
+  // at 50 Hz. Carries raw CRSF ticks + frame health + link stats.
+  SubscriptionManager m;
+  TEST_ASSERT_EQUAL_UINT16(
+      50, SubscriptionManager::maxRateHz(StreamId::RcDiagnostics));
+  const uint16_t eff = m.subscribe(StreamId::RcDiagnostics, 200);  // clamps
+  TEST_ASSERT_EQUAL_UINT16(50, eff);
+  TEST_ASSERT_TRUE(m.enabled(StreamId::RcDiagnostics));
+  TEST_ASSERT_TRUE(m.shouldEmit(StreamId::RcDiagnostics, 0));  // primes + emits
+}
+
 void test_leg_state_stream_is_subscribable() {
   // The commanded foot-target stream (eax.3) is stream id 9, appended without
   // renumbering, and caps at 50 Hz like the other servo-rate streams.
@@ -249,5 +273,7 @@ int main(int, char**) {
   RUN_TEST(test_joint_state_stream_is_subscribable);
   RUN_TEST(test_servo_goals_stream_is_subscribable);
   RUN_TEST(test_leg_state_stream_is_subscribable);
+  RUN_TEST(test_controller_state_stream_is_subscribable);
+  RUN_TEST(test_rc_diagnostics_stream_is_subscribable);
   return UNITY_END();
 }

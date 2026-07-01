@@ -81,6 +81,19 @@ def rc_input_payload() -> bytes:
     return body
 
 
+def rc_diagnostics_payload() -> bytes:
+    # flags: bit0 ever_seen, bit1 failsafe, bit2 link_stats_valid -> 0x05.
+    body = bytes([0x05])
+    for _ in range(NUM_CHANNELS):
+        body += struct.pack("<H", 992)  # raw ticks (CRSF mid)
+    body += struct.pack("<III", 100, 0, 10)  # frames_decoded, crc_errors, ls_count
+    body += struct.pack("<H", 15)  # last_frame_age_ms
+    # link stats: up_rssi_ant1/ant2, up_lq, up_snr(i8), antenna, rf_mode,
+    # tx_power, down_rssi, down_lq, down_snr(i8)
+    body += struct.pack("<BBBbBBBBBb", 70, 85, 100, 8, 0, 6, 3, 60, 99, 7)
+    return body
+
+
 def api_stats_payload() -> bytes:
     body = struct.pack("<I", 0)  # tx_backlog
     for _ in range(NUM_STREAMS):
@@ -104,6 +117,7 @@ _STREAM_BUILDERS = [
     (tlm.StreamId.CONTACT_STATE, contact_state_payload),
     (tlm.StreamId.I2C_SENSORS_RAW, i2c_sensors_raw_payload),
     (tlm.StreamId.RC_INPUT, rc_input_payload),
+    (tlm.StreamId.RC_DIAGNOSTICS, rc_diagnostics_payload),
     (tlm.StreamId.API_STATS, api_stats_payload),
     (tlm.StreamId.JOINT_STATE, joint_state_payload),
 ]

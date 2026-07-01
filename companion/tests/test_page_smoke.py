@@ -32,6 +32,7 @@ def _page_classes():
         OverviewPage,
         PassivePosePage,
         PlotWorkbenchPage,
+        RcTroubleshootingPage,
         SensorDashboardPage,
         ServoConfigPage,
         ServoTuningPage,
@@ -50,6 +51,7 @@ def _page_classes():
         ServoTuningPage,
         ModelViewerPage,
         SensorDashboardPage,
+        RcTroubleshootingPage,
         DiagnosticsPage,
         PlotWorkbenchPage,
         UrdfViewerPage,
@@ -77,8 +79,8 @@ def test_page_consumes_replay_session(qtbot, tmp_path, page_cls) -> None:
     replay = build_sample_session(tmp_path)
     emitted = replay_into_service(replay, service)
 
-    # The fixture covers 8 streams x 3 frames each.
-    assert emitted == 24
+    # The fixture covers 9 streams x 3 frames each.
+    assert emitted == 27
     # Page survived the telemetry storm and is still a live widget.
     assert page.isWidgetType()
 
@@ -87,7 +89,7 @@ def test_sample_session_roundtrips(tmp_path) -> None:
     """The fixture's raw frames must all re-decode through the protocol stack."""
     replay = build_sample_session(tmp_path, frames_per_stream=2)
     decoded = list(replay.iter_decoded_frames())
-    assert len(decoded) == 16
+    assert len(decoded) == 18
     assert all(df.stream is not None and df.record is not None for df in decoded)
     # Manifest and event log are present and readable.
     assert replay.meta["robot_name"] == "fixture"

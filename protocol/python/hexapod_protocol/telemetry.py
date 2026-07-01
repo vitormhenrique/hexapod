@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 11
+NUM_STREAMS = 12
 
 
 class StreamId(IntEnum):
@@ -29,6 +29,7 @@ class StreamId(IntEnum):
     SERVO_GOALS = 8
     LEG_STATE = 9
     CONTROLLER_STATE = 10
+    RC_DIAGNOSTICS = 11
 
 
 STREAM_NAMES = {
@@ -43,6 +44,7 @@ STREAM_NAMES = {
     StreamId.SERVO_GOALS: "servo_goals",
     StreamId.LEG_STATE: "leg_state",
     StreamId.CONTROLLER_STATE: "controller_state",
+    StreamId.RC_DIAGNOSTICS: "rc_diagnostics",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -205,6 +207,57 @@ class RcInputTelemetry:
 
 
 @dataclass
+class RcLinkStats:
+    """Decoded CRSF LINK_STATISTICS (0x14) signal quality (a8n).
+
+    RSSI fields are the CRSF convention of the positive magnitude of a negative
+    dBm (e.g. ``up_rssi_ant1 == 70`` means -70 dBm); use the ``*_dbm`` helpers
+    for the signed value. ``up_tx_power`` is the CRSF power-table index, not mW.
+    """
+
+    up_rssi_ant1: int = 0
+    up_rssi_ant2: int = 0
+    up_link_quality: int = 0
+    up_snr: int = 0
+    active_antenna: int = 0
+    rf_mode: int = 0
+    up_tx_power: int = 0
+    down_rssi: int = 0
+    down_link_quality: int = 0
+    down_snr: int = 0
+
+    @property
+    def up_rssi_dbm(self) -> int:
+        """Uplink RSSI of the active antenna as signed dBm."""
+        raw = self.up_rssi_ant2 if self.active_antenna else self.up_rssi_ant1
+        return -raw
+
+    @property
+    def down_rssi_dbm(self) -> int:
+        return -self.down_rssi
+
+
+@dataclass
+class RcDiagnosticsTelemetry:
+    """Raw CRSF layer for RC troubleshooting (a8n).
+
+    Complements :class:`RcInputTelemetry` (the parsed microsecond channels +
+    arm/kill/gait/autonomy flags) with the raw 11-bit ticks, frame-health
+    counters, dropout age, and decoded link statistics.
+    """
+
+    ever_seen: bool = False
+    failsafe: bool = True
+    link_stats_valid: bool = False
+    raw_ticks: list[int] = field(default_factory=list)
+    frames_decoded: int = 0
+    crc_errors: int = 0
+    link_stats_count: int = 0
+    last_frame_age_ms: int = 0xFFFF
+    link_stats: RcLinkStats = field(default_factory=RcLinkStats)
+
+
+@dataclass
 class ApiStatsTelemetry:
     tx_backlog: int
     dropped_per_stream: list[int] = field(default_factory=list)
@@ -284,9 +337,7 @@ class ControllerRawInputs:
     switches: list[bool] = field(default_factory=lambda: [False] * 8)
     buttons: list[bool] = field(default_factory=lambda: [False] * 4)
     toggles: list[int] = field(default_factory=lambda: [0, 0])
-    nav: list[list[bool]] = field(
-        default_factory=lambda: [[False] * 5, [False] * 5]
-    )
+    nav: list[list[bool]] = field(default_factory=lambda: [[False] * 5, [False] * 5])
 
 
 @dataclass
@@ -428,6 +479,57 @@ def decode_rc_input(p: bytes) -> RcInputTelemetry:
         gait_index=gait,
         channels_us=channels,
     )
+
+
+def decode_rc_diagnostics(p: bytes) -> RcDiagnosticsTelemetry:
+    """Decode the rc_diagnostics stream (a8n). Defensive on short payloads.
+
+    Layout: flags(1), 16 x raw_tick(u16), frames_decoded(u32), crc_errors(u32),
+    link_stats_count(u32), last_frame_age_ms(u16), then the 10-byte link-stats
+    block (up_rssi_ant1, up_rssi_ant2, up_lq, up_snr[i8], active_antenna,
+    rf_mode, up_tx_power, down_rssi, down_lq, down_snr[i8]).
+    """
+    out = RcDiagnosticsTelemetry()
+    if len(p) < 1:
+        return out
+    flags = p[0]
+    out.ever_seen = bool(flags & 0x01)
+    out.failsafe = bool(flags & 0x02)
+    out.link_stats_valid = bool(flags & 0x04)
+    off = 1
+    ticks: list[int] = []
+    for _ in range(NUM_CHANNELS):
+        if off + 2 > len(p):
+            break
+        ticks.append(_u16(p, off))
+        off += 2
+    out.raw_ticks = ticks
+    if off + 4 <= len(p):
+        out.frames_decoded = _u32(p, off)
+        off += 4
+    if off + 4 <= len(p):
+        out.crc_errors = _u32(p, off)
+        off += 4
+    if off + 4 <= len(p):
+        out.link_stats_count = _u32(p, off)
+        off += 4
+    if off + 2 <= len(p):
+        out.last_frame_age_ms = _u16(p, off)
+        off += 2
+    if off + 10 <= len(p):
+        out.link_stats = RcLinkStats(
+            up_rssi_ant1=p[off],
+            up_rssi_ant2=p[off + 1],
+            up_link_quality=p[off + 2],
+            up_snr=struct.unpack_from("<b", p, off + 3)[0],
+            active_antenna=p[off + 4],
+            rf_mode=p[off + 5],
+            up_tx_power=p[off + 6],
+            down_rssi=p[off + 7],
+            down_link_quality=p[off + 8],
+            down_snr=struct.unpack_from("<b", p, off + 9)[0],
+        )
+    return out
 
 
 def decode_api_stats(p: bytes) -> ApiStatsTelemetry:
@@ -580,6 +682,7 @@ _DECODERS = {
     StreamId.SERVO_GOALS: decode_servo_goals,
     StreamId.LEG_STATE: decode_leg_state,
     StreamId.CONTROLLER_STATE: decode_controller_state,
+    StreamId.RC_DIAGNOSTICS: decode_rc_diagnostics,
 }
 
 

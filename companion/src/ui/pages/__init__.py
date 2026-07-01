@@ -2371,6 +2371,261 @@ class PassivePosePage(BasePage):
         )
 
 
+class RcTroubleshootingPage(BasePage):
+    title = "RC Troubleshooting"
+    subtitle = (
+        "Raw and parsed remote-control data from the receiver: CRSF link "
+        "health, frame counters, per-channel raw ticks, and decoded switches."
+    )
+
+    NUM_CH = 16
+    # CRSF channel map (firmware crsf_parser.h): 0-7 are named, 8-15 are AUX5+.
+    CHANNEL_FUNCTIONS = [
+        "Roll (lateral)",
+        "Pitch (forward)",
+        "Throttle (speed)",
+        "Yaw",
+        "Arm (AUX1)",
+        "Kill (AUX2)",
+        "Gait (AUX3)",
+        "Autonomy (AUX4)",
+        "AUX5",
+        "AUX6",
+        "AUX7",
+        "AUX8",
+        "AUX9",
+        "AUX10",
+        "AUX11",
+        "AUX12",
+    ]
+    # CRSF TX power-table index -> human label (up_tx_power is an index, not mW).
+    TX_POWER_MW = {
+        0: "0 mW",
+        1: "10 mW",
+        2: "25 mW",
+        3: "100 mW",
+        4: "500 mW",
+        5: "1 W",
+        6: "2 W",
+        7: "250 mW",
+        8: "50 mW",
+    }
+    CHANNEL_COLUMNS = ["Ch", "Function", "Raw tick", "Microseconds", "Norm [-1,1]"]
+
+    def build(self) -> None:
+        self.content.addWidget(self._link_group())
+        self.content.addWidget(self._frames_group())
+        self.content.addWidget(self._switches_group())
+        self.content.addWidget(self._channel_group())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+
+    # --- groups -----------------------------------------------------------
+
+    def _grid_of_cards(self, box: QGroupBox, keys, per_row: int = 4) -> dict:
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(16)
+        grid.setContentsMargins(6, 8, 6, 6)
+        cards: dict[str, StatCard] = {}
+        for i, (key, caption) in enumerate(keys):
+            card = StatCard(caption)
+            cards[key] = card
+            grid.addWidget(card, i // per_row, i % per_row)
+        for c in range(per_row):
+            grid.setColumnStretch(c, 1)
+        return cards
+
+    def _link_group(self) -> QGroupBox:
+        box = QGroupBox("Radio link health (CRSF link statistics)")
+        self.link = self._grid_of_cards(
+            box,
+            [
+                ("rssi", "Uplink RSSI"),
+                ("lq", "Uplink link quality"),
+                ("snr", "Uplink SNR"),
+                ("antenna", "Active antenna"),
+                ("tx", "Uplink TX power"),
+                ("rf", "RF mode"),
+                ("down_rssi", "Downlink RSSI"),
+                ("down_lq", "Downlink LQ"),
+            ],
+        )
+        return box
+
+    def _frames_group(self) -> QGroupBox:
+        box = QGroupBox("Frame health")
+        self.frame = self._grid_of_cards(
+            box,
+            [
+                ("link", "Link"),
+                ("frames", "Frames decoded"),
+                ("crc", "CRC errors"),
+                ("age", "Last frame age"),
+                ("lscount", "Link-stat frames"),
+            ],
+            per_row=5,
+        )
+        return box
+
+    def _switches_group(self) -> QGroupBox:
+        box = QGroupBox("Decoded switches (parsed RC input)")
+        self.sw = self._grid_of_cards(
+            box,
+            [
+                ("armed", "Armed"),
+                ("kill", "Kill switch"),
+                ("failsafe", "Failsafe"),
+                ("autonomy", "Autonomy"),
+                ("gait", "Gait index"),
+            ],
+            per_row=5,
+        )
+        return box
+
+    def _channel_group(self) -> QGroupBox:
+        box = QGroupBox("Channels — raw ticks & parsed values")
+        lay = QVBoxLayout(box)
+        self.table = QTableWidget(self.NUM_CH, len(self.CHANNEL_COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.CHANNEL_COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for ch in range(self.NUM_CH):
+            self.table.setItem(ch, 0, QTableWidgetItem(str(ch)))
+            self.table.setItem(ch, 1, QTableWidgetItem(self.CHANNEL_FUNCTIONS[ch]))
+            for col in range(2, len(self.CHANNEL_COLUMNS)):
+                self.table.setItem(ch, col, QTableWidgetItem("--"))
+        self.table.setMinimumHeight(430)
+        lay.addWidget(self.table)
+        hint = QLabel(
+            "Raw ticks are the receiver's 11-bit CRSF values; microseconds and "
+            "normalized values are the firmware's parsed channels."
+        )
+        hint.setStyleSheet(f"color: {DRACULA.comment};")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+        return box
+
+    # --- level helpers ----------------------------------------------------
+
+    @staticmethod
+    def _rssi_level(dbm: int) -> str:
+        if dbm >= -70:
+            return "ok"
+        if dbm >= -95:
+            return "warn"
+        return "error"
+
+    @staticmethod
+    def _lq_level(pct: int) -> str:
+        if pct >= 90:
+            return "ok"
+        if pct >= 50:
+            return "warn"
+        return "error"
+
+    # --- telemetry --------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.RC_INPUT), 20)
+            self.service.subscribe(int(tlm.StreamId.RC_DIAGNOSTICS), 20)
+        else:
+            for card in (*self.link.values(), *self.frame.values(), *self.sw.values()):
+                card.set("--", "idle")
+            for ch in range(self.NUM_CH):
+                for col in range(2, len(self.CHANNEL_COLUMNS)):
+                    self.table.item(ch, col).setText("--")
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.RC_DIAGNOSTICS):
+            self._apply_diagnostics(record)
+        elif stream_id == int(tlm.StreamId.RC_INPUT):
+            self._apply_input(record)
+
+    def _apply_diagnostics(self, rec) -> None:
+        # Frame-health counters are always valid.
+        self.frame["frames"].set(str(rec.frames_decoded), "info")
+        self.frame["crc"].set(str(rec.crc_errors), "warn" if rec.crc_errors else "ok")
+        self.frame["lscount"].set(str(rec.link_stats_count), "info")
+        if not rec.ever_seen:
+            self.frame["link"].set("no signal", "error")
+            self.frame["age"].set("never", "error")
+        elif rec.last_frame_age_ms >= 0xFFFF:
+            self.frame["link"].set("lost", "error")
+            self.frame["age"].set("never", "error")
+        else:
+            alive = not rec.failsafe
+            self.frame["link"].set(
+                "alive" if alive else "failsafe", "ok" if alive else "error"
+            )
+            self.frame["age"].set(
+                f"{rec.last_frame_age_ms} ms",
+                "ok" if rec.last_frame_age_ms < 500 else "warn",
+            )
+
+        # Link statistics are only meaningful once a 0x14 frame has arrived.
+        if rec.link_stats_valid:
+            ls = rec.link_stats
+            self.link["rssi"].set(
+                f"{ls.up_rssi_dbm} dBm", self._rssi_level(ls.up_rssi_dbm)
+            )
+            self.link["lq"].set(
+                f"{ls.up_link_quality}%", self._lq_level(ls.up_link_quality)
+            )
+            self.link["snr"].set(f"{ls.up_snr} dB", "info")
+            self.link["antenna"].set(str(ls.active_antenna), "info")
+            self.link["tx"].set(
+                self.TX_POWER_MW.get(ls.up_tx_power, f"idx {ls.up_tx_power}"), "info"
+            )
+            self.link["rf"].set(f"mode {ls.rf_mode}", "info")
+            self.link["down_rssi"].set(
+                f"{ls.down_rssi_dbm} dBm", self._rssi_level(ls.down_rssi_dbm)
+            )
+            self.link["down_lq"].set(
+                f"{ls.down_link_quality}%", self._lq_level(ls.down_link_quality)
+            )
+        else:
+            for key in (
+                "rssi",
+                "lq",
+                "snr",
+                "antenna",
+                "tx",
+                "rf",
+                "down_rssi",
+                "down_lq",
+            ):
+                self.link[key].set("--", "idle")
+
+        # Raw ticks column.
+        for ch in range(min(self.NUM_CH, len(rec.raw_ticks))):
+            self.table.item(ch, 2).setText(str(rec.raw_ticks[ch]))
+
+    def _apply_input(self, rec) -> None:
+        self.sw["armed"].set(
+            "ARMED" if rec.armed else "disarmed", "ok" if rec.armed else "idle"
+        )
+        self.sw["kill"].set(
+            "KILL" if rec.kill else "clear", "error" if rec.kill else "ok"
+        )
+        self.sw["failsafe"].set(
+            "FAILSAFE" if rec.failsafe else "ok", "error" if rec.failsafe else "ok"
+        )
+        self.sw["autonomy"].set(
+            "on" if rec.autonomy else "off", "active" if rec.autonomy else "idle"
+        )
+        self.sw["gait"].set(str(rec.gait_index), "info")
+
+        for ch in range(min(self.NUM_CH, len(rec.channels_us))):
+            us = rec.channels_us[ch]
+            self.table.item(ch, 3).setText(f"{us} µs")
+            norm = max(-1.0, min(1.0, (us - 1500) / 500.0))
+            self.table.item(ch, 4).setText(f"{norm:+.2f}")
+
+
 class DiagnosticsPage(BasePage):
     title = "Diagnostics"
     subtitle = (

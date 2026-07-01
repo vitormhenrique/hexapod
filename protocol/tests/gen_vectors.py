@@ -528,9 +528,7 @@ def build_controller() -> dict:
             "request": api_mod.build_controller_set_bindings(
                 default_bindings, seq=3
             ).hex(),
-            "bindings": api_mod.serialize_controller_bindings(
-                default_bindings
-            ).hex(),
+            "bindings": api_mod.serialize_controller_bindings(default_bindings).hex(),
         },
     ]
     return {"cases": cases}
@@ -767,6 +765,60 @@ def build_telemetry() -> dict:
                 "buttons": [False, True, False, False],
                 "toggles": [2, 0],
             },
+        }
+    )
+    # rc_diagnostics payload (a8n): the raw CRSF troubleshooting layer. flags(1),
+    # 16 x raw_tick(u16), frames_decoded(u32), crc_errors(u32),
+    # link_stats_count(u32), last_frame_age_ms(u16), then the 10-byte
+    # LINK_STATISTICS block. Complements the parsed rc_input stream (which
+    # carries the microsecond channels + decoded arm/kill/gait/autonomy flags).
+    rc_ticks = [172 + i * 100 for i in range(16)]  # distinct, in 11-bit range
+    rlpayload = bytearray([0x05])  # flags: ever_seen | link_stats_valid
+    for t in rc_ticks:
+        rlpayload += struct.pack("<H", t)
+    rlpayload += struct.pack("<III", 1234, 5, 42)  # frames, crc_err, link_count
+    rlpayload += struct.pack("<H", 12)  # last_frame_age_ms
+    rc_link = {
+        "up_rssi_ant1": 70,
+        "up_rssi_ant2": 85,
+        "up_link_quality": 100,
+        "up_snr": -5,
+        "active_antenna": 1,
+        "rf_mode": 6,
+        "up_tx_power": 3,
+        "down_rssi": 60,
+        "down_link_quality": 99,
+        "down_snr": 8,
+    }
+    rlpayload += struct.pack(
+        "<BBBbBBBBBb",
+        rc_link["up_rssi_ant1"],
+        rc_link["up_rssi_ant2"],
+        rc_link["up_link_quality"],
+        rc_link["up_snr"],
+        rc_link["active_antenna"],
+        rc_link["rf_mode"],
+        rc_link["up_tx_power"],
+        rc_link["down_rssi"],
+        rc_link["down_link_quality"],
+        rc_link["down_snr"],
+    )
+    cases.append(
+        {
+            "name": "rc_diagnostics",
+            "stream": "rc_diagnostics",
+            "payload": _hex(bytes(rlpayload)),
+            "expect": {
+                "ever_seen": True,
+                "failsafe": False,
+                "link_stats_valid": True,
+                "frames_decoded": 1234,
+                "crc_errors": 5,
+                "link_stats_count": 42,
+                "last_frame_age_ms": 12,
+            },
+            "raw_ticks": rc_ticks,
+            "link_stats": rc_link,
         }
     )
     return {"cases": cases}

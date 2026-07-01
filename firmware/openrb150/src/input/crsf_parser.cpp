@@ -50,6 +50,8 @@ void Parser::reset() {
   state_ = State::Sync;
   frames_decoded_ = 0;
   crc_errors_ = 0;
+  link_stats_count_ = 0;
+  link_stats_ = LinkStatistics{};
 }
 
 void Parser::unpackChannels(ChannelData& out) const {
@@ -70,6 +72,23 @@ void Parser::unpackChannels(ChannelData& out) const {
       bits_avail -= 11;
     }
   }
+}
+
+void Parser::unpackLinkStats() {
+  // Payload starts after sync(0), length(1), type(2): first payload byte is
+  // buf_[3]. LINK_STATISTICS is a fixed 10-byte little-endian struct.
+  const uint8_t* d = &buf_[3];
+  link_stats_.up_rssi_ant1 = d[0];
+  link_stats_.up_rssi_ant2 = d[1];
+  link_stats_.up_link_quality = d[2];
+  link_stats_.up_snr = static_cast<int8_t>(d[3]);
+  link_stats_.active_antenna = d[4];
+  link_stats_.rf_mode = d[5];
+  link_stats_.up_tx_power = d[6];
+  link_stats_.down_rssi = d[7];
+  link_stats_.down_link_quality = d[8];
+  link_stats_.down_snr = static_cast<int8_t>(d[9]);
+  ++link_stats_count_;
 }
 
 bool Parser::push(uint8_t byte, ChannelData& out) {
@@ -114,7 +133,12 @@ bool Parser::push(uint8_t byte, ChannelData& out) {
       const uint8_t type = buf_[2];
       if (type != kFrameTypeRcChannels ||
           frame_len_ != (kRcPayloadBytes + 2)) {
-        // Valid CRSF frame, but not the RC channels frame we consume.
+        // Valid CRSF frame, but not the RC channels frame we consume. Capture
+        // LINK_STATISTICS (signal quality) for diagnostics; ignore the rest.
+        if (type == kFrameTypeLinkStats &&
+            frame_len_ == (kLinkStatsPayloadBytes + 2)) {
+          unpackLinkStats();
+        }
         return false;
       }
 

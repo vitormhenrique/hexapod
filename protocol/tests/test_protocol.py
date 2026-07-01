@@ -903,6 +903,17 @@ def test_telemetry_golden_decode(case):
         assert rec.raw.switches == raw["switches"]
         assert rec.raw.buttons == raw["buttons"]
         assert rec.raw.toggles == raw["toggles"]
+    elif case["name"] == "rc_diagnostics":
+        assert isinstance(rec, telemetry.RcDiagnosticsTelemetry)
+        for field_name, want in case["expect"].items():
+            assert getattr(rec, field_name) == want
+        assert rec.raw_ticks == case["raw_ticks"]
+        ls = case["link_stats"]
+        for field_name, want in ls.items():
+            assert getattr(rec.link_stats, field_name) == want
+        # Derived signed-dBm helpers: active_antenna=1 selects antenna 2.
+        assert rec.link_stats.up_rssi_dbm == -ls["up_rssi_ant2"]
+        assert rec.link_stats.down_rssi_dbm == -ls["down_rssi"]
 
 
 def test_decode_joint_state_fields():
@@ -1005,8 +1016,8 @@ def test_decode_hw_error_bits():
 
 def test_telemetry_stream_count_includes_joint_state():
     # api_stats carries one dropped counter per stream; joint_state, servo_goals,
-    # leg_state, and controller_state grow it to 11.
-    assert telemetry.NUM_STREAMS == 11
+    # leg_state, controller_state, and rc_diagnostics grow it to 12.
+    assert telemetry.NUM_STREAMS == 12
     assert (
         telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
     )
@@ -1017,6 +1028,10 @@ def test_telemetry_stream_count_includes_joint_state():
     assert (
         telemetry.stream_id_from_name("controller_state")
         == telemetry.StreamId.CONTROLLER_STATE
+    )
+    assert (
+        telemetry.stream_id_from_name("rc_diagnostics")
+        == telemetry.StreamId.RC_DIAGNOSTICS
     )
 
 

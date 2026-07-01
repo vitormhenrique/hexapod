@@ -553,6 +553,50 @@
             0
           ]
         }
+      },
+      {
+        "name": "rc_diagnostics",
+        "stream": "rc_diagnostics",
+        "payload": "05ac0010017401d8013c02a00204036803cc0330049404f8045c05c00524068806d2040000050000002a0000000c00465564fb0106033c6308",
+        "expect": {
+          "ever_seen": true,
+          "failsafe": false,
+          "link_stats_valid": true,
+          "frames_decoded": 1234,
+          "crc_errors": 5,
+          "link_stats_count": 42,
+          "last_frame_age_ms": 12
+        },
+        "raw_ticks": [
+          172,
+          272,
+          372,
+          472,
+          572,
+          672,
+          772,
+          872,
+          972,
+          1072,
+          1172,
+          1272,
+          1372,
+          1472,
+          1572,
+          1672
+        ],
+        "link_stats": {
+          "up_rssi_ant1": 70,
+          "up_rssi_ant2": 85,
+          "up_link_quality": 100,
+          "up_snr": -5,
+          "active_antenna": 1,
+          "rf_mode": 6,
+          "up_tx_power": 3,
+          "down_rssi": 60,
+          "down_link_quality": 99,
+          "down_snr": 8
+        }
       }
     ]
   },
