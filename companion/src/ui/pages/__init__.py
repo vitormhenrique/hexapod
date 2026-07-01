@@ -6,12 +6,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
@@ -941,6 +943,364 @@ class LegLabPage(BasePage):
         w = QWidget()
         w.setLayout(layout)
         return w
+
+
+class ServoConfigPage(BasePage):
+    title = "Servo Map & Config"
+    subtitle = (
+        "View, edit, validate, diff, stage, and commit the EEPROM-backed servo "
+        "map. Export/import the full robot config as JSON."
+    )
+
+    COLUMNS = ["ID", "Leg", "Joint", "Sign", "Trim", "Min tick", "Max tick"]
+
+    # (column, attribute, lo, hi) for in-table validation of edited servo rows.
+    FIELDS = [
+        (0, "id", 1, 253),
+        (1, "leg", 0, 5),
+        (2, "joint", 0, 2),
+        (3, "sign", -1, 1),
+        (4, "trim_ticks", -2048, 2048),
+        (5, "min_tick", 0, 4095),
+        (6, "max_tick", 0, 4095),
+    ]
+
+    def build(self) -> None:
+        from hexapod_protocol import config as cfg
+
+        self._cfg = cfg
+        self._loaded = None  # last config read from the robot / reset (the base)
+        self._edited = None  # config last sent to the staging buffer
+
+        self.content.addWidget(self._summary_box())
+        self.content.addWidget(self._servo_table())
+        self.content.addWidget(self._actions_box())
+        self.content.addWidget(self._diff_box())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.config_loaded.connect(self._on_config_loaded)
+        self.service.config_summary.connect(self._on_config_summary)
+        self.service.config_staged.connect(self._on_config_staged)
+        self.service.config_result.connect(self._on_config_result)
+
+    # --- groups -----------------------------------------------------------
+
+    def _summary_box(self) -> QGroupBox:
+        box = QGroupBox("Config summary")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(10)
+        self.name_edit = QLineEdit()
+        self.name_edit.setMaxLength(15)
+        form.addRow("Robot name", self.name_edit)
+        self.schema_lbl = QLabel("--")
+        self.schema_lbl.setObjectName("MonoLabel")
+        form.addRow("Schema / size", self.schema_lbl)
+        self.persist_lbl = QLabel("--")
+        self.persist_lbl.setObjectName("MonoLabel")
+        form.addRow("Persistence", self.persist_lbl)
+
+        row = QHBoxLayout()
+        load = QPushButton("Load from robot")
+        load.setProperty("accent", True)
+        load.clicked.connect(self.service.load_config)
+        reset = QPushButton("Reset to defaults")
+        reset.clicked.connect(self._reset_defaults)
+        row.addWidget(load)
+        row.addWidget(reset)
+        row.addStretch(1)
+        form.addRow("", self._wrap(row))
+        return box
+
+    def _servo_table(self) -> QGroupBox:
+        box = QGroupBox("Servo map")
+        lay = QVBoxLayout(box)
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.table.setMinimumHeight(320)
+        lay.addWidget(self.table)
+        hint = QLabel(
+            "Double-click a cell to edit. Sign must be +1 or -1; ticks are "
+            "0\u20134095. Edits stay local until you stage and commit them."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DRACULA.comment};")
+        lay.addWidget(hint)
+        return box
+
+    def _actions_box(self) -> QGroupBox:
+        box = QGroupBox("Config actions")
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        diff = QPushButton("Diff vs loaded")
+        diff.clicked.connect(self._show_diff)
+        stage = QPushButton("Stage to robot")
+        stage.setProperty("accent", True)
+        stage.clicked.connect(self._stage)
+        validate = QPushButton("Validate staged")
+        validate.clicked.connect(self.service.validate_config)
+        commit = QPushButton("Commit to EEPROM")
+        commit.clicked.connect(self._commit)
+        export = QPushButton("Export JSON\u2026")
+        export.clicked.connect(self._export)
+        importb = QPushButton("Import JSON\u2026")
+        importb.clicked.connect(self._import)
+        buttons = [diff, stage, validate, commit, export, importb]
+        for i, btn in enumerate(buttons):
+            btn.setCursor(Qt.PointingHandCursor)
+            grid.addWidget(btn, i // 3, i % 3)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        self.action_lbl = QLabel("Load the config to begin.")
+        self.action_lbl.setObjectName("MonoLabel")
+        self.action_lbl.setWordWrap(True)
+        grid.addWidget(self.action_lbl, 2, 0, 1, 3)
+        return box
+
+    def _diff_box(self) -> QGroupBox:
+        box = QGroupBox("Pending changes")
+        lay = QVBoxLayout(box)
+        self.diff_text = QPlainTextEdit()
+        self.diff_text.setReadOnly(True)
+        self.diff_text.setMinimumHeight(120)
+        self.diff_text.setPlaceholderText("No changes staged.")
+        lay.addWidget(self.diff_text)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- table <-> config -------------------------------------------------
+
+    def _populate_table(self, config) -> None:
+        servos = config.servos
+        self.table.setRowCount(len(servos))
+        for row, s in enumerate(servos):
+            values = [
+                s.id,
+                s.leg,
+                s.joint,
+                s.sign,
+                s.trim_ticks,
+                s.min_tick,
+                s.max_tick,
+            ]
+            for col, val in enumerate(values):
+                self.table.setItem(row, col, QTableWidgetItem(str(val)))
+
+    def _read_table(self):
+        """Build a RobotConfig from the loaded base + edited servo rows.
+
+        Returns ``(config, None)`` on success or ``(None, error)`` if a cell is
+        non-numeric or out of range.
+        """
+        import copy
+
+        if self._loaded is None:
+            return None, "no config loaded"
+        config = copy.deepcopy(self._loaded)
+        config.robot_name = self.name_edit.text().strip()
+        for row in range(self.table.rowCount()):
+            if row >= len(config.servos):
+                break
+            s = config.servos[row]
+            for col, attr, lo, hi in self.FIELDS:
+                item = self.table.item(row, col)
+                text = item.text().strip() if item is not None else ""
+                try:
+                    val = int(text)
+                except ValueError:
+                    return None, f"row {row} {attr}: '{text}' is not an integer"
+                if attr == "sign":
+                    if val not in (-1, 1):
+                        return None, f"row {row} sign must be +1 or -1"
+                elif not (lo <= val <= hi):
+                    return None, f"row {row} {attr}: {val} out of [{lo}, {hi}]"
+                setattr(s, attr, val)
+            if s.min_tick >= s.max_tick:
+                return None, f"row {row}: min tick must be < max tick"
+        return config, None
+
+    def _diff_lines(self, edited) -> list:
+        lines = []
+        if self._loaded is None:
+            return lines
+        if edited.robot_name != self._loaded.robot_name:
+            lines.append(
+                f"robot_name: {self._loaded.robot_name!r} -> {edited.robot_name!r}"
+            )
+        for i, (old, new) in enumerate(zip(self._loaded.servos, edited.servos)):
+            for _col, attr, _lo, _hi in self.FIELDS:
+                ov, nv = getattr(old, attr), getattr(new, attr)
+                if ov != nv:
+                    lines.append(f"servo[{i}].{attr}: {ov} -> {nv}")
+        return lines
+
+    # --- actions ----------------------------------------------------------
+
+    def _reset_defaults(self) -> None:
+        if self._confirm(
+            "Reset config to defaults",
+            "Reload the compiled SAFE defaults into the staging buffer? This "
+            "discards staged edits (commit separately to persist).",
+        ):
+            self.service.reset_config_defaults()
+
+    def _show_diff(self) -> None:
+        edited, err = self._read_table()
+        if err is not None:
+            self.diff_text.setPlainText(f"cannot diff: {err}")
+            return
+        lines = self._diff_lines(edited)
+        self.diff_text.setPlainText(
+            "\n".join(lines) if lines else "No changes vs loaded config."
+        )
+
+    def _stage(self) -> None:
+        edited, err = self._read_table()
+        if err is not None:
+            self.action_lbl.setText(f"stage blocked: {err}")
+            return
+        lines = self._diff_lines(edited)
+        summary = f"{len(lines)} field(s) changed" if lines else "no changes"
+        if not self._confirm(
+            "Stage config to robot",
+            f"Write the edited config to the staging buffer ({summary})? "
+            "It is not persisted until you commit.",
+        ):
+            return
+        self._edited = edited
+        self.action_lbl.setText("staging\u2026")
+        self.service.stage_config(edited)
+
+    def _commit(self) -> None:
+        if self._confirm(
+            "Commit config to EEPROM",
+            "Persist the staged config to the 24LC32 EEPROM? The firmware "
+            "rejects a commit while walking or if the staged config is invalid.",
+        ):
+            self.action_lbl.setText("committing\u2026")
+            self.service.commit_config()
+
+    def _export(self) -> None:
+        edited, err = self._read_table()
+        if err is not None:
+            self.action_lbl.setText(f"export blocked: {err}")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export config JSON", "robot_config.json", "JSON (*.json)"
+        )
+        if not path:
+            return
+        import dataclasses
+        import json
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(dataclasses.asdict(edited), fh, indent=2)
+        except OSError as exc:
+            self.action_lbl.setText(f"export failed: {exc}")
+            return
+        self.action_lbl.setText(f"exported to {path}")
+
+    def _import(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import config JSON", "", "JSON (*.json)"
+        )
+        if not path:
+            return
+        import json
+
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            config = self._config_from_dict(data)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            self.action_lbl.setText(f"import failed: {exc}")
+            return
+        self._loaded = config
+        self.name_edit.setText(config.robot_name)
+        self._populate_table(config)
+        self.action_lbl.setText(f"imported {path} (stage to apply)")
+        self.diff_text.setPlainText("Imported config loaded as the new base.")
+
+    def _config_from_dict(self, data: dict):
+        cfg = self._cfg
+        return cfg.RobotConfig(
+            schema_version=data.get("schema_version", cfg.SCHEMA_VERSION),
+            robot_name=data.get("robot_name", ""),
+            links=cfg.LinkLengths(**data["links"]),
+            geometry=cfg.BodyGeometry(**data["geometry"]),
+            legs=[cfg.LegGeometry(**d) for d in data["legs"]],
+            servos=[cfg.ServoConfig(**d) for d in data["servos"]],
+            gait=cfg.GaitDefaults(**data["gait"]),
+            feet=[cfg.FootSensorCal(**d) for d in data["feet"]],
+            feature_defaults=data.get("feature_defaults", 0),
+        )
+
+    # --- reactions --------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.load_config()
+        else:
+            self.table.setRowCount(0)
+            self._loaded = None
+            self.schema_lbl.setText("--")
+            self.persist_lbl.setText("--")
+            self.action_lbl.setText("Load the config to begin.")
+
+    def _on_config_loaded(self, config) -> None:
+        if config is None:
+            self.action_lbl.setText("config read failed")
+            return
+        self._loaded = config
+        self.name_edit.setText(config.robot_name)
+        self.schema_lbl.setText(
+            f"v{config.schema_version}  ({len(config.servos)} servos)"
+        )
+        self._populate_table(config)
+        self.action_lbl.setText("config loaded")
+        self.diff_text.setPlainText("")
+
+    def _on_config_summary(self, summary) -> None:
+        if summary is None:
+            self.persist_lbl.setText("--")
+            return
+        persist = "persistent" if summary.persistent else "VOLATILE (no EEPROM)"
+        staged = "staged valid" if summary.staged_valid else "staged invalid"
+        self.persist_lbl.setText(f"{persist} \u2014 {staged}")
+
+    def _on_config_staged(self, ok: bool) -> None:
+        if ok:
+            self._loaded = self._edited
+            self.action_lbl.setText("staged ok \u2014 validate, then commit")
+            self.diff_text.setPlainText("Staged. Validate and commit to persist.")
+        else:
+            self.action_lbl.setText("stage failed (a block was not acked)")
+
+    def _on_config_result(self, kind: str, res) -> None:
+        if res is None:
+            self.action_lbl.setText(f"{kind}: no response")
+            return
+        verdict = "ok" if res.ok else f"failed (result {res.result})"
+        self.action_lbl.setText(f"{kind}: {verdict}")
+        if kind == "reset" and res.ok:
+            # The firmware reloaded defaults into the staging buffer; pull them.
+            self.service.load_config()
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QMessageBox.question(
+                self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            == QMessageBox.Yes
+        )
 
 
 class ServoTuningPage(BasePage):

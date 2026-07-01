@@ -21,6 +21,7 @@ from hexapod_protocol.framing import (
     DecodeError,
     decode_frame_body,
 )
+from hexapod_protocol import config as cfg
 from hexapod_protocol import telemetry as tlm
 
 from . import ByteStream, FrameExtractor
@@ -355,6 +356,79 @@ class ProtocolClient:
     ) -> Optional[api.JointTargetResult]:
         r = self._send_built(api.build_set_joint_target(leg, joint, angle_cdeg))
         return api.parse_joint_target_result(r.payload) if r else None
+
+    # --- EEPROM-backed robot config --------------------------------------
+    #
+    # The serialized RobotConfig is larger than one frame, so reads/writes are
+    # windowed via CFG_GET_BLOCK / CFG_SET_BLOCK. ``read_config`` / ``write_config``
+    # wrap the windowing; the low-level cfg_* methods expose the raw protocol.
+
+    def cfg_get_summary(self) -> Optional[cfg.ConfigSummary]:
+        r = self._send_built(api.build_cfg_get_summary())
+        return cfg.decode_config_summary(r.payload) if r else None
+
+    def cfg_get_block(self, offset: int, length: int) -> Optional[tuple[int, bytes]]:
+        r = self._send_built(api.build_cfg_get_block(offset, length))
+        return cfg.decode_config_block(r.payload) if r else None
+
+    def cfg_set_block(self, offset: int, data: bytes) -> Optional[api.CfgBlockAck]:
+        r = self._send_built(api.build_cfg_set_block(offset, data))
+        return api.parse_cfg_block_ack(r.payload) if r else None
+
+    def cfg_validate(self) -> Optional[api.CfgResult]:
+        r = self._send_built(api.build_cfg_validate())
+        return api.parse_cfg_result(r.payload) if r else None
+
+    def cfg_commit(self) -> Optional[api.CfgResult]:
+        r = self._send_built(api.build_cfg_commit())
+        return api.parse_cfg_result(r.payload) if r else None
+
+    def cfg_reset_defaults(self) -> Optional[api.CfgResult]:
+        r = self._send_built(api.build_cfg_reset_defaults())
+        return api.parse_cfg_result(r.payload) if r else None
+
+    def read_config(self) -> Optional[cfg.RobotConfig]:
+        """Read the full staged config via windowed CFG_GET_BLOCK reads.
+
+        Returns ``None`` if the summary or any block read fails or times out.
+        """
+        summary = self.cfg_get_summary()
+        if summary is None:
+            return None
+        total = summary.payload_size
+        block_max = summary.block_max or cfg.CFG_BLOCK_MAX
+        asm = cfg.ConfigBlockAssembler(total)
+        offset = 0
+        while offset < total:
+            length = min(block_max, total - offset)
+            got = self.cfg_get_block(offset, length)
+            if got is None:
+                return None
+            blk_off, data = got
+            asm.add_block(blk_off, data)
+            offset += len(data) if data else length
+            if not data:
+                return None
+        if not asm.complete:
+            return None
+        return asm.decode()
+
+    def write_config(self, config: cfg.RobotConfig) -> bool:
+        """Stage a full config via windowed CFG_SET_BLOCK writes.
+
+        Returns ``True`` only if every block is acked. Does not validate or
+        commit; the caller drives ``cfg_validate`` / ``cfg_commit`` separately.
+        """
+        payload = cfg.encode_robot_config(config)
+        offset = 0
+        while offset < len(payload):
+            chunk = payload[offset : offset + cfg.CFG_BLOCK_MAX]
+            ack = self.cfg_set_block(offset, chunk)
+            if ack is None or ack.length != len(chunk):
+                return False
+            offset += len(chunk)
+        return True
+
 
     # --- DXL async job helpers -------------------------------------------
     #

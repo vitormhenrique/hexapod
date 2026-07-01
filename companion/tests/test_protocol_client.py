@@ -270,3 +270,108 @@ def _wait_for(pred, timeout: float = 1.0) -> None:
         if pred():
             return
         time.sleep(0.005)
+
+
+# --- EEPROM config round-trip ---------------------------------------------
+class _FakeConfigFirmware:
+    """Stateful CFG_* handler set backed by a serialized RobotConfig payload.
+
+    Serves CFG_GET_SUMMARY / CFG_GET_BLOCK from ``payload``, accepts windowed
+    CFG_SET_BLOCK writes into a staging buffer, and answers validate/commit/reset.
+    """
+
+    def __init__(self) -> None:
+        import struct
+
+        from hexapod_protocol import config as cfg
+
+        self._cfg = cfg
+        self._struct = struct
+        self.config = cfg.default_robot_config()
+        self.payload = bytearray(cfg.encode_robot_config(self.config))
+        self.staged = bytearray(len(self.payload))
+        self.block_max = cfg.CFG_BLOCK_MAX
+        self.committed = False
+
+    def handlers(self) -> dict:
+        return {
+            api.MSG_CFG_GET_SUMMARY: self._summary,
+            api.MSG_CFG_GET_BLOCK: self._get_block,
+            api.MSG_CFG_SET_BLOCK: self._set_block,
+            api.MSG_CFG_VALIDATE: lambda _p: (bytes([api.CFG_OK]), False),
+            api.MSG_CFG_COMMIT: self._commit,
+            api.MSG_CFG_RESET_DEFAULTS: lambda _p: (bytes([api.CFG_OK]), False),
+        }
+
+    def _summary(self, _payload):
+        s = self._struct
+        out = s.pack("<HHH", self.config.schema_version, len(self.payload),
+                     self.block_max)
+        out += bytes([0x03])  # persistent + staged valid
+        out += s.pack("<I", self.config.feature_defaults)
+        name = self.config.robot_name.encode("utf-8")[:16]
+        out += name + bytes(16 - len(name))
+        return out, False
+
+    def _get_block(self, payload):
+        s = self._struct
+        offset, length = s.unpack("<HH", payload[:4])
+        data = bytes(self.payload[offset : offset + length])
+        return s.pack("<HH", offset, len(data)) + data, False
+
+    def _set_block(self, payload):
+        s = self._struct
+        offset, length = s.unpack("<HH", payload[:4])
+        data = payload[4 : 4 + length]
+        self.staged[offset : offset + length] = data
+        return s.pack("<HH", offset, len(data)), False
+
+    def _commit(self, _payload):
+        self.committed = True
+        self.payload = bytearray(self.staged)
+        return bytes([api.CFG_OK]), False
+
+
+def test_read_config_assembles_full_payload():
+    fw = _FakeConfigFirmware()
+    client, _ = _make_client(fw.handlers())
+    try:
+        cfg = client.read_config()
+        assert cfg is not None
+        assert cfg.robot_name == fw.config.robot_name
+        assert len(cfg.servos) == len(fw.config.servos)
+        assert cfg.servos[0].id == fw.config.servos[0].id
+    finally:
+        client.stop()
+
+
+def test_write_config_stages_every_block():
+    from hexapod_protocol import config as cfg_mod
+
+    fw = _FakeConfigFirmware()
+    client, _ = _make_client(fw.handlers())
+    try:
+        edited = client.read_config()
+        assert edited is not None
+        edited.robot_name = "Tweaked"
+        edited.servos[0].trim_ticks = 17
+        assert client.write_config(edited) is True
+        # The staged buffer must now decode back to the edited config.
+        staged = cfg_mod.decode_robot_config(bytes(fw.staged))
+        assert staged.robot_name == "Tweaked"
+        assert staged.servos[0].trim_ticks == 17
+    finally:
+        client.stop()
+
+
+def test_cfg_validate_commit_reset():
+    fw = _FakeConfigFirmware()
+    client, _ = _make_client(fw.handlers())
+    try:
+        assert client.cfg_validate().ok
+        assert client.cfg_commit().ok
+        assert fw.committed is True
+        assert client.cfg_reset_defaults().ok
+    finally:
+        client.stop()
+

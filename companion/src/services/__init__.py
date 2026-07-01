@@ -35,6 +35,10 @@ class ConnectionService(QObject):
     maint_result = Signal(object)  # api.MaintResultMsg
     leg_target_result = Signal(object)  # api.LegTargetResult (None on failure)
     joint_target_result = Signal(object)  # api.JointTargetResult (None on failure)
+    config_loaded = Signal(object)  # config.RobotConfig (None on failure)
+    config_summary = Signal(object)  # config.ConfigSummary (None on failure)
+    config_staged = Signal(bool)  # True if every CFG_SET_BLOCK was acked
+    config_result = Signal(str, object)  # kind (validate/commit/reset), api.CfgResult
     dxl_result = Signal(str, object)  # kind, api.DxlJobResult (None on failure)
     sensor_feature_result = Signal(str, object)  # kind, api.SensorFeatureResult
     contact_threshold_result = Signal(object)  # api.ContactThresholdResult
@@ -397,6 +401,68 @@ class ConnectionService(QObject):
             if res is None:
                 self.error.emit("joint target: no response")
             self.joint_target_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    # --- EEPROM-backed robot config --------------------------------------
+
+    def load_config(self) -> None:
+        """Read the staged robot config (windowed) and emit ``config_loaded``."""
+        client = self._client
+        if client is None:
+            self.error.emit("config: not connected")
+            return
+
+        def worker() -> None:
+            summary = client.cfg_get_summary()
+            self.config_summary.emit(summary)
+            cfg = client.read_config()
+            if cfg is None:
+                self.error.emit("config: read failed")
+            self.config_loaded.emit(cfg)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def stage_config(self, config) -> None:
+        """Push a full config to the staging buffer; emit ``config_staged``."""
+        client = self._client
+        if client is None:
+            self.error.emit("config: not connected")
+            return
+
+        def worker() -> None:
+            ok = client.write_config(config)
+            if not ok:
+                self.error.emit("config: stage failed")
+            self.config_staged.emit(ok)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def validate_config(self) -> None:
+        self._run_cfg("validate", lambda c: c.cfg_validate())
+
+    def commit_config(self) -> None:
+        self._run_cfg("commit", lambda c: c.cfg_commit())
+
+    def reset_config_defaults(self) -> None:
+        self._run_cfg("reset", lambda c: c.cfg_reset_defaults())
+
+    def _run_cfg(self, kind: str, call) -> None:
+        client = self._client
+        if client is None:
+            self.error.emit(f"config {kind}: not connected")
+            return
+
+        def worker() -> None:
+            res = call(client)
+            if res is None:
+                self.error.emit(f"config {kind}: no response")
+            else:
+                if res.ok:
+                    self.event.emit("commit", f"config {kind} ok")
+                else:
+                    self.event.emit("error", f"config {kind} failed ({res.result})")
+            self.config_result.emit(kind, res)
 
         threading.Thread(target=worker, daemon=True).start()
 
