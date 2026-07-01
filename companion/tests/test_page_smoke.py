@@ -31,6 +31,7 @@ def _page_classes():
         ModeSafetyPage,
         OverviewPage,
         PassivePosePage,
+        PlotWorkbenchPage,
         SensorDashboardPage,
         ServoConfigPage,
         ServoTuningPage,
@@ -49,6 +50,7 @@ def _page_classes():
         ModelViewerPage,
         SensorDashboardPage,
         DiagnosticsPage,
+        PlotWorkbenchPage,
     ]
 
 

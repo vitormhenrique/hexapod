@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -17,10 +18,14 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QScrollArea,
     QSpinBox,
+    QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -2648,3 +2653,336 @@ class ModelViewerPage(BasePage):
                 self._model.update_from_servo_status(record)
                 self.source_badge.set("servo_status (fallback)", "warn")
                 self.view.set_legs(self._model.legs())
+
+
+# Curve colours cycled across selected signals (Dracula-ish palette).
+_PLOT_COLORS = [
+    "#8be9fd", "#ff79c6", "#50fa7b", "#ffb86c", "#bd93f9",
+    "#f1fa8c", "#ff5555", "#6272a4", "#8affff", "#ff78e0",
+]
+
+
+class PlotWorkbenchPage(BasePage):
+    title = "Plot Workbench"
+    subtitle = "Plot live telemetry or a recorded session across servo, leg, control, RC, and sensor streams."
+    fill = True
+
+    # Live redraw cadence and default rolling window (samples per signal).
+    _REDRAW_MS = 100
+    _DEFAULT_WINDOW = 600
+    _LIVE_RATE_HZ = 20
+
+    def build(self) -> None:
+        from collections import deque
+        import time as _time
+
+        import pyqtgraph as pg
+
+        from data.plot_signals import (
+            build_signal_registry,
+            registry_by_key,
+            streams_for,
+        )
+
+        self._pg = pg
+        self._deque = deque
+        self._monotonic = _time.monotonic
+        self._registry = build_signal_registry()
+        self._by_key = registry_by_key(self._registry)
+        self._streams_for = streams_for
+
+        self._selected: list = []
+        self._live_buf: dict[str, object] = {}
+        self._curves: dict[str, object] = {}
+        self._subscribed: set[int] = set()
+        self._replay = None
+        self._t0 = self._monotonic()
+        self._mode = "live"  # or "replay"
+
+        # --- top controls -------------------------------------------------
+        controls = QHBoxLayout()
+        controls.setSpacing(10)
+        self._live_radio = QRadioButton("Live")
+        self._live_radio.setChecked(True)
+        self._replay_radio = QRadioButton("Replay")
+        mode_group = QButtonGroup(self)
+        mode_group.addButton(self._live_radio)
+        mode_group.addButton(self._replay_radio)
+        self._live_radio.toggled.connect(self._on_mode_toggled)
+        controls.addWidget(QLabel("Source:"))
+        controls.addWidget(self._live_radio)
+        controls.addWidget(self._replay_radio)
+
+        self._load_btn = QPushButton("Load session\u2026")
+        self._load_btn.clicked.connect(self._choose_session)
+        self._load_btn.setEnabled(False)
+        controls.addWidget(self._load_btn)
+
+        controls.addSpacing(16)
+        controls.addWidget(QLabel("Window:"))
+        self._window_spin = QSpinBox()
+        self._window_spin.setRange(60, 5000)
+        self._window_spin.setValue(self._DEFAULT_WINDOW)
+        self._window_spin.setSuffix(" samples")
+        self._window_spin.valueChanged.connect(self._on_window_changed)
+        controls.addWidget(self._window_spin)
+
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(self._clear)
+        controls.addWidget(self._clear_btn)
+        controls.addStretch(1)
+        self._status = QLabel("No signals selected.")
+        self._status.setObjectName("PageSubtitle")
+        controls.addWidget(self._status)
+        self.content.addLayout(controls)
+
+        # --- splitter: picker | plot --------------------------------------
+        splitter = QSplitter(Qt.Horizontal)
+
+        picker = QWidget()
+        pv = QVBoxLayout(picker)
+        pv.setContentsMargins(0, 0, 0, 0)
+        pv.setSpacing(8)
+        self._filter = QLineEdit()
+        self._filter.setPlaceholderText("Filter signals\u2026")
+        self._filter.textChanged.connect(self._apply_filter)
+        pv.addWidget(self._filter)
+        self._tree = QTreeWidget()
+        self._tree.setHeaderLabels(["Signal", "Unit"])
+        self._tree.setColumnWidth(0, 210)
+        self._tree.itemChanged.connect(self._on_item_changed)
+        pv.addWidget(self._tree, 1)
+        self._populate_tree()
+        splitter.addWidget(picker)
+
+        pg.setConfigOptions(antialias=True)
+        self._plot = pg.PlotWidget(background="#1e1f29")
+        self._plot.showGrid(x=True, y=True, alpha=0.2)
+        self._plot.getAxis("left").setPen("#6272a4")
+        self._plot.getAxis("bottom").setPen("#6272a4")
+        self._plot.setLabel("bottom", "time", units="s")
+        self._plot.setLabel("left", "value")
+        self._legend = self._plot.addLegend()
+        splitter.addWidget(self._plot)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 720])
+        self.content.addWidget(splitter, 1)
+
+        self.service.telemetry.connect(self._on_telemetry)
+        self.service.connected.connect(self._on_connected)
+
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setInterval(self._REDRAW_MS)
+        self._redraw_timer.timeout.connect(self._redraw_live)
+        self._redraw_timer.start()
+
+    # --- tree / selection --------------------------------------------------
+
+    def _populate_tree(self) -> None:
+        groups: dict[str, QTreeWidgetItem] = {}
+        for sig in self._registry:
+            parent = groups.get(sig.group)
+            if parent is None:
+                parent = QTreeWidgetItem(self._tree, [sig.group, ""])
+                parent.setFlags(Qt.ItemIsEnabled)
+                parent.setExpanded(False)
+                groups[sig.group] = parent
+            item = QTreeWidgetItem(parent, [sig.label, sig.unit])
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(0, Qt.Unchecked)
+            item.setData(0, Qt.UserRole, sig.key)
+
+    def _iter_signal_items(self):
+        for i in range(self._tree.topLevelItemCount()):
+            parent = self._tree.topLevelItem(i)
+            for j in range(parent.childCount()):
+                yield parent.child(j)
+
+    def _apply_filter(self, text: str) -> None:
+        needle = text.strip().lower()
+        for parent_idx in range(self._tree.topLevelItemCount()):
+            parent = self._tree.topLevelItem(parent_idx)
+            any_visible = False
+            for j in range(parent.childCount()):
+                child = parent.child(j)
+                key = child.data(0, Qt.UserRole)
+                sig = self._by_key.get(key)
+                match = (
+                    not needle
+                    or needle in sig.label.lower()
+                    or needle in sig.group.lower()
+                    or needle in sig.key.lower()
+                )
+                child.setHidden(not match)
+                any_visible = any_visible or match
+            parent.setHidden(not any_visible)
+            if needle and any_visible:
+                parent.setExpanded(True)
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if item.data(0, Qt.UserRole) is None:
+            return
+        self._rebuild_selection()
+
+    def select_signals(self, keys) -> None:
+        """Programmatically check a set of signal keys (used by tests)."""
+        wanted = set(keys)
+        self._tree.blockSignals(True)
+        for child in self._iter_signal_items():
+            key = child.data(0, Qt.UserRole)
+            child.setCheckState(
+                0, Qt.Checked if key in wanted else Qt.Unchecked
+            )
+        self._tree.blockSignals(False)
+        self._rebuild_selection()
+
+    def selected_keys(self) -> list[str]:
+        return [s.key for s in self._selected]
+
+    def _rebuild_selection(self) -> None:
+        selected = []
+        for child in self._iter_signal_items():
+            if child.checkState(0) == Qt.Checked:
+                key = child.data(0, Qt.UserRole)
+                sig = self._by_key.get(key)
+                if sig is not None:
+                    selected.append(sig)
+        self._selected = selected
+
+        # Drop curves/buffers for signals no longer selected.
+        keep = {s.key for s in selected}
+        for key in list(self._curves):
+            if key not in keep:
+                self._plot.removeItem(self._curves.pop(key))
+                self._live_buf.pop(key, None)
+        # Create curves/buffers for new signals.
+        window = self._window_spin.value()
+        for idx, sig in enumerate(selected):
+            if sig.key not in self._curves:
+                color = _PLOT_COLORS[idx % len(_PLOT_COLORS)]
+                self._curves[sig.key] = self._plot.plot(
+                    [], [], pen=self._pg.mkPen(color, width=2), name=sig.label
+                )
+                self._live_buf[sig.key] = self._deque(maxlen=window)
+
+        if not selected:
+            self._status.setText("No signals selected.")
+        else:
+            self._status.setText(
+                f"{len(selected)} signal(s) \u00b7 {self._mode} mode"
+            )
+        if self._mode == "live":
+            self._ensure_subscriptions()
+        else:
+            self._replot_replay()
+
+    # --- mode --------------------------------------------------------------
+
+    def _on_mode_toggled(self, live_checked: bool) -> None:
+        self._mode = "live" if live_checked else "replay"
+        self._load_btn.setEnabled(self._mode == "replay")
+        self._clear()
+        if self._mode == "live":
+            self._ensure_subscriptions()
+            self._status.setText(
+                f"{len(self._selected)} signal(s) \u00b7 live mode"
+            )
+        else:
+            self._status.setText("Replay mode \u2014 load a recorded session.")
+
+    def set_mode(self, mode: str) -> None:
+        """Programmatic mode switch (used by tests)."""
+        if mode == "replay":
+            self._replay_radio.setChecked(True)
+        else:
+            self._live_radio.setChecked(True)
+
+    def _on_window_changed(self, value: int) -> None:
+        for key, buf in list(self._live_buf.items()):
+            self._live_buf[key] = self._deque(buf, maxlen=value)
+
+    def _clear(self) -> None:
+        for key in self._live_buf:
+            self._live_buf[key] = self._deque(maxlen=self._window_spin.value())
+        for curve in self._curves.values():
+            curve.setData([], [])
+        self._t0 = self._monotonic()
+
+    # --- live --------------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        self._subscribed.clear()
+        if connected and self._mode == "live":
+            self._ensure_subscriptions()
+
+    def _ensure_subscriptions(self) -> None:
+        for sid in self._streams_for(self._selected):
+            if sid not in self._subscribed:
+                self.service.subscribe(sid, self._LIVE_RATE_HZ)
+                self._subscribed.add(sid)
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if self._mode != "live" or not self._selected:
+            return
+        x = self._monotonic() - self._t0
+        for sig in self._selected:
+            if sig.stream_id != stream_id:
+                continue
+            y = sig.extract(record)
+            if y is None:
+                continue
+            self._live_buf[sig.key].append((x, y))
+
+    def _redraw_live(self) -> None:
+        if self._mode != "live":
+            return
+        for key, buf in self._live_buf.items():
+            curve = self._curves.get(key)
+            if curve is None or not buf:
+                continue
+            xs = [p[0] for p in buf]
+            ys = [p[1] for p in buf]
+            curve.setData(xs, ys)
+
+    # --- replay ------------------------------------------------------------
+
+    def _choose_session(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Open recorded session")
+        if path:
+            self.load_session(path)
+
+    def load_session(self, session_dir) -> None:
+        """Load a recorded session directory and plot the selected signals."""
+        from data.session_replay import SessionReplay
+
+        try:
+            self._replay = SessionReplay(session_dir)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+            self._status.setText(f"Load failed: {exc}")
+            self._replay = None
+            return
+        self.set_mode("replay")
+        self._replot_replay()
+
+    def _replot_replay(self) -> None:
+        if self._mode != "replay" or self._replay is None:
+            return
+        from data.plot_signals import extract_series
+
+        series = extract_series(
+            self._replay.iter_decoded_frames(), self._selected
+        )
+        points = 0
+        for sig in self._selected:
+            curve = self._curves.get(sig.key)
+            if curve is None:
+                continue
+            xs, ys = series.get(sig.key, ([], []))
+            curve.setData(xs, ys)
+            points += len(xs)
+        meta = self._replay.meta
+        self._status.setText(
+            f"Replay: {meta.get('session_id', '?')} \u2014 "
+            f"{len(self._selected)} signal(s), {points} points"
+        )

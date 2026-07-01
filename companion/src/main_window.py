@@ -21,6 +21,7 @@ from ui.pages import (
     ModelViewerPage,
     OverviewPage,
     PassivePosePage,
+    PlotWorkbenchPage,
     ServoConfigPage,
     ServoTuningPage,
     SensorDashboardPage,
@@ -56,6 +57,8 @@ class MainWindow(QMainWindow):
         self.nav.add_item("leg_lab", "Leg Lab")
         self.nav.add_item("servo_config", "Servo Config")
         self.nav.add_item("servo_tuning", "Servo & DXL")
+        self.nav.add_section("Analyze")
+        self.nav.add_item("plots", "Plot Workbench")
         self.nav.add_section("Visualize")
         self.nav.add_item("model", "Model Viewer")
         self.nav.add_section("Diagnose")
@@ -95,6 +98,7 @@ class MainWindow(QMainWindow):
             ("leg_lab", LegLabPage(self.service)),
             ("servo_config", ServoConfigPage(self.service)),
             ("servo_tuning", ServoTuningPage(self.service)),
+            ("plots", PlotWorkbenchPage(self.service)),
             ("model", ModelViewerPage(self.service)),
             ("sensors", SensorDashboardPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),
