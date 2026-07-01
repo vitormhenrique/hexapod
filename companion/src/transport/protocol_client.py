@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Callable, Optional
@@ -43,6 +44,31 @@ TelemetryCallback = Callable[[int, object, Header], None]
 ConnectionCallback = Callable[[bool], None]
 
 
+@dataclass
+class RawFrameRecord:
+    """One captured wire frame for the diagnostics raw-frame inspector."""
+
+    host_time_ns: int
+    length: int
+    msg_type: Optional[int]  # None if the frame failed to decode
+    msg_id: Optional[int]
+    seq: Optional[int]
+    payload_len: Optional[int]
+    ok: bool
+    head_hex: str  # hex preview of the first bytes (decoded body, header stripped)
+
+
+@dataclass
+class DiagnosticsSnapshot:
+    """Point-in-time protocol counters for the diagnostics page."""
+
+    rx_frames: int = 0
+    tx_frames: int = 0
+    decode_errors: int = 0
+    raw_captured: int = 0
+    capture_enabled: bool = False
+
+
 class ProtocolClient:
     """Send commands and receive responses / telemetry over a byte stream."""
 
@@ -69,6 +95,14 @@ class ProtocolClient:
         self.rx_frames = 0
         self.tx_frames = 0
         self.decode_errors = 0
+
+        # Bounded raw-frame capture for the diagnostics inspector. Disabled by
+        # default so the reader thread does no extra work until a page asks for
+        # it. Guarded because the reader thread appends and the UI drains.
+        self.capture_raw = False
+        self._raw_lock = threading.Lock()
+        self._raw_frames: "deque[RawFrameRecord]" = deque(maxlen=256)
+        self._raw_captured = 0
 
     # --- lifecycle --------------------------------------------------------
 
@@ -510,6 +544,59 @@ class ProtocolClient:
             )
         )
 
+    # --- diagnostics ------------------------------------------------------
+
+    def set_raw_capture(self, enabled: bool) -> None:
+        """Enable/disable bounded raw-frame capture for the inspector."""
+        self.capture_raw = enabled
+        if not enabled:
+            with self._raw_lock:
+                self._raw_frames.clear()
+
+    def _capture_raw(self, frame: bytes, header, payload) -> None:
+        if header is None:
+            rec = RawFrameRecord(
+                host_time_ns=time.time_ns(),
+                length=len(frame),
+                msg_type=None,
+                msg_id=None,
+                seq=None,
+                payload_len=None,
+                ok=False,
+                head_hex=frame[1:-1][:16].hex(" "),
+            )
+        else:
+            rec = RawFrameRecord(
+                host_time_ns=time.time_ns(),
+                length=len(frame),
+                msg_type=header.msg_type,
+                msg_id=header.msg_id,
+                seq=header.seq,
+                payload_len=len(payload),
+                ok=True,
+                head_hex=payload[:16].hex(" "),
+            )
+        with self._raw_lock:
+            self._raw_frames.append(rec)
+            self._raw_captured += 1
+
+    def drain_raw_frames(self) -> list["RawFrameRecord"]:
+        """Return and clear the captured raw frames (oldest first)."""
+        with self._raw_lock:
+            frames = list(self._raw_frames)
+            self._raw_frames.clear()
+        return frames
+
+    def diagnostics_snapshot(self) -> DiagnosticsSnapshot:
+        """Point-in-time protocol counters (safe to call from any thread)."""
+        return DiagnosticsSnapshot(
+            rx_frames=self.rx_frames,
+            tx_frames=self.tx_frames,
+            decode_errors=self.decode_errors,
+            raw_captured=self._raw_captured,
+            capture_enabled=self.capture_raw,
+        )
+
     # --- reader loop ------------------------------------------------------
 
     def _read_loop(self) -> None:
@@ -533,8 +620,12 @@ class ProtocolClient:
             header, payload = decode_frame_body(frame[1:-1])
         except DecodeError:
             self.decode_errors += 1
+            if self.capture_raw:
+                self._capture_raw(frame, None, None)
             return
         self.rx_frames += 1
+        if self.capture_raw:
+            self._capture_raw(frame, header, payload)
 
         if header.msg_type == int(MsgType.TELEMETRY):
             self._dispatch_telemetry(header, payload)

@@ -135,6 +135,25 @@ class ConnectionService(QObject):
                 daemon=True,
             ).start()
 
+    # --- diagnostics (safe no-ops when disconnected) ---------------------
+
+    def set_raw_capture(self, enabled: bool) -> None:
+        """Toggle bounded raw-frame capture on the reader thread."""
+        if self._client:
+            self._client.set_raw_capture(enabled)
+
+    def drain_raw_frames(self) -> list:
+        """Return and clear captured raw frames (empty when disconnected)."""
+        if self._client:
+            return self._client.drain_raw_frames()
+        return []
+
+    def diagnostics_snapshot(self):
+        """Protocol counters snapshot, or ``None`` when disconnected."""
+        if self._client:
+            return self._client.diagnostics_snapshot()
+        return None
+
     def emergency_stop(self) -> None:
         """Send a real ESTOP command on a worker thread and report the ack."""
         self.event.emit("estop", "operator pressed EMERGENCY STOP")

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
+from hexapod_protocol.framing import MsgType
 
 from services import ConnectionService
 from theme import DRACULA
@@ -2115,24 +2116,236 @@ class PassivePosePage(BasePage):
 
 class DiagnosticsPage(BasePage):
     title = "Diagnostics"
-    subtitle = "Raw telemetry feed and protocol stats."
+    subtitle = "Protocol stats, DXL/I2C errors, firmware timing, and a raw frame inspector."
     fill = True
 
+    # Streams the page needs; (stream_id, rate_hz).
+    _STREAMS = (
+        (int(tlm.StreamId.HEALTH), 5),
+        (int(tlm.StreamId.API_STATS), 2),
+        (int(tlm.StreamId.SERVO_STATUS), 10),
+        (int(tlm.StreamId.CONTACT_STATE), 10),
+    )
+
     def build(self) -> None:
-        self.feed = QPlainTextEdit()
-        self.feed.setReadOnly(True)
-        self.feed.setMaximumBlockCount(500)
-        self.feed.setObjectName("MonoLabel")
-        self.content.addWidget(self.feed, 1)
+        self._last: dict[int, object] = {}
+
+        # --- protocol stats -------------------------------------------------
+        proto = QGroupBox("Protocol")
+        pg = QGridLayout(proto)
+        pg.setHorizontalSpacing(12)
+        pg.setVerticalSpacing(12)
+        self.rx_card = StatCard("RX frames")
+        self.tx_card = StatCard("TX frames")
+        self.decode_card = StatCard("Decode errors")
+        self.backlog_card = StatCard("TX backlog")
+        self.dropped_card = StatCard("Dropped frames")
+        for col, card in enumerate(
+            (
+                self.rx_card,
+                self.tx_card,
+                self.decode_card,
+                self.backlog_card,
+                self.dropped_card,
+            )
+        ):
+            pg.addWidget(card, 0, col)
+            pg.setColumnStretch(col, 1)
+        self.content.addWidget(proto)
+
+        # --- firmware timing ------------------------------------------------
+        timing = QGroupBox("Firmware timing")
+        tg = QGridLayout(timing)
+        tg.setHorizontalSpacing(12)
+        tg.setVerticalSpacing(12)
+        self.uptime_card = StatCard("Uptime")
+        self.watchdog_card = StatCard("Watchdog missed")
+        self.battery_card = StatCard("Battery")
+        for col, card in enumerate(
+            (self.uptime_card, self.watchdog_card, self.battery_card)
+        ):
+            tg.addWidget(card, 0, col)
+            tg.setColumnStretch(col, 1)
+        self.content.addWidget(timing)
+
+        # --- DXL errors -----------------------------------------------------
+        dxl = QGroupBox("DYNAMIXEL hardware errors")
+        dv = QVBoxLayout(dxl)
+        self.dxl_lbl = QLabel("Waiting for servo_status...")
+        self.dxl_lbl.setObjectName("StatCaption")
+        dv.addWidget(self.dxl_lbl)
+        self.dxl_table = QTableWidget(0, 2)
+        self.dxl_table.setHorizontalHeaderLabels(["Servo", "Error bits"])
+        self.dxl_table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeToContents
+        )
+        self.dxl_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.Stretch
+        )
+        self.dxl_table.verticalHeader().setVisible(False)
+        self.dxl_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.dxl_table.setMaximumHeight(160)
+        dv.addWidget(self.dxl_table)
+        self.content.addWidget(dxl)
+
+        # --- I2C / contact errors ------------------------------------------
+        i2c = QGroupBox("I2C foot sensors")
+        iv = QVBoxLayout(i2c)
+        self.i2c_lbl = QLabel("Waiting for contact_state...")
+        self.i2c_lbl.setObjectName("StatCaption")
+        iv.addWidget(self.i2c_lbl)
+        self.content.addWidget(i2c)
+
+        # --- raw frame inspector -------------------------------------------
+        raw = QGroupBox("Raw frame inspector")
+        rv = QVBoxLayout(raw)
+        ctl = QHBoxLayout()
+        self.capture_chk = QCheckBox("Capture raw frames")
+        self.capture_chk.toggled.connect(self._on_capture_toggled)
+        clear_btn = QPushButton("Clear")
+        clear_btn.clicked.connect(lambda: self.raw_feed.clear())
+        ctl.addWidget(self.capture_chk)
+        ctl.addStretch(1)
+        ctl.addWidget(clear_btn)
+        rv.addLayout(ctl)
+        self.raw_feed = QPlainTextEdit()
+        self.raw_feed.setReadOnly(True)
+        self.raw_feed.setMaximumBlockCount(500)
+        self.raw_feed.setObjectName("MonoLabel")
+        rv.addWidget(self.raw_feed, 1)
+        self.content.addWidget(raw, 1)
+
+        # --- wiring ---------------------------------------------------------
+        self._timer = QTimer(self)
+        self._timer.setInterval(300)
+        self._timer.timeout.connect(self._refresh)
+        self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
-        self.service.event.connect(self._on_event)
+
+    # --- reactions ---------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            for stream_id, rate in self._STREAMS:
+                self.service.subscribe(stream_id, rate)
+            if self.capture_chk.isChecked():
+                self.service.set_raw_capture(True)
+            self._timer.start()
+        else:
+            self._timer.stop()
+            self._last.clear()
+            self._reset_cards()
+
+    def _on_capture_toggled(self, checked: bool) -> None:
+        self.service.set_raw_capture(checked)
+        if not checked:
+            self.raw_feed.appendPlainText("-- capture stopped")
 
     def _on_telemetry(self, stream_id: int, record) -> None:
-        name = tlm.STREAM_NAMES.get(tlm.StreamId(stream_id), str(stream_id))
-        self.feed.appendPlainText(f"{name}: {record}")
+        self._last[stream_id] = record
 
-    def _on_event(self, kind: str, detail: str) -> None:
-        self.feed.appendPlainText(f"-- [{kind}] {detail}")
+    # --- periodic refresh --------------------------------------------------
+
+    def _refresh(self) -> None:
+        self._refresh_protocol()
+        self._refresh_timing()
+        self._refresh_dxl()
+        self._refresh_i2c()
+        self._refresh_raw()
+
+    def _refresh_protocol(self) -> None:
+        snap = self.service.diagnostics_snapshot()
+        if snap is None:
+            return
+        self.rx_card.set(str(snap.rx_frames), "ok")
+        self.tx_card.set(str(snap.tx_frames), "ok")
+        self.decode_card.set(
+            str(snap.decode_errors), "warn" if snap.decode_errors else "ok"
+        )
+        stats = self._last.get(int(tlm.StreamId.API_STATS))
+        if stats is not None:
+            self.backlog_card.set(
+                str(stats.tx_backlog), "warn" if stats.tx_backlog else "ok"
+            )
+            total = sum(stats.dropped_per_stream)
+            self.dropped_card.set(str(total), "warn" if total else "ok")
+
+    def _refresh_timing(self) -> None:
+        health = self._last.get(int(tlm.StreamId.HEALTH))
+        if health is None:
+            return
+        self.uptime_card.set(f"{health.uptime_ms / 1000:.1f} s", "ok")
+        self.watchdog_card.set(
+            str(health.watchdog_missed),
+            "warn" if health.watchdog_missed else "ok",
+        )
+        self.battery_card.set(f"{health.battery_mv / 1000:.2f} V", "ok")
+
+    def _refresh_dxl(self) -> None:
+        record = self._last.get(int(tlm.StreamId.SERVO_STATUS))
+        if record is None:
+            return
+        faulted = [s for s in record.servos if s.hardware_error]
+        self.dxl_table.setRowCount(len(faulted))
+        for row, servo in enumerate(faulted):
+            bits = ", ".join(tlm.decode_hw_error(servo.hardware_error)) or (
+                f"0x{servo.hardware_error:02X}"
+            )
+            self.dxl_table.setItem(row, 0, QTableWidgetItem(f"#{servo.id}"))
+            self.dxl_table.setItem(row, 1, QTableWidgetItem(bits))
+        n = len(record.servos)
+        if faulted:
+            self.dxl_lbl.setText(f"{len(faulted)}/{n} servos reporting errors")
+        else:
+            self.dxl_lbl.setText(f"{n} servos OK — no hardware errors")
+
+    def _refresh_i2c(self) -> None:
+        record = self._last.get(int(tlm.StreamId.CONTACT_STATE))
+        if record is None:
+            return
+        stale = sum(1 for f in record.feet if f.state == 5)  # STALE
+        fault = sum(1 for f in record.feet if f.state == 6)  # FAULT
+        states = " ".join(f.state_name[:1] for f in record.feet)
+        summary = (
+            f"{len(record.feet)} feet  [{states}]  "
+            f"stale={stale}  fault={fault}"
+        )
+        self.i2c_lbl.setText(summary)
+
+    def _refresh_raw(self) -> None:
+        for rec in self.service.drain_raw_frames():
+            if rec.ok:
+                if rec.msg_type == int(MsgType.TELEMETRY):
+                    sid = rec.msg_id - api.MSG_TELEMETRY_BASE
+                    name = tlm.STREAM_NAMES.get(sid, f"stream:{sid}")
+                else:
+                    name = f"type:{rec.msg_type} id:0x{rec.msg_id:02X}"
+                line = (
+                    f"[{name}] seq={rec.seq} len={rec.length} "
+                    f"plen={rec.payload_len}  {rec.head_hex}"
+                )
+            else:
+                line = f"[decode-error] len={rec.length}  {rec.head_hex}"
+            self.raw_feed.appendPlainText(line)
+
+    # --- helpers -----------------------------------------------------------
+
+    def _reset_cards(self) -> None:
+        for card in (
+            self.rx_card,
+            self.tx_card,
+            self.decode_card,
+            self.backlog_card,
+            self.dropped_card,
+            self.uptime_card,
+            self.watchdog_card,
+            self.battery_card,
+        ):
+            card.set("--", "idle")
+        self.dxl_table.setRowCount(0)
+        self.dxl_lbl.setText("Waiting for servo_status...")
+        self.i2c_lbl.setText("Waiting for contact_state...")
+
 
 
 class ModelViewerPage(BasePage):

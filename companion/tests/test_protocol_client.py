@@ -375,3 +375,73 @@ def test_cfg_validate_commit_reset():
     finally:
         client.stop()
 
+
+
+# --- diagnostics: raw-frame capture + counters ----------------------------
+def test_raw_capture_records_telemetry_frame():
+    from hexapod_protocol import telemetry as tlm
+
+    client, stream = _make_client({})
+    try:
+        client.set_raw_capture(True)
+        # Health payload: uptime(u32)=1000, state=2, fault=0, wd(u32)=0, batt(u16)=12000
+        import struct
+
+        payload = struct.pack("<IBBIH", 1000, 2, 0, 0, 12000)
+        stream.push_telemetry(int(tlm.StreamId.HEALTH), payload)
+        _wait_for(lambda: client.rx_frames >= 1)
+        frames = client.drain_raw_frames()
+        assert len(frames) == 1
+        rec = frames[0]
+        assert rec.ok and rec.msg_type == int(MsgType.TELEMETRY)
+        assert rec.payload_len == len(payload)
+        # Draining clears the buffer.
+        assert client.drain_raw_frames() == []
+    finally:
+        client.stop()
+
+
+def test_raw_capture_disabled_by_default():
+    from hexapod_protocol import telemetry as tlm
+
+    client, stream = _make_client({})
+    try:
+        import struct
+
+        payload = struct.pack("<IBBIH", 1, 2, 0, 0, 12000)
+        stream.push_telemetry(int(tlm.StreamId.HEALTH), payload)
+        _wait_for(lambda: client.rx_frames >= 1)
+        assert client.drain_raw_frames() == []
+    finally:
+        client.stop()
+
+
+def test_set_raw_capture_false_clears_buffer():
+    from hexapod_protocol import telemetry as tlm
+
+    client, stream = _make_client({})
+    try:
+        import struct
+
+        client.set_raw_capture(True)
+        payload = struct.pack("<IBBIH", 1, 2, 0, 0, 12000)
+        stream.push_telemetry(int(tlm.StreamId.HEALTH), payload)
+        _wait_for(lambda: client.rx_frames >= 1)
+        client.set_raw_capture(False)
+        assert client.drain_raw_frames() == []
+    finally:
+        client.stop()
+
+
+def test_diagnostics_snapshot_counts_frames():
+    client, _ = _make_client({api.MSG_ESTOP: _ctrl_ok(state=12)})
+    try:
+        client.estop()
+        _wait_for(lambda: client.rx_frames >= 1)
+        snap = client.diagnostics_snapshot()
+        assert snap.tx_frames >= 1
+        assert snap.rx_frames >= 1
+        assert snap.decode_errors == 0
+        assert snap.capture_enabled is False
+    finally:
+        client.stop()

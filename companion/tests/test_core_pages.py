@@ -131,16 +131,15 @@ def test_mode_safety_page_constructs(qtbot) -> None:
     assert page is not None
 
 
-def test_diagnostics_page_appends_feed(qtbot) -> None:
+def test_diagnostics_page_shows_telemetry(qtbot) -> None:
     from ui.pages import DiagnosticsPage
 
     service = _service()
     page = DiagnosticsPage(service)
     qtbot.addWidget(page)
 
-    health = tlm.HealthTelemetry(1000, 5, 0, 0, 11700)
+    health = tlm.HealthTelemetry(1000, 5, 0, 2, 11700)
     service.telemetry.emit(int(tlm.StreamId.HEALTH), health)
-    service.event.emit("connect", "fw 0.2")
-    text = page.feed.toPlainText()
-    assert "health" in text
-    assert "[connect] fw 0.2" in text
+    page._refresh_timing()
+    assert "1.0 s" in page.uptime_card._value.text()
+    assert page.watchdog_card._value.text() == "2"
