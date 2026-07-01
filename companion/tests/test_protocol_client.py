@@ -445,3 +445,85 @@ def test_diagnostics_snapshot_counts_frames():
         assert snap.capture_enabled is False
     finally:
         client.stop()
+
+
+# --- I2C topology / sensor status / poll rate -----------------------------
+def _topology_payload() -> bytes:
+    import struct
+
+    # mux=1, eeprom=1, n=3 channels; ch0 present, ch1 missing, ch2 fault.
+    body = bytes([1, 1, 3])
+    body += bytes([1, 1, 1, 2, 1])  # scanned,vcnl,lps,count,state=present
+    body += bytes([1, 0, 0, 0, 0])  # missing
+    body += bytes([1, 1, 0, 1, 2])  # fault
+    return body
+
+
+def _sensor_status_payload() -> bytes:
+    import struct
+
+    # n=2 feet, present_mask=0b01, polling=1.
+    body = bytes([2, 0b01, 1])
+    body += struct.pack("<BBHhB", 3, 200, 1234, 40, 0x04)  # LOADED
+    body += struct.pack("<BBHhB", 0, 10, 5, 0, 0x00)  # AIR
+    return body
+
+
+def test_i2c_get_topology_decodes_channels():
+    client, _ = _make_client(
+        {api.MSG_I2C_GET_TOPOLOGY: lambda _p: (_topology_payload(), False)}
+    )
+    try:
+        topo = client.i2c_get_topology()
+        assert topo is not None
+        assert topo.mux_present and topo.eeprom_present
+        assert len(topo.channels) == 3
+        assert topo.channels[0].state == 1
+        assert topo.channels[2].state == 2
+    finally:
+        client.stop()
+
+
+def test_i2c_scan_returns_result():
+    import struct
+
+    client, _ = _make_client(
+        {api.MSG_I2C_SCAN: lambda _p: (bytes([api.SENSOR_OK]) + struct.pack("<H", 7), False)}
+    )
+    try:
+        res = client.i2c_scan()
+        assert res is not None and res.ok and res.scan_seq == 7
+    finally:
+        client.stop()
+
+
+def test_sensor_get_status_decodes_feet():
+    client, _ = _make_client(
+        {api.MSG_SENSOR_GET_STATUS: lambda _p: (_sensor_status_payload(), False)}
+    )
+    try:
+        st = client.sensor_get_status()
+        assert st is not None
+        assert st.present_mask == 0b01 and st.polling_enabled
+        assert len(st.feet) == 2
+        assert st.feet[0].loaded and st.feet[0].proximity == 1234
+    finally:
+        client.stop()
+
+
+def test_sensor_set_rate_roundtrip():
+    import struct
+
+    seen = {}
+
+    def handler(payload):
+        seen["rate"] = struct.unpack_from("<H", payload, 0)[0]
+        return bytes([api.SENSOR_OK]) + struct.pack("<H", seen["rate"]), False
+
+    client, _ = _make_client({api.MSG_SENSOR_SET_RATE: handler})
+    try:
+        res = client.sensor_set_rate(75)
+        assert res is not None and res.ok and res.rate_hz == 75
+        assert seen["rate"] == 75
+    finally:
+        client.stop()

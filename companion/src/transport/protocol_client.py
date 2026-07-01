@@ -352,6 +352,18 @@ class ProtocolClient:
         r = self._send_built(api.build_sensor_set_rate(rate_hz))
         return api.parse_sensor_rate_result(r.payload) if r else None
 
+    def i2c_scan(self) -> Optional[api.I2cScanResult]:
+        r = self._send_built(api.build_i2c_scan())
+        return api.parse_i2c_scan_result(r.payload) if r else None
+
+    def i2c_get_topology(self) -> Optional[api.I2cTopologyResult]:
+        r = self._send_built(api.build_i2c_get_topology())
+        return api.parse_i2c_topology_result(r.payload) if r else None
+
+    def sensor_get_status(self) -> Optional[api.SensorStatusResult]:
+        r = self._send_built(api.build_sensor_get_status())
+        return api.parse_sensor_status_result(r.payload) if r else None
+
     # Passive pose streaming.
     def passive_enter(self) -> Optional[api.PassiveResult]:
         r = self._send_built(api.build_passive_enter())

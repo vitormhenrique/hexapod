@@ -23,6 +23,7 @@ from ui.pages import (
     PassivePosePage,
     ServoConfigPage,
     ServoTuningPage,
+    SensorDashboardPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
 
@@ -58,6 +59,7 @@ class MainWindow(QMainWindow):
         self.nav.add_section("Visualize")
         self.nav.add_item("model", "Model Viewer")
         self.nav.add_section("Diagnose")
+        self.nav.add_item("sensors", "Sensor Dashboard")
         self.nav.add_item("diagnostics", "Diagnostics")
         self.nav.finish()
         self.nav.navigated.connect(self._navigate)
@@ -94,6 +96,7 @@ class MainWindow(QMainWindow):
             ("servo_config", ServoConfigPage(self.service)),
             ("servo_tuning", ServoTuningPage(self.service)),
             ("model", ModelViewerPage(self.service)),
+            ("sensors", SensorDashboardPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),
         ):
             self._pages[key] = self.stack.addWidget(page)

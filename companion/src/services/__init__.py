@@ -43,6 +43,9 @@ class ConnectionService(QObject):
     sensor_feature_result = Signal(str, object)  # kind, api.SensorFeatureResult
     contact_threshold_result = Signal(object)  # api.ContactThresholdResult
     sensor_calibrate_result = Signal(object)  # api.SensorCalibrateResult
+    sensor_rate_result = Signal(object)  # api.SensorRateResult
+    i2c_topology = Signal(object)  # api.I2cTopologyResult (None on failure)
+    sensor_status = Signal(object)  # api.SensorStatusResult (None on failure)
     passive_result = Signal(str, object)  # kind, api.PassiveResult
     passive_rate_result = Signal(object)  # api.PassiveRateResult
 
@@ -326,6 +329,57 @@ class ConnectionService(QObject):
                 self.error.emit("calibrate: no response")
             else:
                 self.sensor_calibrate_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def set_sensor_rate(self, rate_hz: int) -> None:
+        """Stage the foot-sensor poll rate; emit ``sensor_rate_result``."""
+        client = self._client
+        if client is None:
+            self.error.emit("sensor rate: not connected")
+            return
+
+        def worker() -> None:
+            res = client.sensor_set_rate(rate_hz)
+            if res is None:
+                self.error.emit("sensor rate: no response")
+            else:
+                self.sensor_rate_result.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_i2c_topology(self, rescan: bool = False) -> None:
+        """Read the I2C topology (optionally re-running discovery first).
+
+        Emits ``i2c_topology`` with the result (``None`` on failure).
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("i2c topology: not connected")
+            return
+
+        def worker() -> None:
+            if rescan:
+                client.i2c_scan()
+            res = client.i2c_get_topology()
+            if res is None:
+                self.error.emit("i2c topology: no response")
+            self.i2c_topology.emit(res)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_sensor_status(self) -> None:
+        """Read the fused per-foot sensor status; emit ``sensor_status``."""
+        client = self._client
+        if client is None:
+            self.error.emit("sensor status: not connected")
+            return
+
+        def worker() -> None:
+            res = client.sensor_get_status()
+            if res is None:
+                self.error.emit("sensor status: no response")
+            self.sensor_status.emit(res)
 
         threading.Thread(target=worker, daemon=True).start()
 

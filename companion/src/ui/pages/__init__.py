@@ -1961,7 +1961,251 @@ class FootContactPage(BasePage):
         )
 
 
+class SensorDashboardPage(BasePage):
+    title = "Sensor Dashboard & I2C"
+    subtitle = (
+        "Root I2C topology, TCA9548A mux channels, live Robotic Finger Sensor v2 "
+        "values, poll-rate control, and baseline calibration."
+    )
+
+    TOPO_COLUMNS = ["Ch", "Scanned", "VCNL4040", "LPS25HB", "Devices", "State"]
+    LIVE_COLUMNS = ["Ch", "Present", "State", "Conf", "Proximity", "Pressure"]
+    CHANNEL_STATE_NAMES = {0: "missing", 1: "present", 2: "fault"}
+    CHANNEL_STATE_LEVEL = {0: "idle", 1: "ok", 2: "warn"}
+
+    def build(self) -> None:
+        self.content.addWidget(self._topology_group())
+        self.content.addWidget(self._live_group())
+        self.content.addWidget(self._controls_group())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+        self.service.i2c_topology.connect(self._apply_topology)
+        self.service.sensor_status.connect(self._apply_sensor_status)
+        self.service.sensor_rate_result.connect(self._on_rate_result)
+        self.service.sensor_calibrate_result.connect(self._on_calibrate_result)
+
+    # --- groups -----------------------------------------------------------
+
+    def _topology_group(self) -> QGroupBox:
+        box = QGroupBox("Root I2C topology")
+        lay = QVBoxLayout(box)
+
+        badges = QHBoxLayout()
+        self.mux_badge = StatusBadge("TCA9548A mux")
+        self.eeprom_badge = StatusBadge("24LC32 EEPROM")
+        badges.addWidget(self.mux_badge)
+        badges.addWidget(self.eeprom_badge)
+        badges.addStretch(1)
+        lay.addLayout(badges)
+
+        self.topo_table = QTableWidget(0, len(self.TOPO_COLUMNS))
+        self.topo_table.setHorizontalHeaderLabels(self.TOPO_COLUMNS)
+        self.topo_table.verticalHeader().setVisible(False)
+        self.topo_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.topo_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.topo_table.setMinimumHeight(200)
+        lay.addWidget(self.topo_table)
+
+        row = QHBoxLayout()
+        self.refresh_btn = QPushButton("Refresh topology")
+        self.refresh_btn.clicked.connect(
+            lambda: self.service.refresh_i2c_topology(rescan=False)
+        )
+        self.rescan_btn = QPushButton("Rescan I2C bus")
+        self.rescan_btn.clicked.connect(self._rescan)
+        row.addWidget(self.refresh_btn)
+        row.addWidget(self.rescan_btn)
+        row.addStretch(1)
+        self.topo_status = QLabel("Not connected.")
+        self.topo_status.setObjectName("MonoLabel")
+        row.addWidget(self.topo_status)
+        lay.addLayout(row)
+        return box
+
+    def _live_group(self) -> QGroupBox:
+        box = QGroupBox("Live foot sensors (channels 0-5)")
+        lay = QVBoxLayout(box)
+        self.live_table = QTableWidget(tlm.NUM_FEET, len(self.LIVE_COLUMNS))
+        self.live_table.setHorizontalHeaderLabels(self.LIVE_COLUMNS)
+        self.live_table.verticalHeader().setVisible(False)
+        self.live_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.live_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for ch in range(tlm.NUM_FEET):
+            self.live_table.setItem(ch, 0, QTableWidgetItem(f"Ch {ch}"))
+            for col in range(1, len(self.LIVE_COLUMNS)):
+                self.live_table.setItem(ch, col, QTableWidgetItem("--"))
+        self.live_table.setMinimumHeight(220)
+        lay.addWidget(self.live_table)
+
+        row = QHBoxLayout()
+        status_btn = QPushButton("Refresh status")
+        status_btn.clicked.connect(self.service.refresh_sensor_status)
+        row.addWidget(status_btn)
+        row.addStretch(1)
+        self.live_status = QLabel("--")
+        self.live_status.setObjectName("MonoLabel")
+        row.addWidget(self.live_status)
+        lay.addLayout(row)
+        return box
+
+    def _controls_group(self) -> QGroupBox:
+        box = QGroupBox("Polling & calibration")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        rate_row = QHBoxLayout()
+        self.rate_spin = QSpinBox()
+        self.rate_spin.setRange(1, 200)
+        self.rate_spin.setValue(50)
+        self.rate_spin.setSuffix(" Hz")
+        apply_btn = QPushButton("Apply rate")
+        apply_btn.setProperty("accent", True)
+        apply_btn.clicked.connect(
+            lambda: self.service.set_sensor_rate(self.rate_spin.value())
+        )
+        rate_row.addWidget(self.rate_spin)
+        rate_row.addWidget(apply_btn)
+        rate_row.addStretch(1)
+        form.addRow("Poll rate", self._wrap(rate_row))
+        self.rate_result = QLabel("--")
+        self.rate_result.setObjectName("MonoLabel")
+        form.addRow("", self.rate_result)
+
+        cal = QPushButton("Re-zero all foot baselines")
+        cal.clicked.connect(self._calibrate)
+        form.addRow("Calibration", cal)
+        self.cal_result = QLabel("Feet must be at rest before calibrating.")
+        self.cal_result.setObjectName("MonoLabel")
+        form.addRow("", self.cal_result)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        w = QWidget()
+        w.setLayout(layout)
+        return w
+
+    # --- actions ----------------------------------------------------------
+
+    def _rescan(self) -> None:
+        self.topo_status.setText("rescanning…")
+        self.service.refresh_i2c_topology(rescan=True)
+
+    def _calibrate(self) -> None:
+        if not self._confirm(
+            "Calibrate all baselines",
+            "Re-zero the pressure baseline for every foot? All feet must be "
+            "unloaded and at rest.",
+        ):
+            return
+        self.cal_result.setText("calibrating…")
+        self.service.calibrate_contact(api.SENSOR_CALIBRATE_ALL)
+
+    # --- telemetry & results ---------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
+            self.service.subscribe(int(tlm.StreamId.CONTACT_STATE), 10)
+            self.service.refresh_i2c_topology(rescan=False)
+            self.service.refresh_sensor_status()
+        else:
+            self.topo_table.setRowCount(0)
+            self.mux_badge.set("disconnected", "idle")
+            self.eeprom_badge.set("disconnected", "idle")
+            self.topo_status.setText("Not connected.")
+            for ch in range(tlm.NUM_FEET):
+                for col in range(1, len(self.LIVE_COLUMNS)):
+                    self.live_table.item(ch, col).setText("--")
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.I2C_SENSORS_RAW):
+            for ch, fr in enumerate(record.feet):
+                if ch >= tlm.NUM_FEET:
+                    break
+                self.live_table.item(ch, 4).setText(str(fr.proximity))
+                self.live_table.item(ch, 5).setText(str(fr.pressure_raw))
+        elif stream_id == int(tlm.StreamId.CONTACT_STATE):
+            for ch, fc in enumerate(record.feet):
+                if ch >= tlm.NUM_FEET:
+                    break
+                self.live_table.item(ch, 2).setText(fc.state_name)
+                self.live_table.item(ch, 3).setText(str(fc.confidence))
+
+    def _apply_topology(self, res) -> None:
+        if res is None:
+            self.topo_status.setText("no topology response")
+            return
+        self.mux_badge.set(
+            "present" if res.mux_present else "missing",
+            "ok" if res.mux_present else "warn",
+        )
+        self.eeprom_badge.set(
+            "present" if res.eeprom_present else "missing",
+            "ok" if res.eeprom_present else "warn",
+        )
+        self.topo_table.setRowCount(len(res.channels))
+        for ch, chan in enumerate(res.channels):
+            state_name = self.CHANNEL_STATE_NAMES.get(chan.state, str(chan.state))
+            values = [
+                str(ch),
+                "yes" if chan.scanned else "no",
+                "yes" if chan.vcnl_present else "no",
+                "yes" if chan.lps_present else "no",
+                str(chan.device_count),
+                state_name,
+            ]
+            for col, text in enumerate(values):
+                self.topo_table.setItem(ch, col, QTableWidgetItem(text))
+        present = sum(1 for c in res.channels if c.state == 1)
+        fault = sum(1 for c in res.channels if c.state == 2)
+        self.topo_status.setText(
+            f"{len(res.channels)} channels — present={present} fault={fault}"
+        )
+
+    def _apply_sensor_status(self, res) -> None:
+        if res is None:
+            self.live_status.setText("no status response")
+            return
+        for ch, foot in enumerate(res.feet):
+            if ch >= tlm.NUM_FEET:
+                break
+            present = bool(res.present_mask & (1 << ch))
+            self.live_table.item(ch, 1).setText("yes" if present else "no")
+            self.live_table.item(ch, 2).setText(
+                tlm.CONTACT_STATE_NAMES.get(foot.state, str(foot.state))
+            )
+            self.live_table.item(ch, 3).setText(str(foot.confidence))
+            self.live_table.item(ch, 4).setText(str(foot.proximity))
+        polling = "on" if res.polling_enabled else "off"
+        self.live_status.setText(
+            f"present_mask=0x{res.present_mask:02X}  polling={polling}"
+        )
+
+    def _on_rate_result(self, res) -> None:
+        if res.ok:
+            self.rate_result.setText(f"poll rate set to {res.rate_hz} Hz")
+        else:
+            self.rate_result.setText(f"rejected (code {res.result})")
+
+    def _on_calibrate_result(self, res) -> None:
+        if res.ok:
+            self.cal_result.setText(f"calibrated (mask 0x{res.mask:02X})")
+        else:
+            self.cal_result.setText(f"rejected (code {res.result})")
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return (
+            QMessageBox.question(
+                self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+            )
+            == QMessageBox.Yes
+        )
+
+
 class PassivePosePage(BasePage):
+
     title = "Passive Pose & Stream"
     subtitle = (
         "Torque-off passive streaming: hand-pose the robot and watch joint "
