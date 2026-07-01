@@ -138,6 +138,12 @@ class ConnectionService(QObject):
                 daemon=True,
             ).start()
 
+    def mark_note(self, text: str) -> None:
+        """Emit an operator note event (annotates plots + session logs)."""
+        note = (text or "").strip()
+        if note:
+            self.event.emit("note", note)
+
     # --- diagnostics (safe no-ops when disconnected) ---------------------
 
     def set_raw_capture(self, enabled: bool) -> None:

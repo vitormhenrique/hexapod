@@ -116,6 +116,8 @@ class MainWindow(QMainWindow):
         self.service.status_received.connect(self._on_status)
         self.service.telemetry.connect(self._on_telemetry)
 
+        self._last_fault_reason = 0
+
         self.nav.select("connect")
 
     def _navigate(self, key: str) -> None:
@@ -145,10 +147,16 @@ class MainWindow(QMainWindow):
                 "ARMED" if record.motion_gate else "SAFE",
                 "warn" if record.motion_gate else "ok",
             )
-            if record.fault_reason:
-                self.event_strip.add(
-                    "fault", tlm.FAULT_REASON_NAMES.get(record.fault_reason, "fault")
-                )
+            # Emit a fault event only on transition (avoids per-frame spam); the
+            # event flows through service.event so both the event strip and the
+            # plot markers pick it up.
+            if record.fault_reason != self._last_fault_reason:
+                self._last_fault_reason = record.fault_reason
+                if record.fault_reason:
+                    self.service.event.emit(
+                        "fault",
+                        tlm.FAULT_REASON_NAMES.get(record.fault_reason, "fault"),
+                    )
         elif stream_id == int(tlm.StreamId.RC_INPUT):
             self.safety_bar.rc.set(
                 "FAILSAFE" if record.failsafe else "OK",

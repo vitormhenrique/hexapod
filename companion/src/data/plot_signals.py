@@ -171,14 +171,18 @@ def streams_for(signals: Iterable[PlotSignal]) -> set[int]:
 
 
 def extract_series(
-    frames: Iterable, signals: Iterable[PlotSignal]
+    frames: Iterable,
+    signals: Iterable[PlotSignal],
+    t0_ns: Optional[int] = None,
 ) -> dict[str, tuple[list[float], list[float]]]:
     """Pull per-signal ``(xs, ys)`` series from decoded replay frames.
 
     ``frames`` is any iterable of objects exposing ``stream`` (name), ``record``,
-    and ``timestamp_ms`` -- i.e. ``SessionReplay.iter_decoded_frames()``. The x
-    axis is the frame's robot timestamp in seconds; frames whose stream/record do
-    not match a signal are skipped.
+    and ``timestamp_ms`` -- i.e. ``SessionReplay.iter_decoded_frames()``. When
+    ``t0_ns`` is given, the x axis is host wall-clock seconds relative to that
+    reference (``host_time_ns`` per frame), so telemetry aligns with event
+    markers on the same clock; otherwise x is the frame's robot timestamp in
+    seconds. Frames whose stream/record do not match a signal are skipped.
     """
     sigs = list(signals)
     by_stream: dict[int, list[PlotSignal]] = {}
@@ -199,7 +203,10 @@ def extract_series(
         matches = by_stream.get(sid)
         if not matches:
             continue
-        x = getattr(df, "timestamp_ms", 0) / 1000.0
+        if t0_ns is not None:
+            x = (getattr(df, "host_time_ns", 0) - t0_ns) / 1e9
+        else:
+            x = getattr(df, "timestamp_ms", 0) / 1000.0
         for s in matches:
             y = s.extract(record)
             if y is None:

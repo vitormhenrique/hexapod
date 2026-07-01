@@ -105,3 +105,55 @@ def test_filter_hides_nonmatching_signals(qtbot) -> None:
     # The RC gait_index row stays visible; a servo row is hidden.
     assert visible["rc.gait_index"] is True
     assert visible["servo.1.position"] is False
+
+
+# --- event markers (nxi.2) -------------------------------------------------
+
+
+def test_live_event_draws_marker(qtbot) -> None:
+    page, service = _make_page(qtbot)
+    page.select_signals(["servo.1.position"])
+    service.event.emit("gait", "Tripod")
+    assert page.event_marker_count() == 1
+    assert len(page._event_lines) == 1
+
+
+def test_add_note_emits_event_and_marker(qtbot) -> None:
+    page, service = _make_page(qtbot)
+    seen: list[tuple[str, str]] = []
+    service.event.connect(lambda k, d: seen.append((k, d)))
+    page._note_edit.setText("touched leg 3")
+    page._add_note()
+    assert ("note", "touched leg 3") in seen
+    assert page.event_marker_count() == 1
+    assert page._note_edit.text() == ""
+
+
+def test_toggle_hides_and_restores_markers(qtbot) -> None:
+    page, service = _make_page(qtbot)
+    service.event.emit("fault", "WATCHDOG")
+    assert len(page._event_lines) == 1
+    page._show_events.setChecked(False)
+    assert len(page._event_lines) == 0
+    page._show_events.setChecked(True)
+    assert len(page._event_lines) == 1
+
+
+def test_clear_removes_event_markers(qtbot) -> None:
+    page, service = _make_page(qtbot)
+    service.event.emit("gait", "Wave")
+    assert page.event_marker_count() == 1
+    page._clear()
+    assert page.event_marker_count() == 0
+    assert len(page._event_lines) == 0
+
+
+def test_replay_overlays_recorded_events(qtbot, tmp_path) -> None:
+    page, _ = _make_page(qtbot)
+    page.select_signals(["servo.1.position"])
+    replay = build_sample_session(tmp_path, frames_per_stream=3)
+    page.load_session(replay.dir)
+    # The fixture records one "connect" event.
+    assert page.event_marker_count() == 1
+    assert "event(s)" in page._status.text()
+

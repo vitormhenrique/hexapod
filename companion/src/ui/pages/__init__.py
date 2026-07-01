@@ -586,12 +586,19 @@ class GaitLabPage(BasePage):
         for i, (label, gait) in enumerate(self.GAITS):
             btn = QPushButton(label)
             btn.setCheckable(True)
-            btn.clicked.connect(lambda _=False, g=gait: self.service.set_gait(g))
+            btn.clicked.connect(
+                lambda _=False, g=gait, name=label: self._select_gait(g, name)
+            )
             grid.addWidget(btn, i // 3, i % 3)
             self._gait_buttons[gait] = btn
         for c in range(3):
             grid.setColumnStretch(c, 1)
         return box
+
+    def _select_gait(self, gait: int, label: str) -> None:
+        """Command a gait and annotate the timeline with a gait-change event."""
+        self.service.set_gait(gait)
+        self.service.event.emit("gait", label)
 
     def _gait_params(self) -> QGroupBox:
         box = QGroupBox("Gait parameters")
@@ -2683,6 +2690,7 @@ class PlotWorkbenchPage(BasePage):
             registry_by_key,
             streams_for,
         )
+        from data.event_log import EventLog
 
         self._pg = pg
         self._deque = deque
@@ -2698,6 +2706,10 @@ class PlotWorkbenchPage(BasePage):
         self._replay = None
         self._t0 = self._monotonic()
         self._mode = "live"  # or "replay"
+
+        # Event markers overlaying the timeline (nxi.2).
+        self._event_log = EventLog()
+        self._event_lines: list = []
 
         # --- top controls -------------------------------------------------
         controls = QHBoxLayout()
@@ -2736,6 +2748,23 @@ class PlotWorkbenchPage(BasePage):
         controls.addWidget(self._status)
         self.content.addLayout(controls)
 
+        # --- event annotation row (nxi.2) ---------------------------------
+        events = QHBoxLayout()
+        events.setSpacing(10)
+        self._show_events = QCheckBox("Show event markers")
+        self._show_events.setChecked(True)
+        self._show_events.toggled.connect(self._on_show_events_toggled)
+        events.addWidget(self._show_events)
+        events.addWidget(QLabel("Note:"))
+        self._note_edit = QLineEdit()
+        self._note_edit.setPlaceholderText("Add an operator note at the current time\u2026")
+        self._note_edit.returnPressed.connect(self._add_note)
+        events.addWidget(self._note_edit, 1)
+        self._note_btn = QPushButton("Add note")
+        self._note_btn.clicked.connect(self._add_note)
+        events.addWidget(self._note_btn)
+        self.content.addLayout(events)
+
         # --- splitter: picker | plot --------------------------------------
         splitter = QSplitter(Qt.Horizontal)
 
@@ -2771,6 +2800,7 @@ class PlotWorkbenchPage(BasePage):
 
         self.service.telemetry.connect(self._on_telemetry)
         self.service.connected.connect(self._on_connected)
+        self.service.event.connect(self._on_event)
 
         self._redraw_timer = QTimer(self)
         self._redraw_timer.setInterval(self._REDRAW_MS)
@@ -2907,7 +2937,59 @@ class PlotWorkbenchPage(BasePage):
             self._live_buf[key] = self._deque(maxlen=self._window_spin.value())
         for curve in self._curves.values():
             curve.setData([], [])
+        self._clear_event_markers()
         self._t0 = self._monotonic()
+
+    # --- event markers (nxi.2) --------------------------------------------
+
+    def _add_note(self) -> None:
+        text = self._note_edit.text().strip()
+        if not text:
+            return
+        self.service.mark_note(text)
+        self._note_edit.clear()
+
+    def _on_event(self, kind: str, detail: str) -> None:
+        """Handle a live event from the service: annotate the live timeline."""
+        if self._mode != "live":
+            return
+        t_s = self._monotonic() - self._t0
+        marker = self._event_log.add(kind, detail, t_s)
+        self._draw_event_marker(marker)
+
+    def _on_show_events_toggled(self, checked: bool) -> None:
+        if checked:
+            for marker in self._event_log.markers():
+                self._draw_event_marker(marker)
+        else:
+            for line in self._event_lines:
+                self._plot.removeItem(line)
+            self._event_lines.clear()
+
+    def _draw_event_marker(self, marker) -> None:
+        if not self._show_events.isChecked():
+            return
+        pg = self._pg
+        line = pg.InfiniteLine(
+            pos=marker.t_s,
+            angle=90,
+            movable=False,
+            pen=pg.mkPen(marker.color, width=1, style=Qt.DashLine),
+            label=marker.label,
+            labelOpts={"position": 0.92, "color": marker.color, "rotateAxis": (1, 0)},
+        )
+        self._plot.addItem(line)
+        self._event_lines.append(line)
+
+    def _clear_event_markers(self) -> None:
+        for line in self._event_lines:
+            self._plot.removeItem(line)
+        self._event_lines.clear()
+        self._event_log.clear()
+
+    def event_marker_count(self) -> int:
+        """Number of active event markers (used by tests)."""
+        return len(self._event_log)
 
     # --- live --------------------------------------------------------------
 
@@ -2969,10 +3051,14 @@ class PlotWorkbenchPage(BasePage):
         if self._mode != "replay" or self._replay is None:
             return
         from data.plot_signals import extract_series
+        from data.event_log import EventLog
 
-        series = extract_series(
-            self._replay.iter_decoded_frames(), self._selected
+        frames = list(self._replay.iter_decoded_frames())
+        t0_ns = min(
+            (getattr(f, "host_time_ns", 0) for f in frames),
+            default=0,
         )
+        series = extract_series(frames, self._selected, t0_ns=t0_ns)
         points = 0
         for sig in self._selected:
             curve = self._curves.get(sig.key)
@@ -2981,8 +3067,18 @@ class PlotWorkbenchPage(BasePage):
             xs, ys = series.get(sig.key, ([], []))
             curve.setData(xs, ys)
             points += len(xs)
+
+        # Overlay recorded events on the same host timeline.
+        self._clear_event_markers()
+        self._event_log = EventLog.from_session_events(
+            self._replay.iter_events(), t0_ns=t0_ns
+        )
+        for marker in self._event_log.markers():
+            self._draw_event_marker(marker)
+
         meta = self._replay.meta
         self._status.setText(
             f"Replay: {meta.get('session_id', '?')} \u2014 "
-            f"{len(self._selected)} signal(s), {points} points"
+            f"{len(self._selected)} signal(s), {points} points, "
+            f"{len(self._event_log)} event(s)"
         )
