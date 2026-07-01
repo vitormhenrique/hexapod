@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QScrollArea,
+    QSlider,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -2372,7 +2373,9 @@ class PassivePosePage(BasePage):
 
 class DiagnosticsPage(BasePage):
     title = "Diagnostics"
-    subtitle = "Protocol stats, DXL/I2C errors, firmware timing, and a raw frame inspector."
+    subtitle = (
+        "Protocol stats, DXL/I2C errors, firmware timing, and a raw frame inspector."
+    )
     fill = True
 
     # Streams the page needs; (stream_id, rate_hz).
@@ -2435,9 +2438,7 @@ class DiagnosticsPage(BasePage):
         self.dxl_table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeToContents
         )
-        self.dxl_table.horizontalHeader().setSectionResizeMode(
-            1, QHeaderView.Stretch
-        )
+        self.dxl_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.dxl_table.verticalHeader().setVisible(False)
         self.dxl_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.dxl_table.setMaximumHeight(160)
@@ -2563,8 +2564,7 @@ class DiagnosticsPage(BasePage):
         fault = sum(1 for f in record.feet if f.state == 6)  # FAULT
         states = " ".join(f.state_name[:1] for f in record.feet)
         summary = (
-            f"{len(record.feet)} feet  [{states}]  "
-            f"stale={stale}  fault={fault}"
+            f"{len(record.feet)} feet  [{states}]  " f"stale={stale}  fault={fault}"
         )
         self.i2c_lbl.setText(summary)
 
@@ -2601,7 +2601,6 @@ class DiagnosticsPage(BasePage):
         self.dxl_table.setRowCount(0)
         self.dxl_lbl.setText("Waiting for servo_status...")
         self.i2c_lbl.setText("Waiting for contact_state...")
-
 
 
 class ModelViewerPage(BasePage):
@@ -2664,8 +2663,16 @@ class ModelViewerPage(BasePage):
 
 # Curve colours cycled across selected signals (Dracula-ish palette).
 _PLOT_COLORS = [
-    "#8be9fd", "#ff79c6", "#50fa7b", "#ffb86c", "#bd93f9",
-    "#f1fa8c", "#ff5555", "#6272a4", "#8affff", "#ff78e0",
+    "#8be9fd",
+    "#ff79c6",
+    "#50fa7b",
+    "#ffb86c",
+    "#bd93f9",
+    "#f1fa8c",
+    "#ff5555",
+    "#6272a4",
+    "#8affff",
+    "#ff78e0",
 ]
 
 
@@ -2757,7 +2764,9 @@ class PlotWorkbenchPage(BasePage):
         events.addWidget(self._show_events)
         events.addWidget(QLabel("Note:"))
         self._note_edit = QLineEdit()
-        self._note_edit.setPlaceholderText("Add an operator note at the current time\u2026")
+        self._note_edit.setPlaceholderText(
+            "Add an operator note at the current time\u2026"
+        )
         self._note_edit.returnPressed.connect(self._add_note)
         events.addWidget(self._note_edit, 1)
         self._note_btn = QPushButton("Add note")
@@ -2861,9 +2870,7 @@ class PlotWorkbenchPage(BasePage):
         self._tree.blockSignals(True)
         for child in self._iter_signal_items():
             key = child.data(0, Qt.UserRole)
-            child.setCheckState(
-                0, Qt.Checked if key in wanted else Qt.Unchecked
-            )
+            child.setCheckState(0, Qt.Checked if key in wanted else Qt.Unchecked)
         self._tree.blockSignals(False)
         self._rebuild_selection()
 
@@ -2899,9 +2906,7 @@ class PlotWorkbenchPage(BasePage):
         if not selected:
             self._status.setText("No signals selected.")
         else:
-            self._status.setText(
-                f"{len(selected)} signal(s) \u00b7 {self._mode} mode"
-            )
+            self._status.setText(f"{len(selected)} signal(s) \u00b7 {self._mode} mode")
         if self._mode == "live":
             self._ensure_subscriptions()
         else:
@@ -2915,9 +2920,7 @@ class PlotWorkbenchPage(BasePage):
         self._clear()
         if self._mode == "live":
             self._ensure_subscriptions()
-            self._status.setText(
-                f"{len(self._selected)} signal(s) \u00b7 live mode"
-            )
+            self._status.setText(f"{len(self._selected)} signal(s) \u00b7 live mode")
         else:
             self._status.setText("Replay mode \u2014 load a recorded session.")
 
@@ -3082,3 +3085,267 @@ class PlotWorkbenchPage(BasePage):
             f"{len(self._selected)} signal(s), {points} points, "
             f"{len(self._event_log)} event(s)"
         )
+
+
+class UrdfViewerPage(BasePage):
+    title = "URDF Viewer"
+    subtitle = (
+        "Render the actual HexNav URDF meshes in 3D and animate them from "
+        "live or replay joint telemetry."
+    )
+    fill = True
+
+    # Prefer joint_state; fall back to servo_status only when joint_state stalls.
+    _JOINT_STATE_TIMEOUT_MS = 750
+    _REPLAY_FPS = 20
+
+    def build(self) -> None:
+        import time as _time
+
+        from data.urdf_fk import UrdfForwardKinematics, joint_state_to_urdf_angles
+        from data.urdf_model import find_hexnav_description, load_hexnav
+
+        self._monotonic = _time.monotonic
+        self._map_angles = joint_state_to_urdf_angles
+
+        self._angles: dict = {}
+        self._last_joint_state_ms = 0
+        self._mode = "live"  # or "replay"
+        self._replay_frames: list = []  # list[dict] of joint-name -> rad
+        self._replay_idx = 0
+        self._ok = False
+        self._view = None
+
+        self.source_badge = StatusBadge("Pose source")
+        self.source_badge.set("waiting", "idle")
+        self.content.addWidget(self.source_badge)
+
+        if find_hexnav_description() is None:
+            self._show_unavailable(
+                "HexNav_description not found. Set HEXAPOD_ROBOT_DESCRIPTION "
+                "to the package path to enable the URDF viewer."
+            )
+            return
+
+        try:
+            self._model = load_hexnav()
+            self._fk = UrdfForwardKinematics(self._model)
+
+            from data.mesh_loader import build_link_meshes
+            from ui.widgets.urdf_gl_view import UrdfGLView
+
+            meshes = build_link_meshes(self._model)
+            self._view = UrdfGLView(self._model, self._fk, meshes)
+        except Exception as exc:  # noqa: BLE001 - degrade instead of crashing
+            self._show_unavailable(f"3D view unavailable: {exc}")
+            return
+
+        self._ok = True
+
+        self.content.addLayout(self._controls())
+        self.content.addWidget(self._view, 1)
+
+        self.service.connected.connect(self._on_connected)
+        self.service.telemetry.connect(self._on_telemetry)
+
+        self._replay_timer = QTimer(self)
+        self._replay_timer.setInterval(int(1000 / self._REPLAY_FPS))
+        self._replay_timer.timeout.connect(self._advance_replay)
+
+    # --- construction helpers ---------------------------------------------
+
+    def _show_unavailable(self, message: str) -> None:
+        self._fk = None
+        self.source_badge.set("URDF unavailable", "error")
+        self.content.addWidget(QLabel(message))
+        self.content.addStretch(1)
+
+    def _controls(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        self._live_radio = QRadioButton("Live")
+        self._live_radio.setChecked(True)
+        self._replay_radio = QRadioButton("Replay")
+        group = QButtonGroup(self)
+        group.addButton(self._live_radio)
+        group.addButton(self._replay_radio)
+        self._live_radio.toggled.connect(self._on_mode_toggled)
+        row.addWidget(QLabel("Source:"))
+        row.addWidget(self._live_radio)
+        row.addWidget(self._replay_radio)
+
+        self._load_btn = QPushButton("Load session\u2026")
+        self._load_btn.clicked.connect(self._choose_session)
+        self._load_btn.setEnabled(False)
+        row.addWidget(self._load_btn)
+
+        self._play_btn = QPushButton("Play")
+        self._play_btn.setEnabled(False)
+        self._play_btn.clicked.connect(self._toggle_play)
+        row.addWidget(self._play_btn)
+
+        self._scrub = QSlider(Qt.Horizontal)
+        self._scrub.setEnabled(False)
+        self._scrub.setRange(0, 0)
+        self._scrub.valueChanged.connect(self._on_scrub)
+        row.addWidget(self._scrub, 1)
+
+        self._frame_lbl = QLabel("\u2014")
+        self._frame_lbl.setObjectName("PageSubtitle")
+        row.addWidget(self._frame_lbl)
+        return row
+
+    def _now_ms(self) -> int:
+        return int(self._monotonic() * 1000)
+
+    # --- mode --------------------------------------------------------------
+
+    def _on_mode_toggled(self, live_checked: bool) -> None:
+        self._mode = "live" if live_checked else "replay"
+        self._load_btn.setEnabled(self._mode == "replay")
+        replay_ready = self._mode == "replay" and bool(self._replay_frames)
+        self._play_btn.setEnabled(replay_ready)
+        self._scrub.setEnabled(replay_ready)
+        if self._mode == "live":
+            self._stop_play()
+            self._ensure_subscriptions()
+
+    def set_mode(self, mode: str) -> None:
+        """Programmatic mode switch (used by tests)."""
+        (self._replay_radio if mode == "replay" else self._live_radio).setChecked(True)
+
+    # --- live feed ---------------------------------------------------------
+
+    def _on_connected(self, connected: bool) -> None:
+        if connected and self._ok:
+            self._ensure_subscriptions()
+        elif not connected:
+            self.source_badge.set("disconnected", "idle")
+
+    def _ensure_subscriptions(self) -> None:
+        self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+        self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if not self._ok or self._mode != "live":
+            return
+        if stream_id == int(tlm.StreamId.JOINT_STATE):
+            self._last_joint_state_ms = self._now_ms()
+            self._apply_angles(self._map_angles(record))
+            self.source_badge.set("joint_state", "ok")
+        elif stream_id == int(tlm.StreamId.SERVO_STATUS):
+            stale = (
+                self._now_ms() - self._last_joint_state_ms
+                > self._JOINT_STATE_TIMEOUT_MS
+            )
+            if stale:
+                self._apply_angles(self._servo_status_angles(record))
+                self.source_badge.set("servo_status (fallback)", "warn")
+
+    def _servo_status_angles(self, record) -> dict:
+        from hexapod_protocol import config as cfg
+
+        joints = cfg.servo_status_to_joint_angles(cfg.default_robot_config(), record)
+        return self._map_angles(tlm.JointStateTelemetry(joints=joints))
+
+    # --- pose application / redraw ----------------------------------------
+
+    def _render(self) -> None:
+        if self._ok and self._view is not None:
+            self._view.set_angles(self._angles)
+
+    def _apply_angles(self, angles: dict) -> None:
+        """Merge new joint angles into the pose and repose the model."""
+        if angles:
+            self._angles.update(angles)
+            self._render()
+
+    def apply_angles(self, angles: dict) -> None:
+        """Public test hook: set angles and repose synchronously."""
+        self._apply_angles(angles)
+
+    def current_angles(self) -> dict:
+        return dict(self._angles)
+
+    def mesh_count(self) -> int:
+        """Number of rendered link meshes (used by tests)."""
+        if not self._ok or self._view is None:
+            return 0
+        return self._view.mesh_count()
+
+    # --- replay ------------------------------------------------------------
+
+    def _choose_session(self) -> None:
+        path = QFileDialog.getExistingDirectory(self, "Open recorded session")
+        if path:
+            self.load_session(path)
+
+    def load_session(self, session_dir) -> None:
+        """Load a recorded session and expose its joint_state frames for scrub."""
+        from data.session_replay import SessionReplay
+
+        try:
+            replay = SessionReplay(session_dir)
+        except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+            self.source_badge.set(f"load failed: {exc}", "error")
+            return
+        frames: list = []
+        js_stream = int(tlm.StreamId.JOINT_STATE)
+        for df in replay.iter_decoded_frames():
+            if df.record is None:
+                continue
+            if df.msg_id - api.MSG_TELEMETRY_BASE != js_stream:
+                continue
+            frames.append(self._map_angles(df.record))
+        self._replay_frames = frames
+        self._replay_idx = 0
+        self.set_mode("replay")
+        has_frames = bool(frames)
+        self._scrub.setEnabled(has_frames)
+        self._play_btn.setEnabled(has_frames)
+        self._scrub.setRange(0, max(0, len(frames) - 1))
+        if has_frames:
+            self.set_replay_index(0)
+            self.source_badge.set(f"replay ({len(frames)} frames)", "active")
+        else:
+            self.source_badge.set("replay: no joint_state frames", "warn")
+
+    def replay_frame_count(self) -> int:
+        return len(self._replay_frames)
+
+    def set_replay_index(self, index: int) -> None:
+        if not self._replay_frames:
+            return
+        index = max(0, min(index, len(self._replay_frames) - 1))
+        self._replay_idx = index
+        self._angles = dict(self._replay_frames[index])
+        self._render()
+        self._frame_lbl.setText(f"{index + 1}/{len(self._replay_frames)}")
+        if self._scrub.value() != index:
+            self._scrub.blockSignals(True)
+            self._scrub.setValue(index)
+            self._scrub.blockSignals(False)
+
+    def _on_scrub(self, value: int) -> None:
+        self.set_replay_index(value)
+
+    def _toggle_play(self) -> None:
+        if self._replay_timer.isActive():
+            self._stop_play()
+        elif self._replay_frames:
+            self._play_btn.setText("Pause")
+            self._replay_timer.start()
+
+    def _stop_play(self) -> None:
+        self._replay_timer.stop()
+        self._play_btn.setText("Play")
+
+    def _advance_replay(self) -> None:
+        if not self._replay_frames:
+            self._stop_play()
+            return
+        nxt = self._replay_idx + 1
+        if nxt >= len(self._replay_frames):
+            self._stop_play()
+            return
+        self.set_replay_index(nxt)

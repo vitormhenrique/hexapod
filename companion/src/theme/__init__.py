@@ -59,7 +59,7 @@ def status_color(level: str) -> str:
 
 STYLESHEET = f"""
 * {{
-    font-family: -apple-system, "SF Pro Text", "Segoe UI", "Inter", sans-serif;
+    font-family: "SF Pro Text", "Helvetica Neue", "Segoe UI", "Inter", sans-serif;
     font-size: 13px;
     outline: 0;
 }}

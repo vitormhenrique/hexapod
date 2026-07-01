@@ -64,6 +64,7 @@ class MeshRef:
     filename: str  # original, e.g. package://HexNav_description/meshes/...
     resolved: Optional[Path] = None
     scale: tuple = (1.0, 1.0, 1.0)
+    origin: Origin = field(default_factory=Origin)
 
     @property
     def exists(self) -> bool:
@@ -120,9 +121,7 @@ class UrdfModel:
         def key(j: Joint):
             return (j.leg_index or 0, role_order.get(j.leg_role or "", 9), j.name)
 
-        return sorted(
-            (j for j in self.joints.values() if j.is_actuated), key=key
-        )
+        return sorted((j for j in self.joints.values() if j.is_actuated), key=key)
 
     def actuated_joint_names(self) -> list:
         return [j.name for j in self.actuated_joints()]
@@ -182,6 +181,7 @@ def _parse_meshes(parent: ET.Element, tag: str, package_dirs: dict) -> list:
                 filename=filename,
                 resolved=_resolve_package(filename, package_dirs),
                 scale=_floats(mesh.get("scale"), 3, default=1.0),
+                origin=Origin.from_element(section.find("origin")),
             )
         )
     return out
@@ -223,7 +223,11 @@ def load_urdf(path, package_dirs: Optional[dict] = None) -> UrdfModel:
                 parent=parent.get("link", ""),
                 child=child.get("link", ""),
                 origin=Origin.from_element(je.find("origin")),
-                axis=_floats(axis_el.get("xyz"), 3) if axis_el is not None else (1.0, 0.0, 0.0),
+                axis=(
+                    _floats(axis_el.get("xyz"), 3)
+                    if axis_el is not None
+                    else (1.0, 0.0, 0.0)
+                ),
             )
         )
 

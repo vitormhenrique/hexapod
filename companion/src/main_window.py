@@ -25,6 +25,7 @@ from ui.pages import (
     ServoConfigPage,
     ServoTuningPage,
     SensorDashboardPage,
+    UrdfViewerPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
 
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         self.nav.add_item("plots", "Plot Workbench")
         self.nav.add_section("Visualize")
         self.nav.add_item("model", "Model Viewer")
+        self.nav.add_item("urdf", "URDF Viewer")
         self.nav.add_section("Diagnose")
         self.nav.add_item("sensors", "Sensor Dashboard")
         self.nav.add_item("diagnostics", "Diagnostics")
@@ -100,6 +102,7 @@ class MainWindow(QMainWindow):
             ("servo_tuning", ServoTuningPage(self.service)),
             ("plots", PlotWorkbenchPage(self.service)),
             ("model", ModelViewerPage(self.service)),
+            ("urdf", UrdfViewerPage(self.service)),
             ("sensors", SensorDashboardPage(self.service)),
             ("diagnostics", DiagnosticsPage(self.service)),
         ):

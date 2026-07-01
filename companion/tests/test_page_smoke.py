@@ -35,6 +35,7 @@ def _page_classes():
         SensorDashboardPage,
         ServoConfigPage,
         ServoTuningPage,
+        UrdfViewerPage,
     )
 
     return [
@@ -51,6 +52,7 @@ def _page_classes():
         SensorDashboardPage,
         DiagnosticsPage,
         PlotWorkbenchPage,
+        UrdfViewerPage,
     ]
 
 
