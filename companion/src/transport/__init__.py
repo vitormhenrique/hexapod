@@ -107,6 +107,11 @@ class SerialLink:
         self._serial.dsrdtr = False
         self._serial.dtr = False
         self._serial.rts = False
+        # Exclusive (flock) open: macOS cu.* devices allow multiple simultaneous
+        # opens, so a second client (stale GUI, probe script, second CLI) would
+        # silently steal response bytes and every HELLO would time out. Fail
+        # loudly with EBUSY instead.
+        self._serial.exclusive = True
         self._serial.open()
         self._serial.dtr = False
         self._serial.rts = False

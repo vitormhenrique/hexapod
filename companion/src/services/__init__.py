@@ -63,6 +63,7 @@ class ConnectionService(QObject):
         self._connecting = False
         self._connect_max_attempts = 5
         self._connect_retry_delay_s = 2.5
+        self._hello_attempts_per_link = 3
 
     # --- discovery --------------------------------------------------------
 
@@ -101,7 +102,20 @@ class ConnectionService(QObject):
                     )
                     self._client = client
                     client.start()
-                    hello = client.hello()
+                    # Retry HELLO on the same open link before tearing the port
+                    # down: the OpenRB-150 CDC stack dislikes open/close churn,
+                    # and a board mid-reboot (watchdog reset re-enumeration)
+                    # answers on the second or third try. Only retry while the
+                    # link is still alive; a dead link falls through to the
+                    # outer reopen/re-resolve loop.
+                    hello = None
+                    for _ in range(self._hello_attempts_per_link):
+                        if not self._connecting:
+                            client.stop()
+                            return
+                        hello = client.hello()
+                        if hello is not None or not client.connected:
+                            break
                     if hello is None:
                         raise RuntimeError(f"no HELLO response from {attempt_port}")
                     self.hello_received.emit(hello)

@@ -111,6 +111,15 @@ volatile bool g_motionGate = false;
 // default) config; gates the ConfigLoad -> Disarmed transition.
 volatile bool g_configReady = false;
 
+// Battery voltage snapshot, published by controlTask each cycle. controlTask is
+// the sole analogRead() caller: the SAMD21 core's analogRead busy-waits
+// unbounded on RESRDY and disables the ADC on completion, so a second task
+// reading concurrently can be preempted mid-conversion and spin forever on a
+// flag that never sets (observed on hardware: apiTask wedged at priority 2,
+// starving healthTask's WDT pet -> hardware reset ~2 s after every host
+// request). All other tasks must read this snapshot, never the ADC.
+volatile uint16_t g_batteryMv = 0;
+
 // Telemetry subscription manager. apiTask routes the telemetry command range to
 // it and walks the streams each loop, emitting due telemetry frames over USB.
 protocol::SubscriptionManager g_subs;
@@ -384,7 +393,7 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       p[o++] = g_safetyState;
       p[o++] = g_faultReason;
       o += put32(&p[o], watchdog::missedMask());
-      o += put16(&p[o], board::readBatteryMilliVolts());
+      o += put16(&p[o], g_batteryMv);  // snapshot; ADC is controlTask-only
       break;
     }
     case StreamId::ControlState: {
@@ -705,6 +714,7 @@ void controlTask(void*) {
     // permitted this cycle. Inputs are sampled from the published snapshots so
     // the machine never blocks on a peripheral.
     const uint16_t batt_mv = board::readBatteryMilliVolts();
+    g_batteryMv = batt_mv;  // publish for apiTask (sole-ADC-owner rule above)
     safety::StateInputs si;
     si.config_loaded = g_configReady;
     si.battery_mv = batt_mv;
@@ -1643,7 +1653,7 @@ void apiTask(void*) {
       st.state = g_safetyState;
       st.dxl_power = board::dxlPowerEnabled();
       st.dxl_power_control = board::hasDxlPowerControl();
-      st.battery_mv = board::readBatteryMilliVolts();
+      st.battery_mv = g_batteryMv;  // snapshot; ADC is controlTask-only
       st.watchdog_missed = watchdog::missedMask();
 
       // Give the maintenance lock the current time + live state so ENTER can
