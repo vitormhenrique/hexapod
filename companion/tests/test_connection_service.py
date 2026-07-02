@@ -196,11 +196,72 @@ def test_connect_open_failure_emits_error(qtbot, monkeypatch) -> None:
     monkeypatch.setattr(services_mod, "open_serial", lambda port, baud=115200: None)
 
     service = ConnectionService()
+    service._connect_max_attempts = 1
     with qtbot.waitSignal(service.error, timeout=2000) as blocker:
         service.connect_to("/dev/nope")
     (msg,) = blocker.args
     assert "/dev/nope" in msg
     assert not service.is_connected
+
+
+def test_connect_write_failure_does_not_report_connected(qtbot, monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    class FailingWriteStream(RespondingStream):
+        def write(self, data: bytes) -> int:
+            raise RuntimeError("device not configured")
+
+    stream = FailingWriteStream(_handshake_handlers())
+    monkeypatch.setattr(services_mod, "open_serial", lambda port, baud=115200: stream)
+
+    service = ConnectionService()
+    service._connect_max_attempts = 1
+    connection_states: list[bool] = []
+    service.connected.connect(connection_states.append)
+
+    with qtbot.waitSignal(service.error, timeout=2000) as blocker:
+        service.connect_to("/dev/fake")
+
+    (msg,) = blocker.args
+    assert "no HELLO response" in msg
+    assert True not in connection_states
+    assert not service.is_connected
+    assert stream.closed
+
+
+def test_connect_retries_after_startup_serial_failure(qtbot, monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    class FailingWriteStream(RespondingStream):
+        def write(self, data: bytes) -> int:
+            raise RuntimeError("device not configured")
+
+    streams = [
+        FailingWriteStream(_handshake_handlers()),
+        RespondingStream(_handshake_handlers()),
+    ]
+    opened: list[RespondingStream] = []
+
+    def fake_open(port, baud=115200):
+        stream = streams[len(opened)]
+        opened.append(stream)
+        return stream
+
+    monkeypatch.setattr(services_mod, "open_serial", fake_open)
+
+    service = ConnectionService()
+    service._connect_retry_delay_s = 0
+
+    with qtbot.waitSignal(service.connected, timeout=3000) as blocker:
+        service.connect_to("/dev/fake")
+
+    assert blocker.args == [True]
+    assert service.is_connected
+    assert len(opened) == 2
+    assert opened[0].closed
+    service.disconnect()
 
 
 def test_available_ports_discovers_without_hardware(monkeypatch) -> None:

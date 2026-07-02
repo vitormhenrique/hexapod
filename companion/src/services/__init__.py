@@ -9,6 +9,7 @@ never blocked: connect/handshake run in a worker thread.
 from __future__ import annotations
 
 import threading
+import time
 from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
@@ -16,12 +17,14 @@ from PySide6.QtCore import QObject, QTimer, Signal
 from hexapod_protocol import api, telemetry as tlm
 from hexapod_protocol.framing import VERSION_MAJOR, VERSION_MINOR, version_compatible
 
+from diagnostics import print_exception
 from transport import list_serial_ports, open_serial
 from transport.protocol_client import ProtocolClient
 
 
 class ConnectionService(QObject):
     connected = Signal(bool)
+    connecting = Signal(bool)  # True while a connect/handshake is in progress
     hello_received = Signal(object)  # api.HelloInfo
     status_received = Signal(object)  # api.StatusInfo
     capabilities_received = Signal(object)  # api.Capabilities
@@ -57,6 +60,9 @@ class ConnectionService(QObject):
         self._poll.timeout.connect(self._poll_status)
         self._last_state: Optional[int] = None
         self._maint_token: int = 0
+        self._connecting = False
+        self._connect_max_attempts = 5
+        self._connect_retry_delay_s = 2.5
 
     # --- discovery --------------------------------------------------------
 
@@ -74,46 +80,122 @@ class ConnectionService(QObject):
         if self.is_connected:
             self.disconnect()
 
+        self._connecting = True
+        self.connecting.emit(True)
+
         def worker() -> None:
-            link = open_serial(port, baud=baud)
-            if link is None:
-                self.error.emit(f"Could not open {port}")
-                self.connected.emit(False)
-                return
-            client = ProtocolClient(link)
-            client.on_telemetry(self._on_telemetry)
-            client.on_connection(self._on_connection)
-            client.start()
-            self._client = client
-            hello = client.hello()
-            if hello is not None:
-                self.hello_received.emit(hello)
-                # Surface a protocol version mismatch as a diagnostic rather
-                # than silently talking to incompatible firmware (4sa.5). The
-                # frame layer carries but does not reject the version; the
-                # handshake is where the host can compare and warn.
-                if not version_compatible(hello.proto_major, hello.proto_minor):
-                    self.event.emit(
-                        "version",
-                        f"protocol mismatch: firmware v{hello.proto_major}."
-                        f"{hello.proto_minor} vs host v{VERSION_MAJOR}."
-                        f"{VERSION_MINOR}",
+            attempt_port = port
+            last_error: Optional[BaseException] = None
+            for attempt in range(1, self._connect_max_attempts + 1):
+                if not self._connecting:
+                    return
+                client: Optional[ProtocolClient] = None
+                try:
+                    link = open_serial(attempt_port, baud=baud)
+                    if link is None:
+                        raise RuntimeError(f"could not open {attempt_port}")
+                    client = ProtocolClient(link)
+                    client.on_telemetry(self._on_telemetry)
+                    client.on_connection(
+                        lambda value, c=client: self._on_connection(value, c)
                     )
-                self.event.emit(
-                    "connect",
-                    f"{hello.device_name} fw "
-                    f"{hello.fw_major}.{hello.fw_minor}.{hello.fw_patch}",
-                )
-            caps = client.get_capabilities()
-            if caps is not None:
-                self.capabilities_received.emit(caps)
-            self.connected.emit(True)
-            # Status polling must be started on the GUI thread (QTimer affinity).
-            QTimer.singleShot(0, self._poll.start)
+                    self._client = client
+                    client.start()
+                    hello = client.hello()
+                    if hello is None:
+                        raise RuntimeError(f"no HELLO response from {attempt_port}")
+                    self.hello_received.emit(hello)
+                    # Surface a protocol version mismatch as a diagnostic rather
+                    # than silently talking to incompatible firmware (4sa.5). The
+                    # frame layer carries but does not reject the version; the
+                    # handshake is where the host can compare and warn.
+                    if not version_compatible(hello.proto_major, hello.proto_minor):
+                        self.event.emit(
+                            "version",
+                            f"protocol mismatch: firmware v{hello.proto_major}."
+                            f"{hello.proto_minor} vs host v{VERSION_MAJOR}."
+                            f"{VERSION_MINOR}",
+                        )
+                    self.event.emit(
+                        "connect",
+                        f"{hello.device_name} fw "
+                        f"{hello.fw_major}.{hello.fw_minor}.{hello.fw_patch}",
+                    )
+                    caps = client.get_capabilities()
+                    if caps is None:
+                        raise RuntimeError(
+                            f"no CAPABILITIES response from {attempt_port}"
+                        )
+                    self.capabilities_received.emit(caps)
+                    if client.connected and self._client is client:
+                        self._connecting = False
+                        self.connecting.emit(False)
+                        self.connected.emit(True)
+                        # Status polling must be started on the GUI thread (QTimer affinity).
+                        QTimer.singleShot(0, self._poll.start)
+                        return
+                    reason = f"connection to {attempt_port} was lost during handshake"
+                    if client.last_error is not None:
+                        reason = f"{reason}: {client.last_error}"
+                    last_error = RuntimeError(reason)
+                    raise last_error
+                except Exception as exc:
+                    last_error = last_error or exc
+                    print_exception(
+                        f"connect attempt {attempt}/{self._connect_max_attempts} "
+                        f"failed for {attempt_port}",
+                        exc,
+                    )
+                    if client is not None:
+                        client.stop()
+                    if attempt >= self._connect_max_attempts:
+                        break
+                    if not self._connecting:
+                        return
+                    self.event.emit(
+                        "connect",
+                        f"retrying serial connection ({attempt + 1}/"
+                        f"{self._connect_max_attempts})",
+                    )
+                    time.sleep(self._connect_retry_delay_s)
+                    if not self._connecting:
+                        return
+                    attempt_port = self._retry_port_for(port, attempt_port)
+
+            self._connecting = False
+            self.connecting.emit(False)
+            self.connected.emit(False)
+            detail = f": {last_error}" if last_error is not None else ""
+            self.error.emit(f"Connection to {port} failed{detail}")
 
         threading.Thread(target=worker, name="hexapod-connect", daemon=True).start()
 
+    def _retry_port_for(self, requested_port: str, last_port: str) -> str:
+        ports = list_serial_ports()
+        if any(p.device == last_port for p in ports):
+            return last_port
+        if any(p.device == requested_port for p in ports):
+            return requested_port
+        best_port = requested_port
+        best_score = 0
+        for p in ports:
+            haystack = f"{p.device} {p.description} {p.hwid}".lower()
+            if "bluetooth" in haystack:
+                continue
+            score = 0
+            if "openrb" in haystack:
+                score += 100
+            if "usbmodem" in haystack:
+                score += 50
+            if str(p.device).startswith("/dev/cu."):
+                score += 20
+            if score > best_score:
+                best_score = score
+                best_port = p.device
+        return best_port
+
     def disconnect(self) -> None:
+        self._connecting = False
         self._poll.stop()
         if self._client is not None:
             self._client.stop()
@@ -647,6 +729,15 @@ class ConnectionService(QObject):
     def _on_telemetry(self, stream_id: int, record: object, header) -> None:
         self.telemetry.emit(stream_id, record)
 
-    def _on_connection(self, value: bool) -> None:
-        if not value:
+    def _on_connection(
+        self, value: bool, client: Optional[ProtocolClient] = None
+    ) -> None:
+        if value:
+            return
+        if client is not None and self._client is not client:
+            return
+        self._poll.stop()
+        self.connecting.emit(False)
+        self._client = None
+        if not self._connecting:
             self.connected.emit(False)

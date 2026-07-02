@@ -153,6 +153,7 @@ class ConnectPage(BasePage):
         self.service.connected.connect(self._on_connected)
         self.service.hello_received.connect(self._on_hello)
         self.service.capabilities_received.connect(self._on_caps)
+        self.service.connecting.connect(self._on_connecting)
         self.refresh_ports()
 
     def _wrap(self, layout) -> QWidget:
@@ -162,19 +163,47 @@ class ConnectPage(BasePage):
 
     def refresh_ports(self) -> None:
         self.port_combo.clear()
-        for p in self.service.available_ports():
+        ports = self.service.available_ports()
+        for p in ports:
             self.port_combo.addItem(f"{p.device}  —  {p.description}", p.device)
         if self.port_combo.count() == 0:
             self.port_combo.addItem("No ports found", None)
+            return
+        # Prefer the OpenRB-150 controller and, on macOS, the outgoing /dev/cu.*
+        # endpoint over /dev/tty.* for application-owned connections.
+        best_index = 0
+        best_score = -1
+        for i, p in enumerate(ports):
+            haystack = f"{p.device} {p.description} {p.hwid}".lower()
+            score = 0
+            if "openrb" in haystack:
+                score += 100
+            if str(p.device).startswith("/dev/cu."):
+                score += 20
+            if score > best_score:
+                best_index = i
+                best_score = score
+        self.port_combo.setCurrentIndex(best_index)
 
     def _toggle(self) -> None:
         port = self.port_combo.currentData()
         if port:
             self.service.connect_to(port)
 
+    def _on_connecting(self, busy: bool) -> None:
+        if busy:
+            self.connect_btn.setEnabled(False)
+            self.connect_btn.setText("Connecting...")
+            self.disconnect_btn.setEnabled(False)
+            self.refresh_btn.setEnabled(False)
+            self.port_combo.setEnabled(False)
+
     def _on_connected(self, connected: bool) -> None:
+        self.connect_btn.setText("Connect")
         self.connect_btn.setEnabled(not connected)
         self.disconnect_btn.setEnabled(connected)
+        self.refresh_btn.setEnabled(not connected)
+        self.port_combo.setEnabled(not connected)
         if not connected:
             for lbl in (self.device_lbl, self.fw_lbl, self.proto_lbl, self.caps_lbl):
                 lbl.setText("--")

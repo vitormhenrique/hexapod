@@ -48,6 +48,24 @@ def test_connect_page_builds_and_shows_firmware(qtbot) -> None:
     assert page.disconnect_btn.isEnabled()
 
 
+def test_connect_page_prefers_openrb_cu_port(qtbot, monkeypatch) -> None:
+    from transport import PortInfo
+    from ui.pages import ConnectPage
+
+    service = _service()
+    ports = [
+        PortInfo("/dev/tty.usbmodem101", "OpenRB-150", "hwid-openrb"),
+        PortInfo("/dev/cu.usbmodem101", "OpenRB-150", "hwid-openrb"),
+        PortInfo("/dev/cu.Bluetooth-Incoming-Port", "Bluetooth", "hwid-bt"),
+    ]
+    monkeypatch.setattr(service, "available_ports", lambda: ports)
+
+    page = ConnectPage(service)
+    qtbot.addWidget(page)
+
+    assert page.port_combo.currentData() == "/dev/cu.usbmodem101"
+
+
 def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
     from ui.pages import OverviewPage
 

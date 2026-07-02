@@ -1763,7 +1763,10 @@ void i2cTask(void*) {
   // is usable immediately (per-foot classification stays disabled until a
   // calibration enables it; raw values still stream as telemetry).
   {
-    config::RobotConfig boot_cfg;
+    // Kept off this task's stack (it is ~360 bytes) and fully repopulated by
+    // defaultRobotConfig() on this single-run task, so a file-scope static here
+    // avoids a large transient stack frame during the boot scan.
+    static config::RobotConfig boot_cfg;
     config::defaultRobotConfig(boot_cfg);
     sensors::ContactParams params;  // conservative defaults
     g_contact.configure(boot_cfg.feet, params);

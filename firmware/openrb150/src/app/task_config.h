@@ -22,8 +22,8 @@ namespace stack_words {
 constexpr uint16_t kControl = 256;
 constexpr uint16_t kDxl = 256;
 constexpr uint16_t kRc = 192;
-constexpr uint16_t kApi = 512;   // framing + decode buffers live on this stack
-constexpr uint16_t kI2c = 192;
+constexpr uint16_t kApi = 1024;  // framing + decode buffers live on this stack
+constexpr uint16_t kI2c = 384;   // boot: scanAll() + config load; deep call chain
 constexpr uint16_t kHealth = 256;
 constexpr uint16_t kBlink = 96;   // tiny LED test task
 }  // namespace stack_words

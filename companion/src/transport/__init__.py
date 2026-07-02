@@ -7,8 +7,11 @@ is pure and reused by tests and replay. Neither imports Qt.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import Iterator, Optional, Protocol
+
+from diagnostics import print_exception
 
 
 class ByteStream(Protocol):
@@ -82,11 +85,35 @@ def list_serial_ports() -> list[PortInfo]:
 class SerialLink:
     """Owns a pyserial port and exposes it as a :class:`ByteStream`."""
 
-    def __init__(self, port: str, baud: int = 115200, timeout: float = 0.05) -> None:
+    min_write_interval = 0.5
+    synchronous_requests = True
+
+    def __init__(
+        self,
+        port: str,
+        baud: int = 115200,
+        timeout: float = 0.05,
+        write_timeout: float = 1.0,
+        settle_time: float = 1.0,
+    ) -> None:
         import serial  # type: ignore  # imported lazily so tests need no hardware
 
-        self._serial = serial.Serial(port=port, baudrate=baud, timeout=timeout)
+        self._serial = serial.Serial()
+        self._serial.port = port
+        self._serial.baudrate = baud
+        self._serial.timeout = timeout
+        self._serial.write_timeout = write_timeout
+        self._serial.rtscts = False
+        self._serial.dsrdtr = False
+        self._serial.dtr = False
+        self._serial.rts = False
+        self._serial.open()
+        self._serial.dtr = False
+        self._serial.rts = False
         self.port = port
+        if settle_time > 0:
+            time.sleep(settle_time)
+        self.reset_input()
 
     def read(self, size: int = 1) -> bytes:
         return self._serial.read(size)
@@ -100,20 +127,21 @@ class SerialLink:
     def in_waiting(self) -> int:
         try:
             return self._serial.in_waiting
-        except Exception:
+        except Exception as exc:
+            print_exception(f"serial in_waiting failed on {self.port}", exc)
             return 0
 
     def reset_input(self) -> None:
         try:
             self._serial.reset_input_buffer()
-        except Exception:
-            pass
+        except Exception as exc:
+            print_exception(f"serial reset_input failed on {self.port}", exc)
 
     def close(self) -> None:
         try:
             self._serial.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            print_exception(f"serial close failed on {self.port}", exc)
 
     @property
     def is_open(self) -> bool:
@@ -124,5 +152,6 @@ def open_serial(port: str, baud: int = 115200) -> Optional[SerialLink]:
     """Open ``port`` or return ``None`` if it cannot be opened."""
     try:
         return SerialLink(port, baud=baud)
-    except Exception:
+    except Exception as exc:
+        print_exception(f"opening serial port {port} failed", exc)
         return None

@@ -25,6 +25,8 @@ from hexapod_protocol.framing import (
 from hexapod_protocol import config as cfg
 from hexapod_protocol import telemetry as tlm
 
+from diagnostics import print_exception
+
 from . import ByteStream, FrameExtractor
 
 
@@ -72,13 +74,28 @@ class DiagnosticsSnapshot:
 class ProtocolClient:
     """Send commands and receive responses / telemetry over a byte stream."""
 
-    def __init__(self, stream: ByteStream, response_timeout: float = 1.0) -> None:
+    def __init__(
+        self,
+        stream: ByteStream,
+        response_timeout: float = 1.0,
+        write_interval: Optional[float] = None,
+    ) -> None:
         self._stream = stream
         self._extractor = FrameExtractor()
         self._timeout = response_timeout
+        self._write_interval = (
+            float(write_interval)
+            if write_interval is not None
+            else float(getattr(stream, "min_write_interval", 0.0) or 0.0)
+        )
+        self._sync_requests = bool(getattr(stream, "synchronous_requests", False))
+        self._last_write_at = 0.0
         self._seq = 0
         self._seq_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._io_lock = threading.Lock()
+        self._request_lock = threading.Lock()
+        self._reader_paused = threading.Event()
 
         # seq -> single-slot queue for the matching response.
         self._pending: dict[int, "Queue[Response]"] = {}
@@ -90,6 +107,7 @@ class ProtocolClient:
         self._reader: Optional[threading.Thread] = None
         self._running = threading.Event()
         self._connected = False
+        self._last_error: Optional[BaseException] = None
 
         # Lightweight stats for the diagnostics page.
         self.rx_frames = 0
@@ -110,6 +128,15 @@ class ProtocolClient:
         if self._reader and self._reader.is_alive():
             return
         self._running.set()
+        if self._sync_requests:
+            self._set_connected(True)
+            return
+        self._ensure_reader()
+
+    def _ensure_reader(self) -> None:
+        if self._reader and self._reader.is_alive():
+            return
+        self._running.set()
         self._reader = threading.Thread(
             target=self._read_loop, name="hexapod-reader", daemon=True
         )
@@ -123,12 +150,16 @@ class ProtocolClient:
         self._set_connected(False)
         try:
             self._stream.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            print_exception("protocol client stop close failed", exc)
 
     @property
     def connected(self) -> bool:
         return self._connected
+
+    @property
+    def last_error(self) -> Optional[BaseException]:
+        return self._last_error
 
     # --- callbacks --------------------------------------------------------
 
@@ -145,8 +176,8 @@ class ProtocolClient:
         for cb in list(self._connection_cbs):
             try:
                 cb(value)
-            except Exception:
-                pass
+            except Exception as exc:
+                print_exception("connection callback failed", exc)
 
     # --- sending ----------------------------------------------------------
 
@@ -162,6 +193,10 @@ class ProtocolClient:
 
         Returns ``None`` on timeout. Thread-safe.
         """
+        if self._sync_requests:
+            return self._request_sync(msg_id, payload)
+        if not self.connected:
+            return None
         seq = self._next_seq()
         slot: "Queue[Response]" = Queue(maxsize=1)
         with self._pending_lock:
@@ -172,18 +207,94 @@ class ProtocolClient:
             return slot.get(timeout=self._timeout)
         except Empty:
             return None
+        except OSError as exc:
+            # Write failed (device unplugged / port closed). The link is gone;
+            # report no response rather than crashing the calling worker thread.
+            print_exception("protocol request write failed", exc)
+            return None
         finally:
             with self._pending_lock:
                 self._pending.pop(seq, None)
 
+    def _request_sync(self, msg_id: int, payload: bytes = b"") -> Optional[Response]:
+        """Serial-friendly request path: pause the reader and read response here."""
+        with self._request_lock:
+            if not self.connected:
+                return None
+            seq = self._next_seq()
+            self._reader_paused.set()
+            try:
+                self._write(api.build_command(msg_id, seq=seq, payload=payload))
+                deadline = time.monotonic() + self._timeout
+                while time.monotonic() < deadline:
+                    try:
+                        with self._io_lock:
+                            waiting = getattr(self._stream, "in_waiting", 0) or 0
+                            chunk = self._stream.read(max(1, min(waiting, 512)))
+                    except Exception as exc:
+                        self._last_error = exc
+                        print_exception("protocol synchronous read failed", exc)
+                        self._running.clear()
+                        self._set_connected(False)
+                        try:
+                            self._stream.close()
+                        except Exception as close_exc:
+                            print_exception(
+                                "protocol synchronous read close failed", close_exc
+                            )
+                        return None
+                    if not chunk:
+                        continue
+                    for frame in self._extractor.push(chunk):
+                        response = self._handle_frame(frame)
+                        if response is not None and response.header.seq == seq:
+                            return response
+                return None
+            except OSError as exc:
+                print_exception("protocol synchronous request write failed", exc)
+                return None
+            finally:
+                self._reader_paused.clear()
+
     def send(self, msg_id: int, payload: bytes = b"") -> None:
         """Fire-and-forget command (no response wait)."""
+        if not self.connected:
+            return
         seq = self._next_seq()
-        self._write(api.build_command(msg_id, seq=seq, payload=payload))
+        try:
+            if self._sync_requests:
+                self._reader_paused.set()
+            self._write(api.build_command(msg_id, seq=seq, payload=payload))
+        except OSError as exc:
+            # Device unplugged / port closed; the reader thread will also see
+            # the failure and mark the link disconnected.
+            print_exception("protocol send write failed", exc)
+            pass
+        finally:
+            if self._sync_requests:
+                self._reader_paused.clear()
 
     def _write(self, frame: bytes) -> None:
         with self._write_lock:
-            self._stream.write(frame)
+            try:
+                if self._write_interval > 0 and self._last_write_at > 0:
+                    elapsed = time.monotonic() - self._last_write_at
+                    if elapsed < self._write_interval:
+                        time.sleep(self._write_interval - elapsed)
+                with self._io_lock:
+                    self._stream.write(frame)
+                self._last_write_at = time.monotonic()
+            except Exception as exc:
+                # Losing the port mid-write must flip the connection state so
+                # the UI reacts, then propagate so callers can stop retrying.
+                self._last_error = exc
+                self._running.clear()
+                self._set_connected(False)
+                try:
+                    self._stream.close()
+                except Exception as close_exc:
+                    print_exception("protocol write failure close failed", close_exc)
+                raise OSError("stream write failed") from exc
             self.tx_frames += 1
 
     # --- high-level commands ---------------------------------------------
@@ -202,13 +313,19 @@ class ProtocolClient:
 
     def subscribe(self, stream_id: int, rate_hz: int) -> Optional[api.SubscribeResult]:
         r = self.request(api.MSG_SUBSCRIBE, struct_subscribe(stream_id, rate_hz))
-        return api.parse_subscribe_result(r.payload) if r else None
+        result = api.parse_subscribe_result(r.payload) if r else None
+        if result is not None and rate_hz > 0:
+            self._ensure_reader()
+        return result
 
     def set_stream_rate(
         self, stream_id: int, rate_hz: int
     ) -> Optional[api.SubscribeResult]:
         r = self.request(api.MSG_SET_STREAM_RATE, struct_subscribe(stream_id, rate_hz))
-        return api.parse_subscribe_result(r.payload) if r else None
+        result = api.parse_subscribe_result(r.payload) if r else None
+        if result is not None and rate_hz > 0:
+            self._ensure_reader()
+        return result
 
     def unsubscribe(self, stream_id: int) -> Optional[api.SubscribeResult]:
         r = self.request(api.MSG_UNSUBSCRIBE, bytes([stream_id]))
@@ -325,9 +442,7 @@ class ProtocolClient:
     def contact_set_thresholds(
         self, foot: int, near: int, touch: int, load: int
     ) -> Optional[api.ContactThresholdResult]:
-        r = self._send_built(
-            api.build_contact_set_thresholds(foot, near, touch, load)
-        )
+        r = self._send_built(api.build_contact_set_thresholds(foot, near, touch, load))
         return api.parse_contact_threshold_result(r.payload) if r else None
 
     def leveling_set_params(
@@ -475,7 +590,6 @@ class ProtocolClient:
             offset += len(chunk)
         return True
 
-
     # --- DXL async job helpers -------------------------------------------
     #
     # DXL maintenance runs on a single-slot firmware job queue: submit a job,
@@ -613,11 +727,22 @@ class ProtocolClient:
 
     def _read_loop(self) -> None:
         while self._running.is_set():
+            if self._reader_paused.is_set():
+                time.sleep(0.005)
+                continue
             try:
-                waiting = getattr(self._stream, "in_waiting", 0) or 0
-                chunk = self._stream.read(max(1, min(waiting, 512)))
-            except Exception:
+                with self._io_lock:
+                    waiting = getattr(self._stream, "in_waiting", 0) or 0
+                    chunk = self._stream.read(max(1, min(waiting, 512)))
+            except Exception as exc:
+                self._last_error = exc
+                print_exception("protocol reader loop failed", exc)
+                self._running.clear()
                 self._set_connected(False)
+                try:
+                    self._stream.close()
+                except Exception as close_exc:
+                    print_exception("protocol reader failure close failed", close_exc)
                 break
             if not chunk:
                 time.sleep(0.005)
@@ -625,32 +750,35 @@ class ProtocolClient:
             for frame in self._extractor.push(chunk):
                 self._handle_frame(frame)
 
-    def _handle_frame(self, frame: bytes) -> None:
+    def _handle_frame(self, frame: bytes) -> Optional[Response]:
         if len(frame) < 2 or frame[0] != 0x00 or frame[-1] != 0x00:
-            return
+            return None
         try:
             header, payload = decode_frame_body(frame[1:-1])
-        except DecodeError:
+        except DecodeError as exc:
+            print_exception("protocol frame decode failed", exc)
             self.decode_errors += 1
             if self.capture_raw:
                 self._capture_raw(frame, None, None)
-            return
+            return None
         self.rx_frames += 1
         if self.capture_raw:
             self._capture_raw(frame, header, payload)
 
         if header.msg_type == int(MsgType.TELEMETRY):
             self._dispatch_telemetry(header, payload)
-            return
+            return None
 
         # Response/event: route to a waiting request by seq.
+        response = Response(header, payload)
         with self._pending_lock:
             slot = self._pending.get(header.seq)
         if slot is not None:
             try:
-                slot.put_nowait(Response(header, payload))
-            except Exception:
-                pass
+                slot.put_nowait(response)
+            except Exception as exc:
+                print_exception("response queue delivery failed", exc)
+        return response
 
     def _dispatch_telemetry(self, header: Header, payload: bytes) -> None:
         stream_id = header.msg_id - api.MSG_TELEMETRY_BASE
@@ -660,8 +788,8 @@ class ProtocolClient:
         for cb in list(self._telemetry_cbs):
             try:
                 cb(stream_id, record, header)
-            except Exception:
-                pass
+            except Exception as exc:
+                print_exception("telemetry callback failed", exc)
 
 
 def struct_subscribe(stream_id: int, rate_hz: int) -> bytes:

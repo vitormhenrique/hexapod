@@ -23,16 +23,34 @@ from data import SessionLogger
 
 app = typer.Typer(add_completion=False, help="Hexapod companion CLI.")
 
+CONNECT_ATTEMPTS = 5
+CONNECT_RETRY_DELAY_S = 2.5
+REQUEST_ATTEMPTS = 3
+REQUEST_RETRY_DELAY_S = 1.0
+
 
 def _err(msg: str) -> None:
     typer.secho(msg, fg=typer.colors.RED, err=True)
 
 
+def _port_score(port_info) -> int:
+    haystack = f"{port_info.device} {port_info.description} {port_info.hwid}".lower()
+    if "bluetooth" in haystack:
+        return -100
+    score = 0
+    if "openrb" in haystack:
+        score += 100
+    if "usbmodem" in haystack or "acm" in haystack:
+        score += 50
+    if str(port_info.device).startswith("/dev/cu."):
+        score += 20
+    return score
+
+
 def _connect(port: Optional[str], baud: int) -> ProtocolClient:
     if port is None:
         ports = list_serial_ports()
-        usb = [p for p in ports if "usbmodem" in p.device or "ACM" in p.device]
-        chosen = usb or ports
+        chosen = sorted(ports, key=_port_score, reverse=True)
         if not chosen:
             _err("No serial ports found. Pass --port explicitly.")
             raise typer.Exit(code=2)
@@ -64,26 +82,24 @@ def status(
     baud: int = typer.Option(115200, "--baud"),
 ) -> None:
     """Connect, handshake, and print firmware status + capabilities."""
-    client = _connect(port, baud)
-    try:
-        hello = client.hello()
-        if hello is None:
-            _err("No HELLO response (timeout).")
-            raise typer.Exit(code=1)
-        typer.secho(
-            f"{hello.device_name}  fw {hello.fw_major}.{hello.fw_minor}.{hello.fw_patch}"
-            f"  proto {hello.proto_major}.{hello.proto_minor}",
-            fg=typer.colors.GREEN,
-        )
-        st = client.get_status()
-        if st:
+    last_error = "timeout"
+    for attempt in range(1, CONNECT_ATTEMPTS + 1):
+        client = _connect(port, baud)
+        try:
+            hello = _retry_request(client, "HELLO", client.hello)
+            st = _retry_request(client, "STATUS", client.get_status)
+            caps = _retry_request(client, "CAPABILITIES", client.get_capabilities)
+
+            typer.secho(
+                f"{hello.device_name}  fw {hello.fw_major}.{hello.fw_minor}.{hello.fw_patch}"
+                f"  proto {hello.proto_major}.{hello.proto_minor}",
+                fg=typer.colors.GREEN,
+            )
             typer.echo(
                 f"  state={tlm.SAFETY_STATE_NAMES.get(st.state, st.state)} "
                 f"uptime={st.uptime_ms} ms  dxl_power={st.dxl_power} "
                 f"battery={st.battery_mv} mV  watchdog_missed=0x{st.watchdog_missed:X}"
             )
-        caps = client.get_capabilities()
-        if caps:
             typer.echo(f"  feature_bits=0x{caps.feature_bits:08X}")
             avail = [
                 api.FEATURE_NAMES[i] for i in api.capability_features(caps.feature_bits)
@@ -91,8 +107,35 @@ def status(
             typer.echo(
                 f"  features_available={', '.join(avail) if avail else '(none)'}"
             )
-    finally:
-        client.stop()
+            return
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt >= CONNECT_ATTEMPTS:
+                break
+            typer.secho(
+                f"Retrying serial status ({attempt + 1}/{CONNECT_ATTEMPTS})...",
+                fg=typer.colors.YELLOW,
+                err=True,
+            )
+            time.sleep(CONNECT_RETRY_DELAY_S)
+        finally:
+            client.stop()
+
+    _err(last_error)
+    raise typer.Exit(code=1)
+
+
+def _retry_request(client: ProtocolClient, name: str, call):
+    last_error = f"No {name} response (timeout)."
+    for attempt in range(1, REQUEST_ATTEMPTS + 1):
+        result = call()
+        if result is not None:
+            return result
+        if not client.connected:
+            raise RuntimeError(last_error)
+        if attempt < REQUEST_ATTEMPTS:
+            time.sleep(REQUEST_RETRY_DELAY_S)
+    raise RuntimeError(last_error)
 
 
 @app.command()

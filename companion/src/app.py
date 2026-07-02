@@ -6,11 +6,14 @@ import sys
 
 
 def main() -> int:
+    from diagnostics import install_exception_hooks
     from PySide6.QtWidgets import QApplication
 
     from main_window import MainWindow
     from theme import apply_theme
     from ui.app_icon import app_icon
+
+    install_exception_hooks()
 
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName("HexNav")
