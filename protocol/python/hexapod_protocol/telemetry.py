@@ -261,6 +261,13 @@ class RcDiagnosticsTelemetry:
 class ApiStatsTelemetry:
     tx_backlog: int
     dropped_per_stream: list[int] = field(default_factory=list)
+    # USB rx health (hexapod_src-lv6). Zero when the firmware predates the
+    # counters (short payload): complete frame bodies received, bodies that
+    # failed COBS/CRC/magic/length decode, and frames dropped for overflowing
+    # the firmware frame-reader buffer.
+    rx_frames: int = 0
+    rx_bad: int = 0
+    rx_overflow: int = 0
 
 
 # Joint roles (mirror config::JointRole: coxa/femur/tibia).
@@ -541,7 +548,12 @@ def decode_api_stats(p: bytes) -> ApiStatsTelemetry:
             break
         dropped.append(_u32(p, off))
         off += 4
-    return ApiStatsTelemetry(tx, dropped)
+    # Optional rx-health tail (rx_frames, rx_bad, rx_overflow); absent on
+    # firmware that predates hexapod_src-lv6.
+    rx_frames = _u32(p, off) if off + 4 <= len(p) else 0
+    rx_bad = _u32(p, off + 4) if off + 8 <= len(p) else 0
+    rx_overflow = _u32(p, off + 8) if off + 12 <= len(p) else 0
+    return ApiStatsTelemetry(tx, dropped, rx_frames, rx_bad, rx_overflow)
 
 
 def decode_joint_state(p: bytes) -> JointStateTelemetry:

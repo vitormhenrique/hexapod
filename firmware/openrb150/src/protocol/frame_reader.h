@@ -38,11 +38,19 @@ class FrameReader {
   const uint8_t* body() const { return buf_; }
   size_t length() const { return len_; }
 
+  // Link-health counters (hexapod_src-lv6): complete frame bodies emitted and
+  // frames dropped because they exceeded the buffer. Monotonic since reset();
+  // exposed so api_stats telemetry can report USB rx health.
+  uint32_t framesOk() const { return frames_ok_; }
+  uint32_t overflowsDropped() const { return overflows_dropped_; }
+
  private:
   uint8_t buf_[kMaxFrameBodyCobs];
   size_t len_;
   bool overflow_;
   bool ready_;
+  uint32_t frames_ok_;
+  uint32_t overflows_dropped_;
 };
 
 }  // namespace protocol

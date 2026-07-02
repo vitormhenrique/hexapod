@@ -157,6 +157,10 @@ class ProtocolClient:
     def connected(self) -> bool:
         return self._connected
 
+    def _reader_alive(self) -> bool:
+        reader = self._reader
+        return reader is not None and reader.is_alive()
+
     @property
     def last_error(self) -> Optional[BaseException]:
         return self._last_error
@@ -192,8 +196,13 @@ class ProtocolClient:
         """Send a command and wait for the seq-matched response.
 
         Returns ``None`` on timeout. Thread-safe.
+
+        Sync-request streams (fragile CDC handshake) use the inline-read path
+        only until the telemetry reader thread is running; after that, requests
+        go through the async pending queue so status polling never pauses the
+        telemetry stream (hexapod_src-mrd).
         """
-        if self._sync_requests:
+        if self._sync_requests and not self._reader_alive():
             return self._request_sync(msg_id, payload)
         if not self.connected:
             return None
@@ -217,7 +226,11 @@ class ProtocolClient:
                 self._pending.pop(seq, None)
 
     def _request_sync(self, msg_id: int, payload: bytes = b"") -> Optional[Response]:
-        """Serial-friendly request path: pause the reader and read response here."""
+        """Pre-reader request path: write, then read the response inline.
+
+        Used only while no reader thread is running (the initial fragile CDC
+        handshake). Telemetry frames that arrive meanwhile are still dispatched.
+        """
         with self._request_lock:
             if not self.connected:
                 return None
@@ -261,8 +274,11 @@ class ProtocolClient:
         if not self.connected:
             return
         seq = self._next_seq()
+        # Only the pre-reader sync phase pauses (a no-op with no reader); a live
+        # reader must keep draining telemetry during writes (hexapod_src-mrd).
+        sync = self._sync_requests and not self._reader_alive()
         try:
-            if self._sync_requests:
+            if sync:
                 self._reader_paused.set()
             self._write(api.build_command(msg_id, seq=seq, payload=payload))
         except OSError as exc:
@@ -271,7 +287,7 @@ class ProtocolClient:
             print_exception("protocol send write failed", exc)
             pass
         finally:
-            if self._sync_requests:
+            if sync:
                 self._reader_paused.clear()
 
     def _write(self, frame: bytes) -> None:

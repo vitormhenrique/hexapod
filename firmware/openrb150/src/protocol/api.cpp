@@ -63,14 +63,18 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      MotionApi* motion, MaintenanceApi* maint,
                      MaintTargetApi* maint_target, DxlJobApi* dxl_jobs,
                      FeatureApi* features, SensorApi* sensors,
-                     PassiveApi* passive, ControllerApi* controller) {
+                     PassiveApi* passive, ControllerApi* controller,
+                     DecodeStatus* decode_status) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
   const DecodeStatus st = decodeFrameBody(body, body_len, &req, req_payload,
                                           sizeof(req_payload), &req_len);
+  if (decode_status != nullptr) {
+    *decode_status = st;
+  }
   if (st != DecodeStatus::Ok) {
-    return 0;  // undecodable: drop silently
+    return 0;  // undecodable: no response; caller counts it via decode_status
   }
   if (req.msg_type != static_cast<uint8_t>(MsgType::Command)) {
     return 0;  // we only answer commands

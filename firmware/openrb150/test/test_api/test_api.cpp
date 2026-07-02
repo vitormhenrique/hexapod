@@ -228,6 +228,61 @@ void test_frame_reader_roundtrip_handle() {
   TEST_ASSERT_EQUAL_INT(1, answered);
 }
 
+void test_frame_reader_counts_frames_and_overflow() {
+  // hexapod_src-lv6: framesOk counts complete bodies; overflowsDropped counts
+  // frames dropped for exceeding the buffer (once per frame, not per byte).
+  uint8_t req[kMaxWireFrame];
+  const size_t n = buildRequest(api::msg::kHello, 3, req, sizeof(req));
+
+  FrameReader reader;
+  TEST_ASSERT_EQUAL_UINT32(0, reader.framesOk());
+  TEST_ASSERT_EQUAL_UINT32(0, reader.overflowsDropped());
+
+  for (size_t i = 0; i < n; ++i) reader.push(req[i]);
+  TEST_ASSERT_EQUAL_UINT32(1, reader.framesOk());
+
+  // Overflow: a run of non-delimiter bytes longer than the reader buffer.
+  for (size_t i = 0; i < kMaxFrameBodyCobs + 64; ++i) {
+    TEST_ASSERT_FALSE(reader.push(0x55));
+  }
+  TEST_ASSERT_FALSE(reader.push(0x00));  // closing delimiter: frame dropped
+  TEST_ASSERT_EQUAL_UINT32(1, reader.overflowsDropped());
+  TEST_ASSERT_EQUAL_UINT32(1, reader.framesOk());
+
+  // The reader recovers: the next good frame still parses and counts.
+  for (size_t i = 0; i < n; ++i) reader.push(req[i]);
+  TEST_ASSERT_EQUAL_UINT32(2, reader.framesOk());
+  TEST_ASSERT_EQUAL_UINT32(1, reader.overflowsDropped());
+}
+
+void test_api_reports_decode_status() {
+  // hexapod_src-lv6: a corrupt body yields no response but reports the decode
+  // failure through the out-param so the caller can count rx_bad.
+  uint8_t req[kMaxWireFrame];
+  const size_t n = buildRequest(api::msg::kGetStatus, 9, req, sizeof(req));
+  req[n - 2] ^= 0xFF;  // corrupt the last body byte (CRC) inside delimiters
+
+  uint8_t out[kMaxWireFrame];
+  const api::DeviceInfo info = makeInfo();
+  const api::StatusSnapshot st = makeStatus();
+  DecodeStatus dst = DecodeStatus::Ok;
+  TEST_ASSERT_EQUAL_UINT(
+      0, api::handleRequest(req + 1, n - 2, info, st, out, sizeof(out), nullptr,
+                            nullptr, nullptr, nullptr, nullptr, nullptr,
+                            nullptr, nullptr, nullptr, nullptr, nullptr, &dst));
+  TEST_ASSERT_TRUE(dst != DecodeStatus::Ok);
+
+  // A valid request reports Ok and still answers.
+  const size_t good_n = buildRequest(api::msg::kGetStatus, 10, req, sizeof(req));
+  dst = DecodeStatus::BadCrc;
+  TEST_ASSERT_TRUE(api::handleRequest(req + 1, good_n - 2, info, st, out,
+                                      sizeof(out), nullptr, nullptr, nullptr,
+                                      nullptr, nullptr, nullptr, nullptr,
+                                      nullptr, nullptr, nullptr, nullptr,
+                                      &dst) > 0);
+  TEST_ASSERT_EQUAL(DecodeStatus::Ok, dst);
+}
+
 }  // namespace
 
 void setUp() {}
@@ -245,5 +300,7 @@ int main(int, char**) {
   RUN_TEST(test_frame_reader_back_to_back);
   RUN_TEST(test_frame_reader_ignores_empty);
   RUN_TEST(test_frame_reader_roundtrip_handle);
+  RUN_TEST(test_frame_reader_counts_frames_and_overflow);
+  RUN_TEST(test_api_reports_decode_status);
   return UNITY_END();
 }

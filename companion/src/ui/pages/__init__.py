@@ -2683,6 +2683,12 @@ class DiagnosticsPage(BasePage):
         self.decode_card = StatCard("Decode errors")
         self.backlog_card = StatCard("TX backlog")
         self.dropped_card = StatCard("Dropped frames")
+        # Firmware-side USB rx health from api_stats (hexapod_src-lv6): frames
+        # the MCU received, frames it failed to decode (corruption), and frames
+        # dropped for overflowing its reader buffer.
+        self.fw_rx_card = StatCard("FW RX frames")
+        self.fw_bad_card = StatCard("FW RX bad")
+        self.fw_overflow_card = StatCard("FW RX overflow")
         for col, card in enumerate(
             (
                 self.rx_card,
@@ -2690,10 +2696,13 @@ class DiagnosticsPage(BasePage):
                 self.decode_card,
                 self.backlog_card,
                 self.dropped_card,
+                self.fw_rx_card,
+                self.fw_bad_card,
+                self.fw_overflow_card,
             )
         ):
-            pg.addWidget(card, 0, col)
-            pg.setColumnStretch(col, 1)
+            pg.addWidget(card, col // 5, col % 5)
+            pg.setColumnStretch(col % 5, 1)
         self.content.addWidget(proto)
 
         # --- firmware timing ------------------------------------------------
@@ -2810,6 +2819,11 @@ class DiagnosticsPage(BasePage):
             )
             total = sum(stats.dropped_per_stream)
             self.dropped_card.set(str(total), "warn" if total else "ok")
+            self.fw_rx_card.set(str(stats.rx_frames), "ok")
+            self.fw_bad_card.set(str(stats.rx_bad), "warn" if stats.rx_bad else "ok")
+            self.fw_overflow_card.set(
+                str(stats.rx_overflow), "warn" if stats.rx_overflow else "ok"
+            )
 
     def _refresh_timing(self) -> None:
         health = self._last.get(int(tlm.StreamId.HEALTH))

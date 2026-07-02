@@ -1035,6 +1035,34 @@ def test_telemetry_stream_count_includes_joint_state():
     )
 
 
+def test_decode_api_stats_with_rx_health_tail():
+    # tx_backlog(4), dropped(4) x NUM_STREAMS, then the hexapod_src-lv6 rx tail:
+    # rx_frames(4), rx_bad(4), rx_overflow(4).
+    dropped = list(range(telemetry.NUM_STREAMS))
+    payload = struct.pack("<I", 3)
+    payload += b"".join(struct.pack("<I", d) for d in dropped)
+    payload += struct.pack("<III", 1000, 7, 2)
+    rec = telemetry.decode_api_stats(payload)
+    assert rec.tx_backlog == 3
+    assert rec.dropped_per_stream == dropped
+    assert rec.rx_frames == 1000
+    assert rec.rx_bad == 7
+    assert rec.rx_overflow == 2
+    # Older firmware without the tail: counters default to zero.
+    legacy = telemetry.decode_api_stats(payload[: 4 + 4 * telemetry.NUM_STREAMS])
+    assert legacy.dropped_per_stream == dropped
+    assert legacy.rx_frames == 0 and legacy.rx_bad == 0 and legacy.rx_overflow == 0
+    # Partial tail (e.g. mid-version firmware) parses what is present.
+    partial = telemetry.decode_api_stats(
+        payload[: 4 + 4 * telemetry.NUM_STREAMS + 4]
+    )
+    assert partial.rx_frames == 1000 and partial.rx_bad == 0
+    # Routed through the generic stream decoder as well.
+    rec2 = telemetry.decode_stream(int(telemetry.StreamId.API_STATS), payload)
+    assert isinstance(rec2, telemetry.ApiStatsTelemetry)
+    assert rec2.rx_overflow == 2
+
+
 # --------------------------------------------------------------------------- #
 # Controller command group (oha.4)
 # --------------------------------------------------------------------------- #

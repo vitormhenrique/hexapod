@@ -115,6 +115,13 @@ volatile bool g_configReady = false;
 // it and walks the streams each loop, emitting due telemetry frames over USB.
 protocol::SubscriptionManager g_subs;
 
+// USB frame reader + rx-health counters (hexapod_src-lv6). Owned exclusively by
+// apiTask (which also builds api_stats telemetry, so no cross-task access):
+// g_frameReader counts complete frame bodies (framesOk) and overflow-dropped
+// frames; g_apiRxBad counts bodies that failed COBS/CRC/magic/length decode.
+protocol::FrameReader g_frameReader;
+uint32_t g_apiRxBad = 0;
+
 // Host safety control intent (ESTOP/CLEAR_FAULT/SET_ARMING/SET_MODE). apiTask
 // records host intent into it; controlTask folds that intent into the safety
 // state machine each cycle and publishes the live state/fault back for command
@@ -434,11 +441,18 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       break;
     }
     case StreamId::ApiStats: {
-      // tx_backlog(4) then per-stream dropped(4) for the 7 streams.
+      // tx_backlog(4), per-stream dropped(4) x kNumStreams, then USB rx health
+      // (hexapod_src-lv6): rx_frames(4) complete frame bodies received,
+      // rx_bad(4) COBS/CRC/magic/length decode failures, rx_overflow(4) frames
+      // dropped for exceeding the reader buffer. Older hosts that only parse
+      // the tx fields ignore the appended tail.
       o += put32(&p[o], g_subs.txBacklog());
       for (uint8_t i = 0; i < protocol::kNumStreams; ++i) {
         o += put32(&p[o], g_subs.dropped(static_cast<StreamId>(i)));
       }
+      o += put32(&p[o], g_frameReader.framesOk());
+      o += put32(&p[o], g_apiRxBad);
+      o += put32(&p[o], g_frameReader.overflowsDropped());
       break;
     }
     case StreamId::JointState: {
@@ -1559,7 +1573,6 @@ void rcTask(void*) {
 }
 
 void apiTask(void*) {
-  static protocol::FrameReader reader;
   static uint8_t out[protocol::kMaxWireFrame];
   static uint16_t g_telemetrySeq = 0;
   // Bind the active config shadow (defaults until a persisted config is
@@ -1619,7 +1632,7 @@ void apiTask(void*) {
     // Drain any received bytes, framing them into complete request bodies.
     while (Serial.available() > 0) {
       const uint8_t b = static_cast<uint8_t>(Serial.read());
-      if (!reader.push(b)) {
+      if (!g_frameReader.push(b)) {
         continue;
       }
 
@@ -1655,11 +1668,15 @@ void apiTask(void*) {
       // (4sa.4). g_deviceInfo is only touched by this task.
       g_deviceInfo.feature_bits = g_featureApi.availableMask();
 
+      protocol::DecodeStatus decode_st = protocol::DecodeStatus::Ok;
       const size_t n = protocol::api::handleRequest(
-          reader.body(), reader.length(), g_deviceInfo, st, out, sizeof(out),
-          &g_configApi, &g_subs, &g_controlApi, &g_motionApi, &g_maintApi,
-          &g_maintTargetApi, &g_dxlJobApi, &g_featureApi, &g_sensorApi,
-          &g_passiveApi, &g_controllerApi);
+          g_frameReader.body(), g_frameReader.length(), g_deviceInfo, st, out,
+          sizeof(out), &g_configApi, &g_subs, &g_controlApi, &g_motionApi,
+          &g_maintApi, &g_maintTargetApi, &g_dxlJobApi, &g_featureApi,
+          &g_sensorApi, &g_passiveApi, &g_controllerApi, &decode_st);
+      if (decode_st != protocol::DecodeStatus::Ok) {
+        ++g_apiRxBad;  // corrupt frame: count it so api_stats makes it visible
+      }
       if (n > 0) {
         Serial.write(out, n);
       }

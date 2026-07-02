@@ -6,6 +6,8 @@ void FrameReader::reset() {
   len_ = 0;
   overflow_ = false;
   ready_ = false;
+  frames_ok_ = 0;
+  overflows_dropped_ = 0;
 }
 
 bool FrameReader::push(uint8_t byte) {
@@ -21,6 +23,7 @@ bool FrameReader::push(uint8_t byte) {
     // Delimiter: end of the current frame (if any data was collected).
     if (len_ > 0 && !overflow_) {
       ready_ = true;  // expose buf_/len_ until the next push()
+      ++frames_ok_;
       return true;
     }
     // Empty frame, leading delimiter, or a dropped overflow frame: restart.
@@ -36,6 +39,7 @@ bool FrameReader::push(uint8_t byte) {
   if (len_ >= sizeof(buf_)) {
     overflow_ = true;
     len_ = 0;
+    ++overflows_dropped_;  // one count per dropped frame, at the transition
     return false;
   }
   buf_[len_++] = byte;

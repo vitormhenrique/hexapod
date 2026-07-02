@@ -255,6 +255,46 @@ def test_request_timeout_returns_none():
         client.stop()
 
 
+def test_sync_stream_uses_async_path_once_reader_runs():
+    # hexapod_src-mrd: ``synchronous_requests`` covers only the pre-reader CDC
+    # handshake. Once telemetry starts the reader thread, requests must switch
+    # to the async pending queue so they do not pause the stream.
+    class SyncStream(RespondingStream):
+        synchronous_requests = True
+
+    handlers = {
+        api.MSG_GET_STATUS: lambda _p: (bytes(12), False),
+        api.MSG_SUBSCRIBE: lambda p: (bytes([api.SUB_OK, p[0], p[1], p[2]]), False),
+    }
+    stream = SyncStream(handlers)
+    client = ProtocolClient(stream, response_timeout=1.0)
+    client.start()
+    received = []
+    client.on_telemetry(lambda sid, rec, hdr: received.append(sid))
+    try:
+        # Pre-reader: sync mode starts no reader; inline requests still work.
+        assert not client._reader_alive()
+        assert client.get_status() is not None
+
+        # Subscribing at a nonzero rate starts the reader thread.
+        res = client.subscribe(int(tlm_stream()), 10)
+        assert res is not None and res.ok
+        _wait_for(client._reader_alive)
+        assert client._reader_alive()
+
+        # From here on the inline sync path must not be used.
+        def _fail_sync(*_a, **_k):
+            raise AssertionError("sync request path used while reader alive")
+
+        client._request_sync = _fail_sync
+        stream.push_telemetry(int(tlm_stream()), bytes(12))
+        assert client.get_status() is not None
+        _wait_for(lambda: received, timeout=1.0)
+        assert received and received[0] == int(tlm_stream())
+    finally:
+        client.stop()
+
+
 # --- helpers --------------------------------------------------------------
 def tlm_stream():
     from hexapod_protocol import telemetry as tlm

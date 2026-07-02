@@ -44,6 +44,9 @@ class ConfigApi;
 // msg-id range to it when a non-null instance is supplied.
 namespace protocol {
 class SubscriptionManager;
+// Forward declaration of the framing decode result (protocol/framing.h) so the
+// optional decode_status out-param does not pull framing.h into this header.
+enum class DecodeStatus : uint8_t;
 }
 
 // Forward declaration: the safety control command group (ESTOP / CLEAR_FAULT /
@@ -226,6 +229,10 @@ struct StatusSnapshot {
 //
 // `cfg` (optional) handles the CFG_* command group; when null those messages
 // are answered with an UnknownMsg error.
+//
+// `decode_status` (optional) receives the framing decode result so the caller
+// can count undecodable frames (COBS/CRC/magic/length failures) for link-health
+// diagnostics (hexapod_src-lv6); those frames still produce no response.
 size_t handleRequest(const uint8_t* body, size_t body_len,
                      const DeviceInfo& info, const StatusSnapshot& status,
                      uint8_t* out, size_t out_cap,
@@ -239,7 +246,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      FeatureApi* features = nullptr,
                      SensorApi* sensors = nullptr,
                      PassiveApi* passive = nullptr,
-                     ControllerApi* controller = nullptr);
+                     ControllerApi* controller = nullptr,
+                     DecodeStatus* decode_status = nullptr);
 
 }  // namespace api
 }  // namespace protocol
