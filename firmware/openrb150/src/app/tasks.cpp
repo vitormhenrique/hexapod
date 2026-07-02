@@ -380,6 +380,22 @@ inline uint16_t put32(uint8_t* p, uint32_t v) {
   return 4;
 }
 
+// Write one complete wire frame to USB CDC, reporting whether every byte was
+// accepted. The stock SAMD21 core is unbuffered: Serial.availableForWrite()
+// returns a constant (EPX_SIZE-1 = 63), so gating on it silently discarded
+// every frame larger than one endpoint packet (servo_status is ~270 wire
+// bytes and never reached the host). Serial.write() itself chunks the frame
+// through the endpoint, briefly waiting per 64-byte packet; with no host
+// draining, the first packet times out (~70 ms), the core latches
+// LastTransmitTimedOut, and subsequent writes fail fast until the endpoint
+// drains — so a wedged host costs one bounded stall, not one per frame. A
+// short/failed write means the frame may be torn on the wire; the next
+// frame's leading 0x00 delimiter resyncs the host, which counts one bad
+// frame and moves on.
+bool txFrame(const uint8_t* frame, size_t n) {
+  return Serial.write(frame, n) == n;
+}
+
 // Build the payload for telemetry `stream` into `p` (capacity kMaxPayload).
 // Returns the payload length. Reads only the published cross-task snapshots, so
 // it never touches a peripheral or blocks. Payloads stay within 256 bytes.
@@ -668,7 +684,12 @@ void deriveRcStatus(const controller::ControllerCommand& cc,
     rc.last_frame_ms = now_ms;
   }
   rc.armed = cc.arm_request;       // SW_A (and not failsafe; bridge clears it)
-  rc.kill = cc.estop;              // SW_B kill / failsafe
+  // Kill requires an RC system to have existed: the bridge's failsafe hold
+  // synthesises estop when no receiver has ever been seen, which must not
+  // assert a kill that locks the arbiter's maintenance lock and the FSM out
+  // of Disarmed on an RC-less bench (AGENTS.md mode 4). ever_seen latches, so
+  // a link that drops mid-operation still kills.
+  rc.kill = cc.estop && cc.ever_seen;
   rc.gait_index = cc.gait_index;   // SW_F 3-pos
   rc.autonomy = cc.host_authority; // SW_H grants host/Jetson authority
   rc.failsafe = cc.failsafe;
@@ -1688,7 +1709,9 @@ void apiTask(void*) {
         ++g_apiRxBad;  // corrupt frame: count it so api_stats makes it visible
       }
       if (n > 0) {
-        Serial.write(out, n);
+        if (!txFrame(out, n)) {
+          g_subs.noteTxBacklog();  // USB TX could not take the response frame
+        }
       }
 
       // If a CONTROLLER_SET_BINDINGS just validated a new map, stage it for
@@ -1722,10 +1745,11 @@ void apiTask(void*) {
       h.payload_len = plen;
       const size_t fn = protocol::encodeFrame(h, payload, out, sizeof(out));
       if (fn == 0) continue;
-      if (Serial.availableForWrite() >= static_cast<int>(fn)) {
-        Serial.write(out, fn);
-      } else {
-        g_subs.noteTxBacklog();  // TX full: drop this frame, do not block
+      if (!txFrame(out, fn)) {
+        // Endpoint is wedged (host stopped draining): count the drop and stop
+        // emitting for this cycle rather than stalling on every stream.
+        g_subs.noteTxBacklog();
+        break;
       }
     }
 

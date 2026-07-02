@@ -133,6 +133,7 @@ void test_disarm_returns_from_motion() {
 void test_kill_forces_estop_and_recovers() {
   StateMachine m = atStandReady();
   StateInputs in = healthy();
+  in.rc_ever_seen = true;  // kill comes from a live RC link
   in.rc_armed = true;
   in.command_source = static_cast<uint8_t>(CommandSource::Rc);
   m.update(in, 50);  // RcManual
@@ -142,6 +143,27 @@ void test_kill_forces_estop_and_recovers() {
   // Releasing kill recovers to Disarmed (must re-arm).
   in.rc_kill = false;
   TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 70));
+}
+
+void test_kill_without_rc_ever_seen_stays_disarmed() {
+  // Bench robot with no RC receiver: the bridge's failsafe hold synthesises
+  // kill, but with no RC link ever seen the FSM must settle in Disarmed so
+  // Mac maintenance / passive pose / DXL power stay reachable (AGENTS.md
+  // mode 4). Arming still requires the RC arm switch, so no motion is
+  // possible.
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  in.rc_kill = true;
+  in.rc_failsafe = true;
+  in.rc_ever_seen = false;
+  m.update(in, 0);  // Boot -> ConfigLoad
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 10));
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 20));
+  TEST_ASSERT_EQUAL(FaultReason::None, m.faultReason());
+  // Once an RC link has existed, the same kill input is honoured.
+  in.rc_ever_seen = true;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 30));
+  TEST_ASSERT_EQUAL(FaultReason::RcKill, m.faultReason());
 }
 
 void test_host_estop_forces_estop() {
@@ -265,6 +287,7 @@ int main(int, char**) {
   RUN_TEST(test_stand_ready_to_jetson_assisted);
   RUN_TEST(test_disarm_returns_from_motion);
   RUN_TEST(test_kill_forces_estop_and_recovers);
+  RUN_TEST(test_kill_without_rc_ever_seen_stays_disarmed);
   RUN_TEST(test_host_estop_forces_estop);
   RUN_TEST(test_low_battery_forces_estop);
   RUN_TEST(test_invalid_battery_reading_does_not_estop);

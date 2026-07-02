@@ -86,6 +86,12 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
 
   switch (req.msg_id) {
     case msg::kHello: {
+      // A HELLO starts a fresh host session: drop any telemetry subscriptions
+      // left over from a previous connection. Otherwise stale streams keep
+      // pumping frames while the port is closed/reopening and the new client's
+      // first reads land mid-frame (host-side "bad magic"/"bad COBS" noise).
+      // The client re-subscribes to what it wants after the handshake.
+      if (tel != nullptr) tel->reset();
       payload[0] = kVersionMajor;
       payload[1] = kVersionMinor;
       payload[2] = info.fw_major;

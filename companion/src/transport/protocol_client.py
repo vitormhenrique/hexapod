@@ -8,6 +8,7 @@ directly and the PySide6 app wraps it in a Qt service.
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
 from collections import deque
@@ -113,6 +114,7 @@ class ProtocolClient:
         self.rx_frames = 0
         self.tx_frames = 0
         self.decode_errors = 0
+        self._decode_error_logged_at = 0.0
 
         # Bounded raw-frame capture for the diagnostics inspector. Disabled by
         # default so the reader thread does no extra work until a page asks for
@@ -772,8 +774,19 @@ class ProtocolClient:
         try:
             header, payload = decode_frame_body(frame[1:-1])
         except DecodeError as exc:
-            print_exception("protocol frame decode failed", exc)
+            # Torn frames are expected and recoverable (USB resync, firmware
+            # reboot mid-frame): count them for the diagnostics page and log a
+            # rate-limited single line instead of a traceback per frame.
             self.decode_errors += 1
+            now = time.monotonic()
+            if now - self._decode_error_logged_at >= 5.0:
+                self._decode_error_logged_at = now
+                print(
+                    f"[hexapod-companion] dropped undecodable frame ({exc}); "
+                    f"{self.decode_errors} total this session",
+                    file=sys.stderr,
+                    flush=True,
+                )
             if self.capture_raw:
                 self._capture_raw(frame, None, None)
             return None

@@ -77,7 +77,14 @@ State StateMachine::update(const StateInputs& in, uint32_t /*now_ms*/) {
   FaultReason estop_reason = FaultReason::None;
   if (in.host_estop) {
     estop_reason = FaultReason::HostEstop;
-  } else if (in.rc_kill) {
+  } else if (in.rc_kill && in.rc_ever_seen) {
+    // RC kill counts only once an RC link has existed: the bridge's failsafe
+    // hold synthesises kill when no receiver is attached at all, which must
+    // not lock a bench robot out of Disarmed (Mac development mode needs
+    // maintenance/passive entry with no RC transmitter, AGENTS.md mode 4).
+    // Arming still requires the RC arm switch, so motion stays impossible
+    // without a live link; a link that drops mid-operation keeps ever_seen
+    // latched, so the in-flight kill/failsafe path is unchanged.
     estop_reason = FaultReason::RcKill;
   } else if (batt_unsafe) {
     estop_reason = FaultReason::BatteryLow;
