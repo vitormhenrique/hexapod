@@ -1580,8 +1580,33 @@ void apiTask(void*) {
   g_dxlJobApi.setRawRegisterEnabled(true);
 #endif
   TickType_t next = xTaskGetTickCount();
+#ifdef HEXAPOD_DEBUG_SERIAL_HEARTBEAT
+  // Debug aid: emit a plaintext "alive" line ~1 Hz so a plain serial monitor
+  // (pio device monitor / screen / Arduino) can confirm the USB CDC link works
+  // independently of the binary COBS/CRC protocol. This intentionally corrupts
+  // the framed stream, so it is OFF unless HEXAPOD_DEBUG_SERIAL_HEARTBEAT is
+  // defined at build time. Disconnect the companion app while using it.
+  uint32_t dbg_hb_count = 0;
+  uint32_t dbg_next_ms = 0;
+#endif
   for (;;) {
     tick(watchdog::TaskId::Api);
+
+#ifdef HEXAPOD_DEBUG_SERIAL_HEARTBEAT
+    {
+      const uint32_t hb_now_ms =
+          static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+      if (hb_now_ms >= dbg_next_ms) {
+        dbg_next_ms = hb_now_ms + 1000;
+        Serial.print("hexapod alive t=");
+        Serial.print(hb_now_ms);
+        Serial.print("ms n=");
+        Serial.print(dbg_hb_count++);
+        Serial.print(" state=");
+        Serial.println(g_safetyState);
+      }
+    }
+#endif
 
     // Adopt a persisted config once i2cTask has loaded one at boot. Done here
     // (not at task start) because i2cTask's scan may finish after this task
