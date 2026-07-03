@@ -54,6 +54,19 @@ class DxlBus {
   static constexpr uint8_t kMaxServoId = 252;  // 253/0xFE is broadcast
   static constexpr uint32_t kDefaultBaud = 57600;  // DXL factory default
 
+  // Bound on any single register-read transaction. The library busy-waits the
+  // full timeout on a non-answering servo, so this must stay small: dxlTask
+  // runs at priority 3 and a long busy-wait starves the health task's hardware
+  // WDT pet (a 100 ms default timeout across several reads hard-reset the MCU
+  // when DXL power dropped mid-stream; found on HIL, hexapod_src-2e8).
+  static constexpr uint32_t kReadTimeoutMs = 20;
+
+  // Legacy Protocol 1.0 has no Sync Read, so present positions are refreshed
+  // with individual reads. Cap the reads per syncReadStatus() call so a full
+  // 18-servo legacy bus cannot blow the 20 ms dxlTask period (each read is
+  // ~3 ms at 57600 baud; a timed-out read busy-waits kReadTimeoutMs).
+  static constexpr uint8_t kLegacyReadsPerCycle = 4;
+
   explicit DxlBus(HardwareSerial& port);
 
   // Initialize the DXL UART. Does NOT enable DXL power (board HAL owns that)
@@ -133,7 +146,7 @@ class DxlBus {
 
  private:
   // Read one logical control-table item, reporting failure via the library
-  // error code. Returns true on a clean read.
+  // error code. Returns true on a clean read. Bounded by kReadTimeoutMs.
   bool readItem(uint8_t item_idx, uint8_t id, int32_t& value);
 
   // Select the bus protocol version (1.0/2.0) implied by a table kind.
@@ -145,6 +158,7 @@ class DxlBus {
   BusStats stats_;
   uint32_t baud_ = kDefaultBaud;
   bool ready_ = false;
+  uint8_t legacy_rr_ = 0;  // round-robin cursor for legacy position reads
 
   // Library scratch params for grouped Sync Write / Sync Read. Kept as members
   // (not on the stack) because they are large and this class has a single

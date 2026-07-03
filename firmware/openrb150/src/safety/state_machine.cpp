@@ -50,9 +50,11 @@ void StateMachine::reset() {
   state_ = State::Boot;
   reason_ = FaultReason::None;
   clear_fault_requested_ = false;
+  batt_low_active_ = false;
+  batt_low_since_ms_ = 0;
 }
 
-State StateMachine::update(const StateInputs& in, uint32_t /*now_ms*/) {
+State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
   // --- 1. Latched hard fault: repeated bus failures / servo HW errors. -----
   // Requires both an explicit operator clear request and the condition to be
   // gone before it releases back to Disarmed.
@@ -72,8 +74,32 @@ State StateMachine::update(const StateInputs& in, uint32_t /*now_ms*/) {
   }
 
   // --- 2. Estop sources (any state). Auto-releases to Disarmed when clear. --
-  const bool batt_unsafe = in.battery_valid && in.battery_mv < params_.battery_min_mv;
-  const bool failsafe_stop = in.rc_failsafe && (isOperational(state_) || state_ == State::Estop);
+  // Battery-low is debounced: the reading must stay below the cutoff for
+  // battery_low_debounce_ms of consecutive updates before it counts. DXL
+  // power-on inrush from 18 servos sags the supply/ADC sense for a few
+  // control cycles, and a single-sample Estop tore down maintenance sessions
+  // the moment DXL power was enabled (HIL bug 7, hexapod-hil passive-pose).
+  const bool batt_low_now =
+      in.battery_valid && in.battery_mv < params_.battery_min_mv;
+  if (batt_low_now) {
+    if (!batt_low_active_) {
+      batt_low_active_ = true;
+      batt_low_since_ms_ = now_ms;
+    }
+  } else {
+    batt_low_active_ = false;
+  }
+  const bool batt_unsafe =
+      batt_low_active_ &&
+      (now_ms - batt_low_since_ms_) >= params_.battery_low_debounce_ms;
+  // Failsafe counts only once an RC link has existed (same rationale as the
+  // rc_kill guard below): with no receiver attached the bridge holds failsafe
+  // permanently, and without the ever_seen gate any transient Estop entry
+  // (host ESTOP, boot fault) would re-latch as RcLinkLost every cycle and make
+  // CLEAR_FAULT useless on the bench (AGENTS.md mode 4). A link that existed
+  // and then dropped keeps ever_seen latched, so in-flight loss still stops.
+  const bool failsafe_stop = in.rc_failsafe && in.rc_ever_seen &&
+                             (isOperational(state_) || state_ == State::Estop);
   FaultReason estop_reason = FaultReason::None;
   if (in.host_estop) {
     estop_reason = FaultReason::HostEstop;
@@ -204,7 +230,13 @@ State StateMachine::update(const StateInputs& in, uint32_t /*now_ms*/) {
       break;
 
     case State::MacMaintenance:
-      if (!in.maintenance_request || !in.mac_lock_held) {
+      if (in.passive_request && in.torque_off) {
+        // Direct maintenance -> passive handoff (hexapod_src-nkb): the bench
+        // workflow is maintenance (power DXL, scan, torque off) then passive
+        // streaming. Going through Disarmed would cut DXL power and lose the
+        // present-position reads passive mode exists for (AGENTS.md 5.5).
+        state_ = State::PassivePoseStream;
+      } else if (!in.maintenance_request || !in.mac_lock_held) {
         state_ = State::Disarmed;
       }
       break;

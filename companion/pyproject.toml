@@ -23,6 +23,7 @@ dev = ["pytest>=8", "pytest-qt>=4.4"]
 
 [project.scripts]
 hexapod-cli = "cli:main"
+hexapod-hil = "hil:main"
 hexapod-companion = "app:main"
 
 [tool.hatch.build.targets.wheel]

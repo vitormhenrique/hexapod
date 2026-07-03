@@ -20,7 +20,12 @@ namespace app {
 // give comfortable headroom that the health task verifies via high-water marks.
 namespace stack_words {
 constexpr uint16_t kControl = 256;
-constexpr uint16_t kDxl = 256;
+// dxl: Dynamixel2Arduino call chains (syncRead/readControlTableItem parsing)
+// plus the 160-byte maintenance-job result buffer run on this stack; 256 words
+// hard-faulted the MCU on the first status cycle after a real-servo scan
+// (HIL hexapod_src-2e8 bring-up). Health-task high-water marks verify actual
+// usage.
+constexpr uint16_t kDxl = 512;
 constexpr uint16_t kRc = 192;
 constexpr uint16_t kApi = 1024;  // framing + decode buffers live on this stack
 constexpr uint16_t kI2c = 384;   // boot: scanAll() + config load; deep call chain

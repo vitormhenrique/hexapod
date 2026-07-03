@@ -28,7 +28,7 @@ const ServoProfile* DxlBus::profileById(uint8_t id) const {
 }
 
 bool DxlBus::readItem(uint8_t item_idx, uint8_t id, int32_t& value) {
-  value = dxl_.readControlTableItem(item_idx, id);
+  value = dxl_.readControlTableItem(item_idx, id, kReadTimeoutMs);
   const uint8_t err = static_cast<uint8_t>(dxl_.getLastLibErrCode());
   if (err != 0) {
     stats_.last_error = err;
@@ -212,24 +212,63 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
   if (!ready_ || out == nullptr) {
     return 0;
   }
-  // Refresh identity + mark each entry stale for this cycle, but PRESERVE the
-  // detail fields (velocity/load/voltage/temperature/torque/hardware_error)
-  // populated by the dxlTask round-robin readStatus (eax.6): this Sync Read
-  // only carries Present Position, so wiping the struct would zero the detail
-  // fields every cycle. A successful read below sets position + ok.
+  // Keep identity fresh for every entry, but PRESERVE the detail fields
+  // (velocity/load/voltage/temperature/torque/hardware_error) populated by the
+  // dxlTask round-robin readStatus (eax.6). `ok` is only rewritten for entries
+  // actually attempted this call, so partial (round-robin) refreshes do not
+  // wipe the validity of untouched entries.
   for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
     out[i].id = servos_[i].id;
-    out[i].ok = false;
   }
 
   uint8_t fresh = 0;
-  const TableKind kinds[] = {TableKind::Mx28Legacy, TableKind::Mx28V2};
-  for (TableKind kind : kinds) {
-    // Collect this kind's servos (Present Position only; fits the recv buffer)
-    // in chunks of DXL_MAX_NODE. A single Sync Read carries at most
-    // DXL_MAX_NODE nodes, so a bus with more than DXL_MAX_NODE same-table
-    // servos (e.g. an all-legacy 18-servo hexapod) needs multiple reads to
-    // refresh every present position each cycle (lmt.10 / audit 22l.6).
+
+  // --- Legacy MX-28 (Protocol 1.0): the wire protocol has NO Sync Read (the
+  // library rejects it with DXL_LIB_ERROR_NOT_SUPPORTED), so present positions
+  // are refreshed with bounded individual reads instead. Round-robin capped at
+  // kLegacyReadsPerCycle so a full legacy bus cannot blow the dxlTask period:
+  // a dead/timed-out read busy-waits kReadTimeoutMs inside the library, and a
+  // long stall at dxlTask priority starves the health task's hardware WDT pet
+  // (the original all-Sync-Read code returned 0 forever on a legacy-only bus,
+  // latching a false FaultHard ~1 s after every scan; hexapod_src-2e8 HIL).
+  uint8_t legacy_idx[kMaxServos];
+  uint8_t legacy_n = 0;
+  for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
+    if (servos_[i].table_kind == TableKind::Mx28Legacy) {
+      legacy_idx[legacy_n++] = i;
+    }
+  }
+  if (legacy_n > 0) {
+    selectProtocol(TableKind::Mx28Legacy);
+    const uint16_t addr = posAddr(TableKind::Mx28Legacy);
+    const uint8_t len = posLen(TableKind::Mx28Legacy);
+    const uint8_t reads =
+        (legacy_n < kLegacyReadsPerCycle) ? legacy_n : kLegacyReadsPerCycle;
+    for (uint8_t k = 0; k < reads; ++k) {
+      if (legacy_rr_ >= legacy_n) {
+        legacy_rr_ = 0;
+      }
+      const uint8_t i = legacy_idx[legacy_rr_++];
+      uint8_t buf[4] = {0, 0, 0, 0};
+      const int32_t n = dxl_.read(servos_[i].id, addr, len, buf, sizeof(buf),
+                                  kReadTimeoutMs);
+      if (n >= static_cast<int32_t>(len)) {
+        out[i].present_position = decodePosition(TableKind::Mx28Legacy, buf);
+        out[i].ok = true;
+        ++fresh;
+        stats_.reads_ok++;
+      } else {
+        out[i].ok = false;
+        stats_.reads_fail++;
+        stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+      }
+    }
+  }
+
+  // --- MX(2.0): true Protocol 2.0 Sync Read (Present Position only; fits the
+  // recv buffer) in chunks of DXL_MAX_NODE (lmt.10 / audit 22l.6).
+  {
+    const TableKind kind = TableKind::Mx28V2;
     sr_param_.addr = posAddr(kind);
     sr_param_.length = posLen(kind);
     uint8_t scan = 0;
@@ -242,6 +281,9 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
         if (servos_[scan].table_kind == kind) {
           sr_param_.xel[sr_param_.id_count].id = servos_[scan].id;
           ++sr_param_.id_count;
+          if (scan < out_cap) {
+            out[scan].ok = false;  // attempted this cycle; success sets it back
+          }
         }
         ++scan;
       }

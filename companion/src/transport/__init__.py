@@ -85,7 +85,13 @@ def list_serial_ports() -> list[PortInfo]:
 class SerialLink:
     """Owns a pyserial port and exposes it as a :class:`ByteStream`."""
 
-    min_write_interval = 0.5
+    # Small pacing gap between command writes. This must stay well under the
+    # firmware maintenance-lock TTL (1 s): a client heartbeating the lock while
+    # also polling status/jobs queues every write behind this interval, so a
+    # large value (the old 0.5 s) starves heartbeats and the lock lapses
+    # mid-page (found by HIL, hexapod_src-2e8). Bench-verified at 0 ms with
+    # 100 back-to-back requests; 20 ms kept as a conservative CDC cushion.
+    min_write_interval = 0.02
     synchronous_requests = True
 
     def __init__(

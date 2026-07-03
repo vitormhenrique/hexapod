@@ -40,6 +40,13 @@ struct StateParams {
   // HIL-calibrated reading (board.h kBatteryDividerRatio); 1S/2S packs are not
   // supported by this robot (12 V MX-28AT bus -> 3S).
   uint16_t battery_min_mv = 10000;  // below this (when valid) -> Estop
+  // The low-battery reading must persist this long before it trips Estop.
+  // Turning on the DXL power FET makes 18 idle MX-28s draw a large inrush
+  // that sags a bench supply (and the ADC sense line) below battery_min_mv
+  // for a couple of control cycles; a single-sample Estop then tears down an
+  // active maintenance session the instant DXL power is enabled (HIL bug 7).
+  // A genuinely dying pack stays low, so debouncing only filters transients.
+  uint16_t battery_low_debounce_ms = 250;
 };
 
 // One cycle of inputs sampled from the rest of the firmware. All fields are
@@ -110,6 +117,9 @@ class StateMachine {
   State state_ = State::Boot;
   FaultReason reason_ = FaultReason::None;
   bool clear_fault_requested_ = false;
+  // Battery-low debounce: timestamp of the first consecutive low sample.
+  bool batt_low_active_ = false;
+  uint32_t batt_low_since_ms_ = 0;
 };
 
 }  // namespace safety

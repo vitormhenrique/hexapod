@@ -141,9 +141,22 @@ class UrdfForwardKinematics:
         return out
 
     def leaf_links(self) -> list:
-        """Links that are never a joint parent (leg tips / foot markers)."""
+        """Links that are never a joint parent (leg tips / foot markers).
+
+        Only leaves downstream of at least one actuated joint qualify: a leaf
+        rigidly fixed to the body (e.g. the HexNav ``bot`` accessory link)
+        never moves with the legs and must not be drawn as a foot marker.
+        """
         parents = set(self._children)
-        return [name for name in self.model.links if name not in parents]
+        movable: set = set()
+        for joint in self._order:  # root-first, so parents resolve before kids
+            if joint.is_actuated or joint.parent in movable:
+                movable.add(joint.child)
+        return [
+            name
+            for name in self.model.links
+            if name not in parents and name in movable
+        ]
 
     def foot_positions(self, angles: Optional[dict] = None) -> list:
         """World positions of the leaf/tip links (drawn as foot markers)."""

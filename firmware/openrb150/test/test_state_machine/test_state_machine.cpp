@@ -175,12 +175,63 @@ void test_host_estop_forces_estop() {
   TEST_ASSERT_EQUAL(FaultReason::HostEstop, m.faultReason());
 }
 
+void test_estop_recovers_on_bench_with_failsafe_held() {
+  // Bench robot with no RC receiver: the bridge holds failsafe=true with
+  // ever_seen=false. A host ESTOP must still be recoverable -- without the
+  // ever_seen gate on failsafe_stop, the held failsafe re-latched the Estop
+  // state as RcLinkLost every cycle and CLEAR_FAULT could never release it
+  // (hexapod_src-jqy, found by hexapod-hil mode-safety).
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  in.rc_failsafe = true;
+  in.rc_ever_seen = false;
+  m.update(in, 0);  // Boot -> ConfigLoad
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 10));
+  in.host_estop = true;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 20));
+  TEST_ASSERT_EQUAL(FaultReason::HostEstop, m.faultReason());
+  // Host estop released: must fall back to Disarmed, not RcLinkLost.
+  in.host_estop = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 30));
+  TEST_ASSERT_EQUAL(FaultReason::None, m.faultReason());
+  // Once a link has existed, the same held failsafe does keep Estop latched.
+  in.host_estop = true;
+  m.update(in, 40);
+  in.host_estop = false;
+  in.rc_ever_seen = true;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 50));
+  TEST_ASSERT_EQUAL(FaultReason::RcLinkLost, m.faultReason());
+}
+
 void test_low_battery_forces_estop() {
   StateMachine m = atStandReady();
   StateInputs in = healthy();
   in.rc_armed = true;
   in.battery_mv = 9500;  // below 10000 cutoff
-  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 50));
+  // A sustained low reading trips the Estop once the debounce window elapses.
+  m.update(in, 50);
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 50 + 250));
+  TEST_ASSERT_EQUAL(FaultReason::BatteryLow, m.faultReason());
+}
+
+void test_transient_battery_dip_does_not_estop() {
+  // DXL power-on inrush from 18 servos sags the supply below the cutoff for a
+  // few control cycles (HIL bug 7). A dip shorter than the debounce window
+  // must not tear down the session with a BatteryLow Estop.
+  StateMachine m = atStandReady();
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  in.battery_mv = 9000;  // inrush sag
+  TEST_ASSERT_NOT_EQUAL(State::Estop, m.update(in, 50));
+  TEST_ASSERT_NOT_EQUAL(State::Estop, m.update(in, 70));  // 20 ms into dip
+  in.battery_mv = 12000;  // recovered before the debounce window
+  TEST_ASSERT_NOT_EQUAL(State::Estop, m.update(in, 90));
+  TEST_ASSERT_EQUAL(FaultReason::None, m.faultReason());
+  // Recovery resets the debounce: a later dip needs a full window again.
+  in.battery_mv = 9000;
+  TEST_ASSERT_NOT_EQUAL(State::Estop, m.update(in, 500));
+  TEST_ASSERT_NOT_EQUAL(State::Estop, m.update(in, 500 + 249));
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 500 + 250));
   TEST_ASSERT_EQUAL(FaultReason::BatteryLow, m.faultReason());
 }
 
@@ -207,6 +258,7 @@ void test_rc_failsafe_stops_when_operational() {
   StateMachine m = atStandReady();
   StateInputs in = healthy();
   in.rc_armed = true;
+  in.rc_ever_seen = true;  // link existed (required to be operational at all)
   in.command_source = static_cast<uint8_t>(CommandSource::Rc);
   m.update(in, 50);  // RcManual
   in.rc_failsafe = true;
@@ -269,6 +321,31 @@ void test_maintenance_requires_lock() {
   TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 40));
 }
 
+void test_maintenance_to_passive_handoff() {
+  // Bench passive workflow (hexapod_src-nkb): power + scan happen under the
+  // maintenance lock; a passive request with torque confirmed off must hand
+  // off directly (never dropping through Disarmed, which would let dxlTask
+  // cut DXL power and kill the present-position stream). Torque still on
+  // must hold the handoff.
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  m.update(in, 0);
+  m.update(in, 10);  // Disarmed
+  in.maintenance_request = true;
+  in.mac_lock_held = true;
+  TEST_ASSERT_EQUAL(State::MacMaintenance, m.update(in, 20));
+  in.passive_request = true;
+  in.torque_off = false;
+  TEST_ASSERT_EQUAL(State::MacMaintenance, m.update(in, 30));  // torque on
+  in.torque_off = true;
+  TEST_ASSERT_EQUAL(State::PassivePoseStream, m.update(in, 40));
+  // Exit passive with the lock still held: falls to Disarmed, then the held
+  // lock re-enters maintenance on the next cycle.
+  in.passive_request = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 50));
+  TEST_ASSERT_EQUAL(State::MacMaintenance, m.update(in, 60));
+}
+
 void test_torque_gate_excludes_disarmed_and_estop() {
   TEST_ASSERT_FALSE(stateAllowsTorque(State::Disarmed));
   TEST_ASSERT_FALSE(stateAllowsTorque(State::Estop));
@@ -289,7 +366,9 @@ int main(int, char**) {
   RUN_TEST(test_kill_forces_estop_and_recovers);
   RUN_TEST(test_kill_without_rc_ever_seen_stays_disarmed);
   RUN_TEST(test_host_estop_forces_estop);
+  RUN_TEST(test_estop_recovers_on_bench_with_failsafe_held);
   RUN_TEST(test_low_battery_forces_estop);
+  RUN_TEST(test_transient_battery_dip_does_not_estop);
   RUN_TEST(test_invalid_battery_reading_does_not_estop);
   RUN_TEST(test_watchdog_fault_forces_estop);
   RUN_TEST(test_rc_failsafe_stops_when_operational);
@@ -297,6 +376,7 @@ int main(int, char**) {
   RUN_TEST(test_clear_request_ignored_while_fault_active);
   RUN_TEST(test_passive_pose_requires_torque_off);
   RUN_TEST(test_maintenance_requires_lock);
+  RUN_TEST(test_maintenance_to_passive_handoff);
   RUN_TEST(test_torque_gate_excludes_disarmed_and_estop);
   return UNITY_END();
 }

@@ -384,16 +384,43 @@ inline uint16_t put32(uint8_t* p, uint32_t v) {
 // accepted. The stock SAMD21 core is unbuffered: Serial.availableForWrite()
 // returns a constant (EPX_SIZE-1 = 63), so gating on it silently discarded
 // every frame larger than one endpoint packet (servo_status is ~270 wire
-// bytes and never reached the host). Serial.write() itself chunks the frame
-// through the endpoint, briefly waiting per 64-byte packet; with no host
-// draining, the first packet times out (~70 ms), the core latches
-// LastTransmitTimedOut, and subsequent writes fail fast until the endpoint
-// drains — so a wedged host costs one bounded stall, not one per frame. A
-// short/failed write means the frame may be torn on the wire; the next
-// frame's leading 0x00 delimiter resyncs the host, which counts one bad
-// frame and moves on.
+// bytes and never reached the host).
+//
+// HIL bug (hexapod_src-2e8, plot workbench soak): a plain Serial.write(frame,
+// n) tears most multi-packet frames. USBDeviceClass::send() waits for the
+// previous 64-byte packet by polling the endpoint's TRCPT1 interrupt flag,
+// but the core's USB ISR (USBCore.cpp ISRHandler -> epAckPendingInterrupts)
+// clears that same flag first, so the poll spins the full 70 ms TX timeout
+// and send() aborts mid-frame: exactly 128 bytes (two packets) hit the wire,
+// the host resyncs on the next frame's 0x00 delimiter, and each torn frame
+// also stalls apiTask ~70 ms (observed: >60% of servo_status frames torn even
+// at 10 Hz).
+//
+// Fix: feed the core one sub-packet (<= 63 byte) chunk at a time and gate
+// each chunk on the endpoint's BK1RDY hardware status bit, which is cleared
+// by hardware when the bank drains and is never touched by the ISR. send()
+// then always takes its fast path (bank idle -> copy, arm, return) and never
+// enters the racy TRCPT1 wait. The inter-chunk wait yields via vTaskDelay and
+// is bounded, so a wedged host (stopped draining) costs at most ~20 ms before
+// the frame is dropped and counted as TX backlog by the caller.
 bool txFrame(const uint8_t* frame, size_t n) {
-  return Serial.write(frame, n) == n;
+  // CDC is the only PluggableUSB module, so its endpoints are 1 (ACM), 2
+  // (OUT), 3 (IN) — see CDC.cpp CDC_ENDPOINT_IN = pluggedEndpoint + 2.
+  constexpr uint8_t kCdcInEp = 3;
+  constexpr uint32_t kBankDrainTimeoutMs = 20;
+  size_t off = 0;
+  while (off < n) {
+    uint32_t waited_ms = 0;
+    while (USB->DEVICE.DeviceEndpoint[kCdcInEp].EPSTATUS.bit.BK1RDY) {
+      if (waited_ms >= kBankDrainTimeoutMs) return false;  // host not draining
+      vTaskDelay(pdMS_TO_TICKS(1));
+      ++waited_ms;
+    }
+    const size_t chunk = (n - off < 63) ? (n - off) : 63;
+    if (Serial.write(frame + off, chunk) != chunk) return false;
+    off += chunk;
+  }
+  return true;
 }
 
 // Build the payload for telemetry `stream` into `p` (capacity kMaxPayload).
@@ -1397,15 +1424,20 @@ void dxlTask(void*) {
     runQueuedDxlJob();
 
     // Safety force-off (4sa.1): DXL power may only be energized during
-    // MacMaintenance -- the sole state in which the power-enable command is
-    // accepted (the arbiter grants the maintenance lock only while not killed
-    // and not armed). The instant the robot leaves maintenance -- lock release
-    // or expiry, disarm, RC kill / host estop, or a fault -- cut DXL power so
-    // every servo is de-energized. board:: caches the FET state, so this is at
-    // most one digitalWrite per transition; it is a no-op on builds without a
-    // software power FET (board::dxlPowerEnabled() stays false there).
+    // MacMaintenance (the sole state in which the power-enable command is
+    // accepted) or PassivePoseStream (torque-off present-position streaming,
+    // AGENTS.md 5.5 / hexapod_src-nkb -- the FSM enters it directly from
+    // maintenance with torque confirmed off, and goal writes are gated off, so
+    // an energized-but-undriven bus is safe there). The instant the robot
+    // leaves those states -- lock release or expiry, disarm, RC kill / host
+    // estop, or a fault -- cut DXL power so every servo is de-energized.
+    // board:: caches the FET state, so this is at most one digitalWrite per
+    // transition; it is a no-op on builds without a software power FET
+    // (board::dxlPowerEnabled() stays false there).
     if (board::dxlPowerEnabled() &&
-        g_safetyState != static_cast<uint8_t>(safety::State::MacMaintenance)) {
+        g_safetyState != static_cast<uint8_t>(safety::State::MacMaintenance) &&
+        g_safetyState !=
+            static_cast<uint8_t>(safety::State::PassivePoseStream)) {
       board::setDxlPower(false);
     }
 
@@ -1485,26 +1517,34 @@ void dxlTask(void*) {
       }
     }
 
-    // Publish a fresh present-position snapshot for all discovered servos in a
-    // single Sync Read per control table. This is a no-op until a maintenance
-    // scan populates the servo table (DXL power is OFF at boot), and never
-    // enables torque or writes goals. The goal Sync-Write path (writeGoal-
-    // Positions) runs above, gated by g_motionGate + a valid goal frame.
+    // Publish a fresh present-position snapshot for all discovered servos.
+    // Gated on BOTH a populated servo table (scan) and DXL power: reading an
+    // unpowered bus is pure timeout busy-wait inside the library, and a
+    // sustained busy-wait at dxlTask priority starves the health task's
+    // hardware WDT pet and hard-resets the MCU (found on HIL when the
+    // FaultHard power force-cut raced these reads, hexapod_src-2e8). Never
+    // enables torque or writes goals; the goal Sync-Write path runs above.
     static uint16_t consec_zero_reads = 0;  // dead-bus counter (lmt.5)
-    if (g_dxlBus.servoCount() > 0) {
+    if (g_dxlBus.servoCount() > 0 && board::dxlPowerEnabled()) {
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
-      g_servoStatusCount = n;
+      const uint8_t cnt = g_dxlBus.servoCount();
+      // The snapshot covers the whole servo table (per-entry .ok marks
+      // validity); syncReadStatus refreshes legacy servos round-robin, so a
+      // single call may touch only a subset. Any fresh read publishes the
+      // full table to the telemetry encoders.
+      if (n > 0) {
+        g_servoStatusCount = cnt;
+      }
 
       // Round-robin one full per-servo read per cycle (eax.6). The all-servo
-      // Sync Read above carries Present Position only (the MX(2.0) 23-byte
-      // status block exceeds the DXL recv buffer), so the detail fields
-      // (velocity, load, voltage, temperature, torque-enable, hardware error)
-      // are gathered one servo at a time. syncReadStatus preserves these fields
-      // between cycles, so the servo_status stream converges over servoCount()
-      // cycles. Read-only and torque-off-safe; bounded to one servo per cycle.
+      // position refresh above carries Present Position only, so the detail
+      // fields (velocity, load, voltage, temperature, torque-enable, hardware
+      // error) are gathered one servo at a time. syncReadStatus preserves
+      // these fields between cycles, so the servo_status stream converges over
+      // servoCount() cycles. Read-only and torque-off-safe; bounded to one
+      // servo per cycle and to DxlBus::kReadTimeoutMs per register read.
       static uint8_t rr_servo = 0;
-      const uint8_t cnt = g_dxlBus.servoCount();
       if (rr_servo >= cnt) rr_servo = 0;
       const uint8_t rr_id = g_dxlBus.profile(rr_servo).id;
       g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
@@ -1513,8 +1553,8 @@ void dxlTask(void*) {
 
       // Hard-fault detection (lmt.5): publish g_dxlHardFault for the safety FSM.
       // A servo hardware-error bit (MX 2.0 Hardware Error Status; converges via
-      // the round-robin read) is an immediate hard fault. A bus that stops
-      // answering the present-status Sync Read for a sustained window
+      // the round-robin read) is an immediate hard fault. A powered bus that
+      // stops answering every present-position read for a sustained window
       // (kDxlBusFailLimit cycles) is treated as a hard bus failure. Level-
       // triggered so that once the servo is rebooted / the bus is restored the
       // condition clears and the FSM can release FaultHard after CLEAR_FAULT.
@@ -1532,8 +1572,26 @@ void dxlTask(void*) {
       }
       g_dxlHardFault = hw_error || (consec_zero_reads >= kDxlBusFailLimit);
     } else {
+      // No scanned servos or DXL power is off: there is no powered bus to
+      // fault on (FaultHard itself force-cuts power above, so keeping the
+      // fault asserted here would deadlock CLEAR_FAULT recovery).
       consec_zero_reads = 0;
-      g_dxlHardFault = false;  // nothing scanned yet -> no bus to fault on
+      g_dxlHardFault = false;
+    }
+
+    // Overrun guard: bus reads on a powered-but-unresponsive bus busy-wait
+    // their timeouts inside the library, and a cycle that overruns the period
+    // makes vTaskDelayUntil() return immediately -- dxlTask (priority 3) then
+    // runs back-to-back and starves the lower-priority health task, whose
+    // withheld hardware-WDT pet resets the MCU (hexapod_src-2e8 HIL). Resync
+    // the schedule after an overrun so this task always truly blocks for one
+    // period, guaranteeing lower-priority tasks CPU time.
+    {
+      const TickType_t now_ticks = xTaskGetTickCount();
+      if (static_cast<int32_t>(now_ticks - next) >=
+          static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kDxl))) {
+        next = now_ticks;  // schedule slipped a full period; rebase
+      }
     }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kDxl));
   }

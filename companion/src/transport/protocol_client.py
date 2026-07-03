@@ -104,6 +104,10 @@ class ProtocolClient:
 
         self._telemetry_cbs: list[TelemetryCallback] = []
         self._connection_cbs: list[ConnectionCallback] = []
+        # Optional raw wire-frame taps (e.g. SessionLogger.log_raw_frame) so
+        # sessions can preserve lossless raw frames per AGENTS.md 7.5. Called
+        # on the reader thread with the delimited frame bytes.
+        self._raw_frame_cbs: list[Callable[[bytes], None]] = []
 
         self._reader: Optional[threading.Thread] = None
         self._running = threading.Event()
@@ -171,6 +175,14 @@ class ProtocolClient:
 
     def on_telemetry(self, cb: TelemetryCallback) -> None:
         self._telemetry_cbs.append(cb)
+
+    def on_raw_frame(self, cb: Callable[[bytes], None]) -> None:
+        """Register a tap that receives every delimited wire frame (bytes)."""
+        self._raw_frame_cbs.append(cb)
+
+    def remove_raw_frame(self, cb: Callable[[bytes], None]) -> None:
+        if cb in self._raw_frame_cbs:
+            self._raw_frame_cbs.remove(cb)
 
     def on_connection(self, cb: ConnectionCallback) -> None:
         self._connection_cbs.append(cb)
@@ -523,6 +535,10 @@ class ProtocolClient:
         r = self._send_built(api.build_exit_maintenance(token))
         return api.parse_maint_result(r.payload) if r else None
 
+    def maint_heartbeat(self, token: int) -> Optional[api.MaintResultMsg]:
+        r = self._send_built(api.build_maint_heartbeat(token))
+        return api.parse_maint_result(r.payload) if r else None
+
     # Maintenance leg/joint targets (MacMaintenance + held lock only).
     def set_leg_target(
         self, leg: int, x_mm: int, y_mm: int, z_mm: int
@@ -771,6 +787,11 @@ class ProtocolClient:
     def _handle_frame(self, frame: bytes) -> Optional[Response]:
         if len(frame) < 2 or frame[0] != 0x00 or frame[-1] != 0x00:
             return None
+        for raw_cb in list(self._raw_frame_cbs):
+            try:
+                raw_cb(frame)
+            except Exception as exc:
+                print_exception("raw frame callback failed", exc)
         try:
             header, payload = decode_frame_body(frame[1:-1])
         except DecodeError as exc:
