@@ -345,6 +345,7 @@ class ModeSafetyPage(BasePage):
     def build(self) -> None:
         self.content.addWidget(self._safety_controls())
         self.content.addWidget(self._lock_controls())
+        self.content.addWidget(self._bench_controls())
         self.content.addWidget(self._feature_flags())
         self.content.addWidget(self._subscriptions())
 
@@ -361,7 +362,9 @@ class ModeSafetyPage(BasePage):
         self.service.feature_list.connect(self._on_feature_list)
         self.service.feature_result.connect(lambda _r: self.service.refresh_features())
         self.service.maint_result.connect(self._on_maint_result)
+        self.service.maint_lock_changed.connect(self._on_lock_changed)
         self.service.control_result.connect(self._on_control_result)
+        self.service.dxl_result.connect(self._on_dxl_result)
 
     # --- groups -----------------------------------------------------------
 
@@ -413,7 +416,18 @@ class ModeSafetyPage(BasePage):
 
         self.action_lbl = QLabel("No command sent yet.")
         self.action_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+        self.action_lbl.setWordWrap(True)
         grid.addWidget(self.action_lbl, 2, 0, 1, 3)
+
+        hint = QLabel(
+            "Arming for walking requires the RC transmitter arm switch; the "
+            "host Arm button only releases a previous host disarm. For bench "
+            "work without RC (moving servos from this app), use Enter "
+            "Maintenance below."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DRACULA.comment}; font-size: 12px;")
+        grid.addWidget(hint, 3, 0, 1, 3)
         return box
 
     def _lock_controls(self) -> QGroupBox:
@@ -447,6 +461,70 @@ class ModeSafetyPage(BasePage):
         self.lock_lbl = QLabel("Maintenance lock: none")
         self.lock_lbl.setStyleSheet(f"color: {DRACULA.comment};")
         grid.addWidget(self.lock_lbl, 2, 0, 1, 2)
+        return box
+
+    def _bench_controls(self) -> QGroupBox:
+        box = QGroupBox("Bench servo control (maintenance mode)")
+        outer = QVBoxLayout(box)
+
+        hint = QLabel(
+            "Bench flow: 1) Enter Maintenance above  2) DXL Power On  "
+            "3) Scan Servos  4) Torque On  5) Center All. Targets are clamped "
+            "by the configured servo travel limits in firmware."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DRACULA.comment}; font-size: 12px;")
+        outer.addWidget(hint)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+
+        power_on = QPushButton("DXL Power On")
+        power_on.clicked.connect(lambda: self.service.dxl_power(True))
+        power_off = QPushButton("DXL Power Off")
+        power_off.clicked.connect(lambda: self.service.dxl_power(False))
+        scan = QPushButton("Scan Servos")
+        scan.clicked.connect(self._on_scan)
+        torque_on = QPushButton("Torque On")
+        torque_on.clicked.connect(
+            lambda: self._confirm(
+                "Enable torque",
+                "Enable torque on all scanned servos? They will hold and then "
+                "follow commanded targets.",
+                lambda: self.service.dxl_torque(True),
+            )
+        )
+        torque_off = QPushButton("Torque Off")
+        torque_off.clicked.connect(lambda: self.service.dxl_torque(False))
+        center = QPushButton("Center All (180\u00b0)")
+        center.setProperty("accent", True)
+        center.clicked.connect(
+            lambda: self._confirm(
+                "Center all servos",
+                "Move ALL 18 joints to center (tick 2048 / 180\u00b0)? The robot "
+                "must be on a stand \u2014 servos WILL move.",
+                self.service.center_all_joints,
+            )
+        )
+
+        for i, btn in enumerate(
+            (power_on, power_off, scan, torque_on, torque_off, center)
+        ):
+            btn.setCursor(Qt.PointingHandCursor)
+            grid.addWidget(btn, i // 3, i % 3)
+        for c in range(3):
+            grid.setColumnStretch(c, 1)
+        outer.addLayout(grid)
+
+        self.bench_lbl = QLabel("Requires the maintenance lock.")
+        self.bench_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+        self.bench_lbl.setWordWrap(True)
+        outer.addWidget(self.bench_lbl)
+
+        self._bench_buttons = (power_on, power_off, scan, torque_on, torque_off, center)
+        for btn in self._bench_buttons:
+            btn.setEnabled(False)
         return box
 
     def _feature_flags(self) -> QGroupBox:
@@ -532,10 +610,64 @@ class ModeSafetyPage(BasePage):
         else:
             self.lock_lbl.setText(f"Maintenance lock: rejected (result {res.result})")
 
+    def _on_lock_changed(self, held: bool, token: int) -> None:
+        if held:
+            self.lock_lbl.setText(
+                f"Maintenance lock: held (token {token}, heartbeating)"
+            )
+        else:
+            self.lock_lbl.setText("Maintenance lock: none")
+        for btn in self._bench_buttons:
+            btn.setEnabled(held)
+        self.bench_lbl.setText("Ready." if held else "Requires the maintenance lock.")
+
+    def _on_scan(self) -> None:
+        self.bench_lbl.setText("Scanning IDs 1-30 (takes a few seconds)\u2026")
+        self.service.dxl_scan()
+
+    def _on_dxl_result(self, kind: str, res) -> None:
+        if kind not in ("power", "torque", "scan"):
+            return
+        if res is None:
+            self.bench_lbl.setText(f"DXL {kind}: no result (rejected or timed out)")
+            return
+        if not res.done:
+            self.bench_lbl.setText(f"DXL {kind}: not finished (slot {res.slot})")
+            return
+        if kind == "scan":
+            servos = res.servos()
+            ids = ", ".join(str(s.id) for s in servos)
+            self.bench_lbl.setText(
+                f"Scan: {len(servos)} servo(s) found"
+                + (f" \u2014 ids {ids}" if servos else " (power on first?)")
+            )
+        elif kind == "power":
+            pr = res.power()
+            if pr is None:
+                self.bench_lbl.setText("DXL power: no decode")
+            else:
+                self.bench_lbl.setText(
+                    f"DXL power: {'ON' if pr.power_on else 'OFF'}"
+                )
+        elif len(res.data) >= 2:
+            self.bench_lbl.setText(
+                f"Torque {'ON' if res.data[0] else 'OFF'} \u2014 acked by "
+                f"{res.data[1]} servo(s)"
+            )
+        else:
+            self.bench_lbl.setText(f"Torque command acknowledged (code {res.code}).")
+
     def _on_control_result(self, kind: str, res) -> None:
         state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
         verdict = "ok" if res.ok else f"rejected ({res.result})"
-        self.action_lbl.setText(f"{kind}: {verdict} — state {state}")
+        text = f"{kind}: {verdict} — state {state}"
+        if kind == "arm" and res.ok and res.state == 2:  # still DISARMED
+            text += (
+                " — host arm only releases the disarm latch; walking requires "
+                "the RC arm switch. For bench servo control use Enter "
+                "Maintenance."
+            )
+        self.action_lbl.setText(text)
 
     def _on_connected(self, connected: bool) -> None:
         if connected:

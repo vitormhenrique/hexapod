@@ -51,6 +51,7 @@ class ConnectionService(QObject):
     sensor_status = Signal(object)  # api.SensorStatusResult (None on failure)
     passive_result = Signal(str, object)  # kind, api.PassiveResult
     passive_rate_result = Signal(object)  # api.PassiveRateResult
+    maint_lock_changed = Signal(bool, int)  # held, token
 
     def __init__(self) -> None:
         super().__init__()
@@ -60,6 +61,10 @@ class ConnectionService(QObject):
         self._poll.timeout.connect(self._poll_status)
         self._last_state: Optional[int] = None
         self._maint_token: int = 0
+        # Maintenance-lock keepalive: the firmware lock TTL is 1 s without a
+        # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
+        # background thread or MacMaintenance silently lapses to Disarmed.
+        self._maint_hb_stop: Optional[threading.Event] = None
         self._connecting = False
         self._connect_max_attempts = 5
         self._connect_retry_delay_s = 2.5
@@ -211,6 +216,7 @@ class ConnectionService(QObject):
     def disconnect(self) -> None:
         self._connecting = False
         self._poll.stop()
+        self._drop_maint_lock(notify=False)
         if self._client is not None:
             self._client.stop()
             self._client = None
@@ -510,8 +516,10 @@ class ConnectionService(QObject):
             if res is None:
                 self.error.emit("maintenance: no response")
                 return
-            if res.ok:
+            if res.ok and res.token:
                 self._maint_token = res.token
+                self._start_maint_heartbeat(client, res.token)
+                self.maint_lock_changed.emit(True, res.token)
                 self.event.emit(
                     "commit", f"maintenance lock acquired (token {res.token})"
                 )
@@ -530,16 +538,73 @@ class ConnectionService(QObject):
         token = self._maint_token
 
         def worker() -> None:
+            self._stop_maint_heartbeat()
             res = client.exit_maintenance(token)
             if res is None:
                 self.error.emit("maintenance: no response")
                 return
             if res.ok:
                 self._maint_token = 0
+                self.maint_lock_changed.emit(False, 0)
                 self.event.emit("commit", "maintenance lock released")
             self.maint_result.emit(res)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @property
+    def maint_lock_held(self) -> bool:
+        return self._maint_token != 0
+
+    def _start_maint_heartbeat(self, client: ProtocolClient, token: int) -> None:
+        """Beat the maintenance lock every 0.25 s (firmware TTL is 1 s).
+
+        Three consecutive lost beats are needed before the lock lapses, so a
+        single request lost to a busy serial link (e.g. a DXL scan burst)
+        cannot drop MacMaintenance. Mirrors the proven HIL ``_MaintLock``.
+        """
+        self._stop_maint_heartbeat()
+        stop = threading.Event()
+        self._maint_hb_stop = stop
+
+        def beat() -> None:
+            misses = 0
+            while not stop.wait(0.25):
+                if self._client is not client or token != self._maint_token:
+                    return
+                try:
+                    res = client.maint_heartbeat(token)
+                except Exception:
+                    return
+                if res is None:
+                    misses += 1
+                    if misses < 3:
+                        continue
+                elif res.ok:
+                    misses = 0
+                    continue
+                # Firmware says the lock is gone (expired/revoked) or the link
+                # dropped three beats: reflect reality in the UI.
+                if token == self._maint_token:
+                    self._maint_token = 0
+                    self.maint_lock_changed.emit(False, 0)
+                    self.event.emit("error", "maintenance lock lost")
+                return
+
+        threading.Thread(target=beat, name="hexapod-maint-hb", daemon=True).start()
+
+    def _stop_maint_heartbeat(self) -> None:
+        if self._maint_hb_stop is not None:
+            self._maint_hb_stop.set()
+            self._maint_hb_stop = None
+
+    def _drop_maint_lock(self, notify: bool = True) -> None:
+        """Clear local lock state (link is going away; no EXIT possible)."""
+        self._stop_maint_heartbeat()
+        if self._maint_token:
+            self._maint_token = 0
+            self.maint_lock_changed.emit(False, 0)
+            if notify:
+                self.event.emit("error", "maintenance lock lost (link down)")
 
     def set_leg_target(self, leg: int, x_mm: int, y_mm: int, z_mm: int) -> None:
         """Command one leg's foot to (x, y, z) mm (body frame); emit IK verdict.
@@ -662,6 +727,51 @@ class ConnectionService(QObject):
 
         threading.Thread(target=worker, name=f"hexapod-dxl-{kind}", daemon=True).start()
 
+    def dxl_power(self, on: bool) -> None:
+        self._run_dxl("power", lambda c: c.dxl_power(on))
+
+    def dxl_torque(self, on: bool) -> None:
+        self._run_dxl("torque", lambda c: c.dxl_torque(on))
+
+    def dxl_scan(self) -> None:
+        # Scan IDs 1-30 (the config space) with a generous job timeout: freshly
+        # powered MX-28s take >1 s to answer pings (HIL 2e8), and the full
+        # sweep exceeds the 2 s dxl_run default.
+        self._run_dxl(
+            "scan", lambda c: c.dxl_run(api.build_dxl_scan(1, 30), timeout=8.0)
+        )
+
+    def center_all_joints(self, angle_cdeg: int = 0) -> None:
+        """Send a maintenance joint target for every (leg, joint).
+
+        Angle 0 centidegrees maps to the servo center tick (2048 = 180 deg on
+        the horn). Honored only in MacMaintenance with the lock held; each
+        target is clamped by the configured servo travel in firmware.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("center all: not connected")
+            return
+
+        def worker() -> None:
+            ok = 0
+            total = 0
+            last = None
+            for leg in range(6):
+                for joint in range(3):
+                    total += 1
+                    res = client.set_joint_target(leg, joint, angle_cdeg)
+                    last = res
+                    if res is not None and res.result == 0:
+                        ok += 1
+            if ok == total:
+                self.event.emit("commit", f"center all: {ok}/{total} joints accepted")
+            else:
+                self.event.emit("error", f"center all: only {ok}/{total} accepted")
+            self.joint_target_result.emit(last)
+
+        threading.Thread(target=worker, name="hexapod-center-all", daemon=True).start()
+
     def dxl_get_param(self, servo_id: int, param: int) -> None:
         self._run_dxl("get_param", lambda c: c.dxl_get_param(servo_id, param))
 
@@ -751,6 +861,7 @@ class ConnectionService(QObject):
         if client is not None and self._client is not client:
             return
         self._poll.stop()
+        self._drop_maint_lock()
         self.connecting.emit(False)
         self._client = None
         if not self._connecting:

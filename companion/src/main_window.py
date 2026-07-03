@@ -121,6 +121,11 @@ class MainWindow(QMainWindow):
         self.service.event.connect(self.event_strip.add)
         self.service.status_received.connect(self._on_status)
         self.service.telemetry.connect(self._on_telemetry)
+        self.service.maint_lock_changed.connect(
+            lambda held, _tok: self.safety_bar.lock.set(
+                "HELD" if held else "none", "warn" if held else "idle"
+            )
+        )
 
         self._last_fault_reason = 0
 

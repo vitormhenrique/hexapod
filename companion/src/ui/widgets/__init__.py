@@ -185,6 +185,7 @@ class SafetyBar(QFrame):
         self.arming = StatusBadge("ARMING")
         self.torque = StatusBadge("TORQUE")
         self.source = StatusBadge("CMD SOURCE")
+        self.lock = StatusBadge("MAINT LOCK")
         self.rc = StatusBadge("RC LINK")
         self.battery = StatusBadge("BATTERY")
         badges = (
@@ -193,6 +194,7 @@ class SafetyBar(QFrame):
             self.arming,
             self.torque,
             self.source,
+            self.lock,
             self.rc,
             self.battery,
         )
@@ -206,6 +208,7 @@ class SafetyBar(QFrame):
         lay.addWidget(self.estop)
 
         self.conn.set("Disconnected", "idle")
+        self.lock.set("none", "idle")
 
     # Convenience setters used by MainWindow.
     def set_connection(self, connected: bool) -> None:
