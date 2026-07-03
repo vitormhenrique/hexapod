@@ -1228,7 +1228,9 @@ def test_servo_map_lookup_and_unmapped():
     cfg = cfgmod.default_robot_config()
     smap = cfgmod.ServoMap(cfg)
     assert smap.servo_for(0, 0).id == 1  # leg0 coxa
-    assert smap.servo_for_id(13).leg == 0 and smap.servo_for_id(13).joint == 2
+    assert smap.servo_for(0, 1).id == 2  # leg0 femur (leg-major wiring)
+    assert smap.servo_for_id(3).leg == 0 and smap.servo_for_id(3).joint == 2
+    assert smap.servo_for_id(13).leg == 4 and smap.servo_for_id(13).joint == 0
     assert smap.servo_for(9, 0) is None  # leg out of range
     assert smap.tick_to_angle(9, 0, 2048) == 0.0
     assert smap.angle_to_tick(9, 0, 0.5).unmapped
@@ -1289,8 +1291,8 @@ def test_servo_status_fallback_matches_joint_state_shape():
     status = telemetry.ServoStatusTelemetry(
         servos=[
             telemetry.ServoStatus(1, 2048, 0, 0, 0, 0, 0),  # leg0 coxa, center -> 0deg
-            telemetry.ServoStatus(7, 2389, 0, 0, 0, 0, 0),  # leg0 femur, +30deg
-            telemetry.ServoStatus(2, 1024, 0, 0, 0, 0, 0),  # leg1 coxa (sign -1)
+            telemetry.ServoStatus(2, 2389, 0, 0, 0, 0, 0),  # leg0 femur, +30deg
+            telemetry.ServoStatus(4, 1024, 0, 0, 0, 0, 0),  # leg1 coxa (sign -1)
             telemetry.ServoStatus(200, 2048, 0, 0, 0, 0, 0),  # unmapped id -> skipped
         ]
     )

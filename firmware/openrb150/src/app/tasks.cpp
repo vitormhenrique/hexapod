@@ -161,6 +161,12 @@ GoalFrame g_goalFrame;
 SemaphoreHandle_t g_goalMutex = nullptr;  // guards g_goalFrame
 volatile bool g_goalValid = false;        // a fresh, gated goal frame is ready
 volatile uint32_t g_goalSeq = 0;          // bumped on each published frame
+// Max time dxlTask blocks to acquire g_goalMutex before falling back to the
+// previously latched goal. controlTask (100 Hz, equal priority) holds the mutex
+// only for a small fixed copy, so this bound is never meaningfully consumed; it
+// exists purely to break the equal-priority zero-wait phase-lock that starved
+// the reader for frames of >=16 joints (see dxlTask goal-write path).
+constexpr uint32_t kGoalReadWaitMs = 4;
 // True when the last published frame saturated any joint against the configured
 // servo travel; surfaced for clamp diagnostics (lmt.2 / audit 22l.3).
 volatile bool g_goalClamped = false;
@@ -757,6 +763,21 @@ void controlTask(void*) {
     // MacMaintenance motion authority (hexapod_src-0y9: previously only the
     // arbiter's own never-acquired token counted, so the motion gate stayed
     // closed in maintenance and accepted joint targets were never actuated).
+    //
+    // TTL hold while a DXL job is in flight: a scan/ping burst busy-waits the
+    // bus inside one dxlTask cycle (priority 3), starving apiTask (priority 2)
+    // for up to ~1.2 s, so the host's 0.25 s heartbeats are processed too late
+    // and the 1 s lock TTL lapsed mid-scan -- silently dropping MacMaintenance,
+    // force-cutting DXL power, and rejecting every subsequent bench command.
+    // The host provably just asked for this work, so keep the lock fed until
+    // the job completes; normal TTL expiry resumes one window afterwards.
+    {
+      const protocol::dxljob::Slot js = g_dxlJobApi.queue().slotState();
+      if (js == protocol::dxljob::Slot::Pending ||
+          js == protocol::dxljob::Slot::Running) {
+        g_maintApi.feedTtl(now_ms);
+      }
+    }
     const bool maint_held = g_maintApi.lockHeld(now_ms);
     g_arbiter.setExternalMacLock(maint_held, g_maintApi.token());
     const safety::ArbiterOutput& arb = g_arbiter.update(rc_in, now_ms);
@@ -1542,14 +1563,23 @@ void dxlTask(void*) {
 
     // Goal Sync-Write path (lmt.2): while motion is authorised and torque is on,
     // push the latest goal frame published by controlTask (gait -> body IK ->
-    // servo map). Copy the frame out under the brief mutex so the bus is never
-    // held while the lock is taken; if controlTask is mid-publish we skip this
-    // cycle and the servos hold their previous goal. Writing every cycle (not
-    // just on goal change) also keeps any per-servo bus watchdog fed.
+    // servo map). Copy the frame out under a briefly-blocking mutex so the bus
+    // is never held while the lock is taken; if the copy times out (controlTask
+    // holding it longer than kGoalReadWaitMs, which never happens in practice)
+    // the servos hold their previous goal. Writing every cycle (not just on
+    // goal change) also keeps any per-servo bus watchdog fed.
     if (authorized && have_servos && g_goalValid && g_goalMutex != nullptr) {
       static dxl::GoalTarget targets[config::kNumServos];
       uint8_t count = 0;
-      if (xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
+      // Bounded wait (not zero) to acquire the frame: controlTask publishes at
+      // 100 Hz and holds this mutex only for a tiny fixed copy, but with both
+      // tasks at equal priority a zero-wait take can phase-lock and miss the
+      // hold window every cycle once the frame grows past ~15 joints (HIL:
+      // 16-18 servo goal frames never actuated while 1-15 did). A short bounded
+      // wait guarantees the reader observes each published frame; the hold is
+      // microseconds, so this never approaches the 20 ms dxl period budget.
+      if (xSemaphoreTake(g_goalMutex, pdMS_TO_TICKS(kGoalReadWaitMs)) ==
+          pdTRUE) {
         count = g_goalFrame.count;
         for (uint8_t i = 0; i < count; ++i) {
           targets[i].id = g_goalFrame.joints[i].id;
@@ -1570,7 +1600,21 @@ void dxlTask(void*) {
     // FaultHard power force-cut raced these reads, hexapod_src-2e8). Never
     // enables torque or writes goals; the goal Sync-Write path runs above.
     static uint16_t consec_zero_reads = 0;  // dead-bus counter (lmt.5)
+    // Dead-bus read backoff: on a powered bus where every present-position
+    // read timed out (servos still booting after a power-on, or a genuinely
+    // dead bus), each read busy-waits its full kReadTimeoutMs at dxlTask
+    // priority -- an 18-servo batch burns ~360 ms per cycle and starves
+    // apiTask (priority 2), stalling heartbeats/commands for seconds. After an
+    // all-timeout batch, skip the read path for a few cycles so lower-priority
+    // tasks get real CPU windows; skipped cycles still count toward the
+    // dead-bus fault window so lmt.5 timing is unchanged.
+    static uint8_t read_backoff = 0;
+    constexpr uint8_t kReadBackoffCycles = 24;  // ~0.5 s at the 50 Hz period
     if (g_dxlBus.servoCount() > 0 && board::dxlPowerEnabled()) {
+      if (read_backoff > 0) {
+        --read_backoff;
+        if (consec_zero_reads < 0xFFFF) ++consec_zero_reads;
+      } else {
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
       const uint8_t cnt = g_dxlBus.servoCount();
@@ -1589,12 +1633,16 @@ void dxlTask(void*) {
       // these fields between cycles, so the servo_status stream converges over
       // servoCount() cycles. Read-only and torque-off-safe; bounded to one
       // servo per cycle and to DxlBus::kReadTimeoutMs per register read.
+      // Skipped while the bus is not answering at all (n == 0): it would only
+      // add another busy-wait timeout on a dead bus.
       static uint8_t rr_servo = 0;
-      if (rr_servo >= cnt) rr_servo = 0;
-      const uint8_t rr_id = g_dxlBus.profile(rr_servo).id;
-      g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
-      g_servoStatus[rr_servo].id = rr_id;  // readStatus does not set id
-      ++rr_servo;
+      if (n > 0) {
+        if (rr_servo >= cnt) rr_servo = 0;
+        const uint8_t rr_id = g_dxlBus.profile(rr_servo).id;
+        g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
+        g_servoStatus[rr_servo].id = rr_id;  // readStatus does not set id
+        ++rr_servo;
+      }
 
       // Hard-fault detection (lmt.5): publish g_dxlHardFault for the safety FSM.
       // A servo hardware-error bit (MX 2.0 Hardware Error Status; converges via
@@ -1605,6 +1653,7 @@ void dxlTask(void*) {
       // condition clears and the FSM can release FaultHard after CLEAR_FAULT.
       if (n == 0) {
         if (consec_zero_reads < 0xFFFF) ++consec_zero_reads;
+        read_backoff = kReadBackoffCycles;
       } else {
         consec_zero_reads = 0;
       }
@@ -1616,11 +1665,13 @@ void dxlTask(void*) {
         }
       }
       g_dxlHardFault = hw_error || (consec_zero_reads >= kDxlBusFailLimit);
+      }
     } else {
       // No scanned servos or DXL power is off: there is no powered bus to
       // fault on (FaultHard itself force-cuts power above, so keeping the
       // fault asserted here would deadlock CLEAR_FAULT recovery).
       consec_zero_reads = 0;
+      read_backoff = 0;
       g_dxlHardFault = false;
     }
 

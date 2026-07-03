@@ -27,13 +27,13 @@ void test_lookup_by_slot_matches_wiring() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  // Wiring: leg1 coxa id 1, femur id 7, tibia id 13; leg6 tibia id 18.
+  // Wiring (leg-major): leg1 coxa id 1, femur id 2, tibia id 3; leg6 tibia 18.
   TEST_ASSERT_EQUAL_PTR(nullptr, map.servoFor(99, 0));
   const ServoConfig* leg1_coxa = map.servoFor(0, 0);
   TEST_ASSERT_NOT_NULL(leg1_coxa);
   TEST_ASSERT_EQUAL_UINT8(1, leg1_coxa->id);
-  TEST_ASSERT_EQUAL_UINT8(7, map.servoFor(0, 1)->id);
-  TEST_ASSERT_EQUAL_UINT8(13, map.servoFor(0, 2)->id);
+  TEST_ASSERT_EQUAL_UINT8(2, map.servoFor(0, 1)->id);
+  TEST_ASSERT_EQUAL_UINT8(3, map.servoFor(0, 2)->id);
   TEST_ASSERT_EQUAL_UINT8(18, map.servoFor(5, 2)->id);
 }
 
@@ -42,9 +42,9 @@ void test_lookup_by_id() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  const ServoConfig* s = map.servoForId(11);  // leg5 femur
+  const ServoConfig* s = map.servoForId(11);  // leg4 femur (leg-major ids)
   TEST_ASSERT_NOT_NULL(s);
-  TEST_ASSERT_EQUAL_UINT8(4, s->leg);   // leg index 4 == "leg 5"
+  TEST_ASSERT_EQUAL_UINT8(3, s->leg);   // leg index 3 == "leg 4"
   TEST_ASSERT_EQUAL_UINT8(1, s->joint); // femur
   TEST_ASSERT_EQUAL_PTR(nullptr, map.servoForId(200));
 }

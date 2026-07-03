@@ -65,6 +65,14 @@ class ConnectionService(QObject):
         # controls without each re-decoding StatusInfo.
         self._robot_state: int = -1
         self.status_received.connect(self._track_state)
+        # Status-poll lifecycle: QTimer.start()/stop() must run on the thread
+        # that owns the timer (this GUI-thread object). connect_to()'s worker
+        # and the client's link-lost callback both run on other threads, so
+        # they only emit `connected`; the queued delivery of this connection
+        # starts/stops the poll safely on the GUI thread. (Calling
+        # QTimer.singleShot(0, ...) from the worker never fired: the worker
+        # thread has no Qt event loop.)
+        self.connected.connect(self._on_connected_changed)
         self._maint_token: int = 0
         # Maintenance-lock keepalive: the firmware lock TTL is 1 s without a
         # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
@@ -169,9 +177,9 @@ class ConnectionService(QObject):
                     if client.connected and self._client is client:
                         self._connecting = False
                         self.connecting.emit(False)
+                        # The queued connected -> _on_connected_changed slot
+                        # starts the status poll on the GUI thread.
                         self.connected.emit(True)
-                        # Status polling must be started on the GUI thread (QTimer affinity).
-                        QTimer.singleShot(0, self._poll.start)
                         return
                     reason = f"connection to {attempt_port} was lost during handshake"
                     if client.last_error is not None:
@@ -235,7 +243,6 @@ class ConnectionService(QObject):
 
     def disconnect(self) -> None:
         self._connecting = False
-        self._poll.stop()
         self._drop_maint_lock(notify=False)
         if self._client is not None:
             self._client.stop()
@@ -859,6 +866,14 @@ class ConnectionService(QObject):
 
     # --- internal ---------------------------------------------------------
 
+    def _on_connected_changed(self, up: bool) -> None:
+        """Start/stop the status poll (GUI thread; see __init__ note)."""
+        if up:
+            self._poll.start()
+            self._poll_status()  # first poll immediately, not after 1 s
+        else:
+            self._poll.stop()
+
     def _poll_status(self) -> None:
         client = self._client
         if client is None:
@@ -881,7 +896,6 @@ class ConnectionService(QObject):
             return
         if client is not None and self._client is not client:
             return
-        self._poll.stop()
         self._drop_maint_lock()
         self.connecting.emit(False)
         self._client = None

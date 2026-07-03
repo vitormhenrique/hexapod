@@ -23,12 +23,13 @@ void test_default_servo_map() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
 
-  // 18 servos in (leg, joint) array order. DXL ids follow the wiring:
-  // coxa = 1..6, femur = 7..12, tibia = 13..18 (id = joint*6 + leg + 1).
+  // 18 servos in (leg, joint) array order. DXL ids follow the wiring
+  // leg-major: leg1 = coxa 1 / femur 2 / tibia 3, leg2 = 4/5/6, ...
+  // leg6 = 16/17/18 (id = leg*3 + joint + 1).
   for (uint8_t i = 0; i < kNumServos; ++i) {
     const uint8_t leg = i / kJointsPerLeg;
     const uint8_t joint = i % kJointsPerLeg;
-    TEST_ASSERT_EQUAL_UINT8(joint * kNumLegs + leg + 1, cfg.servos[i].id);
+    TEST_ASSERT_EQUAL_UINT8(leg * kJointsPerLeg + joint + 1, cfg.servos[i].id);
     TEST_ASSERT_EQUAL_UINT8(leg, cfg.servos[i].leg);
     TEST_ASSERT_EQUAL_UINT8(joint, cfg.servos[i].joint);
     TEST_ASSERT_TRUE(cfg.servos[i].min_tick < cfg.servos[i].max_tick);
@@ -36,10 +37,10 @@ void test_default_servo_map() {
 
   // Spot-check the published map (leg 1 -> index 0..2, leg 6 -> index 15..17).
   TEST_ASSERT_EQUAL_UINT8(1, cfg.servos[0].id);    // leg1 coxa
-  TEST_ASSERT_EQUAL_UINT8(7, cfg.servos[1].id);    // leg1 femur
-  TEST_ASSERT_EQUAL_UINT8(13, cfg.servos[2].id);   // leg1 tibia
-  TEST_ASSERT_EQUAL_UINT8(6, cfg.servos[15].id);   // leg6 coxa
-  TEST_ASSERT_EQUAL_UINT8(12, cfg.servos[16].id);  // leg6 femur
+  TEST_ASSERT_EQUAL_UINT8(2, cfg.servos[1].id);    // leg1 femur
+  TEST_ASSERT_EQUAL_UINT8(3, cfg.servos[2].id);    // leg1 tibia
+  TEST_ASSERT_EQUAL_UINT8(16, cfg.servos[15].id);  // leg6 coxa
+  TEST_ASSERT_EQUAL_UINT8(17, cfg.servos[16].id);  // leg6 femur
   TEST_ASSERT_EQUAL_UINT8(18, cfg.servos[17].id);  // leg6 tibia
 
   // Left legs (0,4,5) sign +1; right legs (1,2,3) sign -1.
@@ -298,7 +299,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(32283, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(43955, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {

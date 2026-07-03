@@ -326,7 +326,9 @@ def default_robot_config() -> RobotConfig:
         joint = i % JOINTS_PER_LEG
         cfg.servos.append(
             ServoConfig(
-                id=joint * NUM_LEGS + leg + 1,
+                # Leg-major wiring: leg1 = coxa 1 / femur 2 / tibia 3, ...
+                # leg6 = 16/17/18 (id = leg*3 + joint + 1).
+                id=leg * JOINTS_PER_LEG + joint + 1,
                 leg=leg,
                 joint=joint,
                 sign=1 if _is_left_leg(leg) else -1,

@@ -47,7 +47,8 @@ void test_stand_emits_all_mapped_joints_within_travel() {
 }
 
 // The emitted (leg, joint, id) triples match the default servo map order
-// (id = joint*6 + leg + 1), so dxlTask can Sync Write them directly.
+// (id = leg*3 + joint + 1, leg-major wiring), so dxlTask can Sync Write them
+// directly.
 void test_joint_ids_match_default_servo_map() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
@@ -62,8 +63,8 @@ void test_joint_ids_match_default_servo_map() {
       const PipelineJoint& j = out.joints[idx++];
       TEST_ASSERT_EQUAL_UINT8(leg, j.leg);
       TEST_ASSERT_EQUAL_UINT8(joint, j.joint);
-      TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(joint * kNumLegs + leg + 1),
-                              j.id);
+      TEST_ASSERT_EQUAL_UINT8(
+          static_cast<uint8_t>(leg * kJointsPerLeg + joint + 1), j.id);
     }
   }
 }

@@ -81,6 +81,16 @@ class MaintenanceApi {
   bool lockHeld(uint32_t now_ms) const {
     return locked_ && (now_ms - last_hb_ms_) <= ttl_ms_;
   }
+  // Refresh the TTL without a host MAINT_HEARTBEAT frame. Used by controlTask
+  // while a DXL maintenance job is pending/running: the job's bus busy-waits
+  // run at dxlTask priority and starve apiTask, so host heartbeats stall
+  // through no fault of the host. Only refreshes a still-valid lock (an
+  // already-expired lock is never resurrected, same rule as heartbeat()).
+  void feedTtl(uint32_t now_ms) {
+    if (lockHeld(now_ms)) {
+      last_hb_ms_ = now_ms;
+    }
+  }
   uint32_t token() const { return token_; }
   // Force-release the lock (call on E-stop / fault).
   void revoke();
