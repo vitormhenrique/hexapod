@@ -552,6 +552,15 @@ class ProtocolClient:
         r = self._send_built(api.build_set_joint_target(leg, joint, angle_cdeg))
         return api.parse_joint_target_result(r.payload) if r else None
 
+    def set_all_joint_targets(
+        self, angles_cdeg: "list[int] | tuple[int, ...]"
+    ) -> Optional[api.AllJointTargetResult]:
+        """Set all 18 joint targets atomically (leg-major, centidegrees) so the
+        whole body actuates in a single Sync-Write instead of cascading joint
+        by joint. Maintenance-gated."""
+        r = self._send_built(api.build_set_all_joint_targets(angles_cdeg))
+        return api.parse_all_joint_target_result(r.payload) if r else None
+
     # --- EEPROM-backed robot config --------------------------------------
     #
     # The serialized RobotConfig is larger than one frame, so reads/writes are

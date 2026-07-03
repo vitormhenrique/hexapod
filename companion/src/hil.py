@@ -648,19 +648,16 @@ def passive_pose(
             r.skip("torque-off check", "no servo_status records (DXL power off?)")
 
         if interactive and joints:
-            before = {
-                (j.leg, j.joint): j.angle_centideg for j in joints[-1][1].joints
-            }
+            before = {(j.leg, j.joint): j.angle_centideg for j in joints[-1][1].joints}
             typer.confirm(
-                "  Move any leg by hand, then press enter", default=True,
+                "  Move any leg by hand, then press enter",
+                default=True,
                 prompt_suffix=" ",
             )
             col2 = _collect(client, r, {"joint_state": 20}, 2.0)
             j2 = col2.get("joint_state")
             if j2:
-                after = {
-                    (j.leg, j.joint): j.angle_centideg for j in j2[-1][1].joints
-                }
+                after = {(j.leg, j.joint): j.angle_centideg for j in j2[-1][1].joints}
                 moved = [
                     k
                     for k in before
@@ -738,7 +735,9 @@ def servo_tuning(
         r.ok("DXL power on", f"has_control={pr.has_control}")
 
         servos = _scan_servos(client)
-        if not r.check("DXL scan finds servos", len(servos) > 0, f"{len(servos)} found"):
+        if not r.check(
+            "DXL scan finds servos", len(servos) > 0, f"{len(servos)} found"
+        ):
             r.finish()
         r.info(
             "ids: " + ", ".join(f"{s.id}(m{s.model},t{s.table_kind})" for s in servos)
@@ -836,10 +835,10 @@ def leg_lab(
     seeds = [  # (mount_x_mm, mount_y_mm, mount_z_mm, yaw_deg)
         (-65.6, -115.6, -16.5, 135.0),  # leg 1 rear-left
         (65.6, -115.6, -16.5, -135.0),  # leg 2 rear-right
-        (69.8, 0.0, -16.5, -90.0),      # leg 3 mid-right
-        (65.6, 115.6, -16.5, -45.0),    # leg 4 front-right
-        (-65.6, 115.6, -16.5, 45.0),    # leg 5 front-left
-        (-69.8, 0.0, -16.5, 90.0),      # leg 6 mid-left
+        (69.8, 0.0, -16.5, -90.0),  # leg 3 mid-right
+        (65.6, 115.6, -16.5, -45.0),  # leg 4 front-right
+        (-65.6, 115.6, -16.5, 45.0),  # leg 5 front-left
+        (-69.8, 0.0, -16.5, 90.0),  # leg 6 mid-left
     ]
     mx, my, mz, yaw = seeds[leg % 6]
     rad = math.radians(yaw + 90.0)
@@ -990,9 +989,7 @@ def sensor_dashboard(
         else:
             r.check("EEPROM 0x50 present", topo.eeprom_present, "")
             r.check("TCA mux 0x70 present", topo.mux_present, "")
-            present = [
-                i for i, ch in enumerate(topo.channels) if ch.state == 1
-            ]
+            present = [i for i, ch in enumerate(topo.channels) if ch.state == 1]
             r.ok(
                 "channel presence",
                 f"{len(topo.channels)} channels, present={present or 'none'}",
@@ -1037,8 +1034,9 @@ def foot_contact(port: Optional[str] = _PORT, baud: int = _BAUD) -> None:
         sensors = _retry(client.sensor_get_status)
         have_sensors = sensors is not None and sensors.present_mask != 0
         r.info(
-            f"sensors present_mask="
-            f"0x{sensors.present_mask:02X}" if sensors else "sensor status unknown"
+            f"sensors present_mask=" f"0x{sensors.present_mask:02X}"
+            if sensors
+            else "sensor status unknown"
         )
 
         res = _retry(lambda: client.contact_enable(True))
@@ -1501,9 +1499,7 @@ def run_all(
         ("mode-safety", lambda: mode_safety(port=port, baud=baud)),
         (
             "passive-pose",
-            lambda: passive_pose(
-                seconds=4.0, interactive=False, port=port, baud=baud
-            ),
+            lambda: passive_pose(seconds=4.0, interactive=False, port=port, baud=baud),
         ),
         (
             "servo-tuning",

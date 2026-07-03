@@ -187,6 +187,53 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
       *out_flags = 0x00;
       return true;
     }
+    case mainttargetmsg::kSetAllJoints: {
+      // 18 x angle_cdeg(i16), leg-major (leg 0 coxa/femur/tibia, leg 1, ...).
+      // Stored atomically in one handler call so controlTask rebuilds the full
+      // goal frame in a single cycle and dxlTask actuates every servo in ONE
+      // Sync-Write, instead of the whole-body pose cascading one joint at a
+      // time as 18 separate SET_JOINT_TARGET round-trips land.
+      constexpr uint16_t kNumJoints = config::kNumLegs * config::kJointsPerLeg;
+      if (req_len < kNumJoints * 2) {
+        return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
+                           out_flags);
+      }
+      dxl::ServoMap sm(*cfg_);
+      uint8_t stored = 0;
+      uint8_t clamp_mask[3] = {0, 0, 0};  // 18 bits, bit = leg*3 + joint
+      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+        for (uint8_t joint = 0; joint < config::kJointsPerLeg; ++joint) {
+          const uint8_t idx = static_cast<uint8_t>(
+              leg * config::kJointsPerLeg + joint);
+          const float angle_rad =
+              static_cast<float>(readI16(&req[idx * 2])) * kCentiDegToRad;
+          const dxl::JointCommand jc = sm.angleToTick(leg, joint, angle_rad);
+          if (jc.unmapped) continue;  // no servo for this slot: leave as-is
+          target_.tick[leg][joint] = jc.tick;
+          target_.set[leg][joint] = true;
+          const bool clamped = jc.clamped_low || jc.clamped_high;
+          target_.clamped[leg][joint] = clamped;
+          if (clamped) clamp_mask[idx >> 3] |= static_cast<uint8_t>(1u << (idx & 7));
+          ++stored;
+        }
+      }
+      ++target_.seq;  // single bump for the whole atomic pose update
+
+      // [result, state, stored_count(1), clamp_mask(3)] = 6 bytes.
+      if (out_cap < 6) {
+        return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
+                           out_flags);
+      }
+      out[0] = static_cast<uint8_t>(MaintTargetResult::Ok);
+      out[1] = live_state_;
+      out[2] = stored;
+      out[3] = clamp_mask[0];
+      out[4] = clamp_mask[1];
+      out[5] = clamp_mask[2];
+      *out_len = 6;
+      *out_flags = 0x00;
+      return true;
+    }
     default:
       return false;
   }

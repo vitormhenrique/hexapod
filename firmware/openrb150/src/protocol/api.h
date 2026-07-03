@@ -177,7 +177,7 @@ constexpr uint8_t kMaintenanceMsgLast = 0x5F;
 // Maintenance leg/joint target msg-id range (within the 0x50-0x5F block), from
 // protocol::mainttargetmsg.
 constexpr uint8_t kMaintTargetMsgFirst = 0x53;
-constexpr uint8_t kMaintTargetMsgLast = 0x54;
+constexpr uint8_t kMaintTargetMsgLast = 0x55;
 
 // DXL maintenance command msg-id range (0x60..0x6F block), from protocol::dxlmsg.
 constexpr uint8_t kDxlMsgFirst = 0x60;

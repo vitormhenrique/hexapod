@@ -246,6 +246,67 @@ void test_joint_target_clamps_high() {
   TEST_ASSERT_TRUE(t.clamped[0][0]);
 }
 
+void test_all_joints_stores_atomically_and_bumps_seq_once() {
+  config::RobotConfig cfg;
+  config::defaultRobotConfig(cfg);
+  MaintTargetApi api_obj;
+  api_obj.reset();
+  api_obj.setConfig(&cfg);
+  api_obj.setLiveState(kMacMaintenance, true);
+
+  // 18 angles, leg-major (leg*3 + joint). Use a modest in-travel value so no
+  // joint clamps; the aggregate response should report 18 stored, mask 0.
+  const int16_t cdeg = 1500;  // 15.00 deg, within +/-90 travel
+  const float ang = cdeg * (3.14159265358979323846f / 180.0f / 100.0f);
+  dxl::ServoMap sm(cfg);
+
+  uint8_t pl[36];
+  for (uint8_t i = 0; i < 18; ++i) putI16(&pl[i * 2], cdeg);
+
+  Header h;
+  uint8_t rp[kMaxPayload];
+  size_t n = 0;
+  runTarget(api_obj, mainttargetmsg::kSetAllJoints, pl, 36, &h, rp, &n);
+
+  TEST_ASSERT_EQUAL_UINT(6, n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintTargetResult::Ok), rp[0]);
+  TEST_ASSERT_EQUAL_UINT8(18, rp[2]);  // stored_count
+  TEST_ASSERT_EQUAL_UINT8(0, rp[3]);   // clamp_mask lo
+  TEST_ASSERT_EQUAL_UINT8(0, rp[4]);   // clamp_mask mid
+  TEST_ASSERT_EQUAL_UINT8(0, rp[5]);   // clamp_mask hi
+
+  // Every mapped joint stored the library tick, and the seq bumped exactly once.
+  const MaintTargetSet& t = api_obj.target();
+  TEST_ASSERT_EQUAL_UINT32(1, t.seq);
+  for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+    for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
+      const dxl::JointCommand want = sm.angleToTick(leg, j, ang);
+      TEST_ASSERT_TRUE(t.set[leg][j]);
+      TEST_ASSERT_EQUAL_UINT16(want.tick, t.tick[leg][j]);
+    }
+  }
+}
+
+void test_all_joints_short_payload_is_bad_request() {
+  config::RobotConfig cfg;
+  config::defaultRobotConfig(cfg);
+  MaintTargetApi api_obj;
+  api_obj.reset();
+  api_obj.setConfig(&cfg);
+  api_obj.setLiveState(kMacMaintenance, true);
+
+  uint8_t pl[34] = {0};  // one joint short of 36 bytes
+  Header h;
+  uint8_t rp[kMaxPayload];
+  size_t n = 0;
+  runTarget(api_obj, mainttargetmsg::kSetAllJoints, pl, 34, &h, rp, &n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintTargetResult::BadRequest),
+                          rp[0]);
+  TEST_ASSERT_TRUE(h.flags & api::flag::kError);
+  // Nothing stored on a malformed batch.
+  TEST_ASSERT_EQUAL_UINT32(0, api_obj.target().seq);
+}
+
 void test_rejected_when_not_in_maintenance() {
   config::RobotConfig cfg;
   config::defaultRobotConfig(cfg);
@@ -348,6 +409,8 @@ int main(int, char**) {
   RUN_TEST(test_leg_target_unreachable_reports_and_does_not_store);
   RUN_TEST(test_joint_target_matches_library_and_stores);
   RUN_TEST(test_joint_target_clamps_high);
+  RUN_TEST(test_all_joints_stores_atomically_and_bumps_seq_once);
+  RUN_TEST(test_all_joints_short_payload_is_bad_request);
   RUN_TEST(test_rejected_when_not_in_maintenance);
   RUN_TEST(test_rejected_when_lock_not_held);
   RUN_TEST(test_rejected_when_no_config);

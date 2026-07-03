@@ -153,9 +153,7 @@ class UrdfForwardKinematics:
             if joint.is_actuated or joint.parent in movable:
                 movable.add(joint.child)
         return [
-            name
-            for name in self.model.links
-            if name not in parents and name in movable
+            name for name in self.model.links if name not in parents and name in movable
         ]
 
     def foot_positions(self, angles: Optional[dict] = None) -> list:

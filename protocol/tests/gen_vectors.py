@@ -836,7 +836,7 @@ def build_config() -> dict:
     cfg = config_mod.default_robot_config()
     payload = config_mod.encode_robot_config(cfg)
 
-    # tick<->angle cases over a few default servos (sign +1 leg0, sign -1 leg1).
+    # tick<->angle cases over a few default servos (all legs now sign +1).
     smap = config_mod.ServoMap(cfg)
     tick_cases = []
     for leg, joint, tick in [

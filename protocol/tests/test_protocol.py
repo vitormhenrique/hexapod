@@ -642,6 +642,35 @@ def test_parse_joint_target_result():
     assert rej.result == api.MAINT_TARGET_REJECTED and rej.tick == 0
 
 
+def test_build_set_all_joint_targets_roundtrip():
+    angles = list(range(-800, 1000, 100))  # 18 distinct in-range values
+    assert len(angles) == 18
+    wire = api.build_set_all_joint_targets(angles, seq=11)
+    # 14-byte header + 36-byte payload; msg id sits in the maintenance block.
+    hdr, payload = decode_frame_body(wire[1:-1])
+    assert hdr.msg_id == api.MSG_SET_ALL_JOINT_TARGETS == 0x55
+    assert list(struct.unpack("<18h", payload)) == angles
+
+
+def test_build_set_all_joint_targets_requires_18():
+    with pytest.raises(ValueError):
+        api.build_set_all_joint_targets([0] * 17)
+
+
+def test_parse_all_joint_target_result():
+    ok = api.parse_all_joint_target_result(
+        bytes([api.MAINT_TARGET_OK, 8, 18, 0x00, 0x00, 0x00])
+    )
+    assert ok.ok and ok.stored_count == 18 and ok.clamp_mask == 0
+    # clamp mask is little-endian across 3 bytes (bit = leg*3 + joint).
+    clamp = api.parse_all_joint_target_result(
+        bytes([api.MAINT_TARGET_OK, 8, 18, 0x01, 0x00, 0x02])
+    )
+    assert clamp.clamp_mask == 0x020001 and clamp.stored_count == 18
+    rej = api.parse_all_joint_target_result(bytes([api.MAINT_TARGET_REJECTED, 2]))
+    assert rej.result == api.MAINT_TARGET_REJECTED and rej.stored_count == 0
+
+
 _DXL_BUILDERS = {
     "dxl_scan": lambda: api.build_dxl_scan(1, 18, seq=1),
     "dxl_ping": lambda: api.build_dxl_ping(5, seq=2),
@@ -1053,9 +1082,7 @@ def test_decode_api_stats_with_rx_health_tail():
     assert legacy.dropped_per_stream == dropped
     assert legacy.rx_frames == 0 and legacy.rx_bad == 0 and legacy.rx_overflow == 0
     # Partial tail (e.g. mid-version firmware) parses what is present.
-    partial = telemetry.decode_api_stats(
-        payload[: 4 + 4 * telemetry.NUM_STREAMS + 4]
-    )
+    partial = telemetry.decode_api_stats(payload[: 4 + 4 * telemetry.NUM_STREAMS + 4])
     assert partial.rx_frames == 1000 and partial.rx_bad == 0
     # Routed through the generic stream decoder as well.
     rec2 = telemetry.decode_stream(int(telemetry.StreamId.API_STATS), payload)
@@ -1292,7 +1319,7 @@ def test_servo_status_fallback_matches_joint_state_shape():
         servos=[
             telemetry.ServoStatus(1, 2048, 0, 0, 0, 0, 0),  # leg0 coxa, center -> 0deg
             telemetry.ServoStatus(2, 2389, 0, 0, 0, 0, 0),  # leg0 femur, +30deg
-            telemetry.ServoStatus(4, 1024, 0, 0, 0, 0, 0),  # leg1 coxa (sign -1)
+            telemetry.ServoStatus(4, 1024, 0, 0, 0, 0, 0),  # leg1 coxa (sign +1)
             telemetry.ServoStatus(200, 2048, 0, 0, 0, 0, 0),  # unmapped id -> skipped
         ]
     )
@@ -1304,9 +1331,9 @@ def test_servo_status_fallback_matches_joint_state_shape():
     assert joints[1].angle_centideg == round(
         cfgmod.tick_to_angle(cfg.servos[1], 2389) * cfgmod.RAD_TO_DEG * 100
     )
-    # leg1 coxa has sign -1, so a tick below center yields a positive angle.
+    # leg1 coxa has sign +1, so a tick below center yields a negative angle.
     assert joints[2].leg == 1 and joints[2].joint == 0
-    assert joints[2].angle_centideg > 0
+    assert joints[2].angle_centideg < 0
 
 
 def test_servo_status_fallback_clamps_out_of_range_ticks():

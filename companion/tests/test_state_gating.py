@@ -20,7 +20,6 @@ from types import SimpleNamespace
 
 from hexapod_protocol import telemetry as tlm
 
-
 # --- TelemetryBanner ---------------------------------------------------------
 
 
@@ -46,9 +45,7 @@ def test_banner_hidden_until_stream_goes_stale(qtbot) -> None:
     from ui.widgets import TelemetryBanner
 
     svc = _make_stub_service()
-    banner = TelemetryBanner(
-        svc, [(int(tlm.StreamId.SERVO_STATUS), "servo_status")]
-    )
+    banner = TelemetryBanner(svc, [(int(tlm.StreamId.SERVO_STATUS), "servo_status")])
     qtbot.addWidget(banner)
     banner.STALE_AFTER_S = 0.01
 

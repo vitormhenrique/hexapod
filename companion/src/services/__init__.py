@@ -21,6 +21,13 @@ from diagnostics import print_exception
 from transport import list_serial_ports, open_serial
 from transport.protocol_client import ProtocolClient
 
+# Firmware safety-state ids used by the passive-pose bench orchestration
+# (safety/system_state.h): the bus must be powered under MacMaintenance before
+# the FSM hands off to PassivePoseStream (AGENTS.md 5.5, hexapod_src-nkb).
+_STATE_DISARMED = 2
+_STATE_MAC_MAINTENANCE = 8
+_STATE_PASSIVE = 9
+
 
 class ConnectionService(QObject):
     connected = Signal(bool)
@@ -78,6 +85,10 @@ class ConnectionService(QObject):
         # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
         # background thread or MacMaintenance silently lapses to Disarmed.
         self._maint_hb_stop: Optional[threading.Event] = None
+        # True while a passive-pose flow owns the maintenance lock + DXL power
+        # it set up, so passive_exit only unwinds what it created (a user who
+        # was already doing bench maintenance is left in maintenance).
+        self._passive_owns_setup = False
         self._connecting = False
         self._connect_max_attempts = 5
         self._connect_retry_delay_s = 2.5
@@ -375,13 +386,163 @@ class ConnectionService(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     def passive_enter(self) -> None:
-        self._run_passive("enter", lambda c: c.passive_enter())
+        """Enter passive streaming with the DXL bus powered so joint data flows.
+
+        Passive mode reports servo *present positions*, which the firmware only
+        reads when the bus is powered and at least one servo has been scanned
+        (tasks.cpp gates the present-position read on
+        ``servoCount() > 0 && dxlPowerEnabled()``). Entering passive straight
+        from Disarmed leaves the bus unpowered, so the state changes but nothing
+        streams. This runs the documented bench flow: acquire the maintenance
+        lock, power the bus, scan, confirm torque off, request passive, then
+        subscribe to joint_state so the Passive Pose page updates live.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("passive enter: not connected")
+            return
+
+        def worker() -> None:
+            # 1) Maintenance lock (skip if already held) so DXL power + scan are
+            #    accepted by the firmware safety gate.
+            had_lock = bool(self._maint_token)
+            if not self._acquire_maint_lock(client):
+                self.error.emit("passive enter: maintenance lock rejected")
+                return
+            # Only unwind on exit what this flow set up; leave a user who was
+            # already in bench maintenance where they were.
+            self._passive_owns_setup = not had_lock
+            if not self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0):
+                self.error.emit("passive enter: did not reach maintenance")
+                return
+            self.event.emit("commit", "passive: maintenance acquired")
+
+            # 2) Power the DXL bus.
+            pw = client.dxl_power(True)
+            pr = pw.power() if pw and pw.done else None
+            if pr is None or not pr.power_on:
+                self.error.emit("passive enter: DXL power on failed")
+                return
+            self.event.emit("commit", "passive: DXL power on")
+
+            # 3) Scan so present positions exist. Freshly powered MX-28s take
+            #    ~1 s to answer, so retry a few times. Scan 1..18 (not the full
+            #    config space) to avoid the out-of-range scan watchdog trip
+            #    (hexapod_src-29n).
+            servos: list = []
+            for _ in range(4):
+                time.sleep(1.0)
+                if self._client is not client:
+                    return  # disconnected mid-flow
+                scan = client.dxl_scan(1, 18)
+                servos = scan.servos() if scan and scan.done else []
+                if servos:
+                    break
+            if not servos:
+                self.error.emit("passive enter: no servos found on scan")
+                return
+            self.event.emit("commit", f"passive: {len(servos)} servos scanned")
+
+            # 4) Torque off: passive mode requires all torque disabled, and the
+            #    FSM only enters PassivePoseStream once torque is confirmed off.
+            client.dxl_torque(False)
+
+            # 5) Request passive streaming.
+            res = client.passive_enter()
+            if res is None or not res.ok:
+                self.error.emit("passive enter: firmware rejected")
+                if res is not None:
+                    self.passive_result.emit("enter", res)
+                return
+            self.passive_result.emit("enter", res)
+            if not self._wait_state(client, _STATE_PASSIVE, timeout=2.0):
+                self.error.emit("passive enter: did not reach passive state")
+                return
+
+            # 6) Subscribe so joint_state actually streams to the UI.
+            client.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+            self.event.emit("commit", "passive streaming active")
+
+        threading.Thread(
+            target=worker, name="hexapod-passive-enter", daemon=True
+        ).start()
 
     def passive_exit(self) -> None:
-        self._run_passive("exit", lambda c: c.passive_exit())
+        """Exit passive streaming and unwind the bench setup passive_enter did.
+
+        With the maintenance lock still held the FSM returns to MacMaintenance
+        on exit, so power the bus back down there and release the lock, then
+        drop the joint_state subscription.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("passive exit: not connected")
+            return
+
+        def worker() -> None:
+            res = client.passive_exit()
+            if res is not None:
+                self.passive_result.emit("exit", res)
+            client.unsubscribe(int(tlm.StreamId.JOINT_STATE))
+            # Only unwind the power/lock if this flow set them up.
+            if self._passive_owns_setup and self._maint_token:
+                self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0)
+                client.dxl_power(False)
+                self._release_maint_lock(client)
+            self._passive_owns_setup = False
+            if res is None:
+                self.error.emit("passive exit: no response")
+
+        threading.Thread(
+            target=worker, name="hexapod-passive-exit", daemon=True
+        ).start()
 
     def passive_zero_reference(self) -> None:
         self._run_passive("zero", lambda c: c.passive_zero_reference())
+
+    # --- passive-pose orchestration helpers ------------------------------
+
+    def _wait_state(
+        self, client: ProtocolClient, target: int, timeout: float = 3.0
+    ) -> bool:
+        """Poll GET_STATUS until the firmware reports ``target`` (or timeout).
+
+        Command replies echo the state *before* the control task ticks, so the
+        bench flow settles on the post-transition state by polling directly
+        rather than trusting the immediate ack (mirrors the HIL helper)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._client is not client:
+                return False
+            st = client.get_status()
+            if st is not None and st.state == target:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _acquire_maint_lock(self, client: ProtocolClient) -> bool:
+        """Acquire (or reuse) the maintenance lock and start its heartbeat."""
+        if self._maint_token:
+            return True
+        res = client.enter_maintenance()
+        if res is None or not res.ok or not res.token:
+            return False
+        self._maint_token = res.token
+        self._start_maint_heartbeat(client, res.token)
+        self.maint_lock_changed.emit(True, res.token)
+        return True
+
+    def _release_maint_lock(self, client: ProtocolClient) -> None:
+        """Stop the heartbeat and release the held maintenance lock."""
+        token = self._maint_token
+        if not token:
+            return
+        self._stop_maint_heartbeat()
+        res = client.exit_maintenance(token)
+        self._maint_token = 0
+        self.maint_lock_changed.emit(False, 0)
+        if res is not None:
+            self.maint_result.emit(res)
 
     def passive_set_stream_rate(self, rate_hz: int) -> None:
         client = self._client
@@ -533,7 +694,15 @@ class ConnectionService(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     def enter_maintenance(self) -> None:
-        """Acquire the maintenance lock; cache the returned token on success."""
+        """Acquire the maintenance lock, then power and scan the DXL bus.
+
+        Bench work always needs a powered, enumerated bus, so this orchestrates
+        the full setup on a worker thread: acquire the lock, wait for
+        MacMaintenance, power the DYNAMIXEL rail, then scan so present positions
+        and servo profiles are available. Power/scan results are emitted on
+        ``dxl_result`` so the servo pages update. A power/scan failure leaves
+        the lock held (the user can retry) rather than tearing everything down.
+        """
         client = self._client
         if client is None:
             self.error.emit("maintenance: not connected")
@@ -544,18 +713,49 @@ class ConnectionService(QObject):
             if res is None:
                 self.error.emit("maintenance: no response")
                 return
-            if res.ok and res.token:
-                self._maint_token = res.token
-                self._start_maint_heartbeat(client, res.token)
-                self.maint_lock_changed.emit(True, res.token)
-                self.event.emit(
-                    "commit", f"maintenance lock acquired (token {res.token})"
-                )
-            else:
+            if not (res.ok and res.token):
                 self.event.emit("error", "maintenance lock rejected")
+                self.maint_result.emit(res)
+                return
+            self._maint_token = res.token
+            self._start_maint_heartbeat(client, res.token)
+            self.maint_lock_changed.emit(True, res.token)
+            self.event.emit("commit", f"maintenance lock acquired (token {res.token})")
             self.maint_result.emit(res)
 
-        threading.Thread(target=worker, daemon=True).start()
+            if not self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0):
+                self.error.emit("maintenance: did not reach MacMaintenance")
+                return
+
+            # Power the DXL rail so servos can be scanned/moved.
+            pw = client.dxl_power(True)
+            self.dxl_result.emit("power", pw)
+            pr = pw.power() if pw and pw.done else None
+            if pr is None or not pr.power_on:
+                self.error.emit("maintenance: DXL power on failed")
+                return
+            self.event.emit("commit", "maintenance: DXL power on")
+
+            # Scan so present positions/profiles exist. Freshly powered MX-28s
+            # take ~1 s to answer, so retry. Scan 1..18 (not the full config
+            # space) to avoid the out-of-range scan watchdog trip (hexapod_src-29n).
+            scan = None
+            servos: list = []
+            for _ in range(4):
+                time.sleep(1.0)
+                if self._client is not client:
+                    return  # disconnected mid-flow
+                scan = client.dxl_scan(1, 18)
+                servos = scan.servos() if scan and scan.done else []
+                if servos:
+                    break
+            self.dxl_result.emit("scan", scan)
+            if not servos:
+                self.error.emit("maintenance: no servos found on scan")
+                return
+            self.event.emit("commit", f"maintenance: {len(servos)} servos scanned")
+
+        threading.Thread(target=worker, name="hexapod-enter-maint", daemon=True).start()
 
     def exit_maintenance(self) -> None:
         """Release the cached maintenance lock token."""
@@ -770,11 +970,14 @@ class ConnectionService(QObject):
         )
 
     def center_all_joints(self, angle_cdeg: int = 0) -> None:
-        """Send a maintenance joint target for every (leg, joint).
+        """Send every (leg, joint) target in ONE atomic batch command.
 
         Angle 0 centidegrees maps to the servo center tick (2048 = 180 deg on
-        the horn). Honored only in MacMaintenance with the lock held; each
-        target is clamped by the configured servo travel in firmware.
+        the horn). Honored only in MacMaintenance with the lock held. Because
+        all 18 joints are stored in a single firmware handler call, the control
+        loop rebuilds the whole goal frame in one cycle and every servo actuates
+        together in a single Sync-Write instead of cascading joint by joint.
+        Each target is clamped by the configured servo travel in firmware.
         """
         client = self._client
         if client is None:
@@ -782,21 +985,16 @@ class ConnectionService(QObject):
             return
 
         def worker() -> None:
-            ok = 0
-            total = 0
-            last = None
-            for leg in range(6):
-                for joint in range(3):
-                    total += 1
-                    res = client.set_joint_target(leg, joint, angle_cdeg)
-                    last = res
-                    if res is not None and res.result == 0:
-                        ok += 1
-            if ok == total:
-                self.event.emit("commit", f"center all: {ok}/{total} joints accepted")
+            res = client.set_all_joint_targets([angle_cdeg] * 18)
+            if res is None:
+                self.event.emit("error", "center all: rejected or timed out")
+            elif res.ok:
+                self.event.emit(
+                    "commit", f"center all: {res.stored_count}/18 joints accepted"
+                )
             else:
-                self.event.emit("error", f"center all: only {ok}/{total} accepted")
-            self.joint_target_result.emit(last)
+                self.event.emit("error", f"center all: rejected (result {res.result})")
+            self.joint_target_result.emit(res)
 
         threading.Thread(target=worker, name="hexapod-center-all", daemon=True).start()
 

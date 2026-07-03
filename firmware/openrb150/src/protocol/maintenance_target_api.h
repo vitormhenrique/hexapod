@@ -13,6 +13,9 @@
 //
 //   SET_LEG_TARGET   (0x53): leg, foot x/y/z (mm, body frame) -> IK -> 3 ticks
 //   SET_JOINT_TARGET (0x54): leg, joint, angle (centidegrees) -> 1 tick
+//   SET_ALL_JOINTS   (0x55): 18 joint angles (centidegrees, leg-major) stored
+//                            atomically so the whole body actuates in ONE
+//                            Sync-Write instead of cascading joint by joint.
 //
 // This handler only validates, solves, clamps and STORES the resulting goal
 // ticks (MaintTargetSet); it never touches the DXL bus. The control/dxl task
@@ -43,8 +46,9 @@ namespace protocol {
 namespace mainttargetmsg {
 constexpr uint8_t kSetLegTarget = 0x53;
 constexpr uint8_t kSetJointTarget = 0x54;
+constexpr uint8_t kSetAllJoints = 0x55;
 constexpr uint8_t kFirst = kSetLegTarget;
-constexpr uint8_t kLast = kSetJointTarget;
+constexpr uint8_t kLast = kSetAllJoints;
 inline bool isMaintTargetMsg(uint8_t id) { return id >= kFirst && id <= kLast; }
 }  // namespace mainttargetmsg
 

@@ -358,7 +358,6 @@ class ModeSafetyPage(BasePage):
         (api.FEATURE_TERRAIN_LEVELING, "Terrain Leveling"),
         (api.FEATURE_SENSOR_POLLING, "Sensor Polling"),
         (api.FEATURE_JETSON_CONTROL, "Jetson Control"),
-        (api.FEATURE_PASSIVE_POSE, "Passive Pose"),
     ]
 
     REASON_NAMES = {
@@ -691,9 +690,7 @@ class ModeSafetyPage(BasePage):
             if pr is None:
                 self.bench_lbl.setText("DXL power: no decode")
             else:
-                self.bench_lbl.setText(
-                    f"DXL power: {'ON' if pr.power_on else 'OFF'}"
-                )
+                self.bench_lbl.setText(f"DXL power: {'ON' if pr.power_on else 'OFF'}")
         elif len(res.data) >= 2:
             self.bench_lbl.setText(
                 f"Torque {'ON' if res.data[0] else 'OFF'} \u2014 acked by "
@@ -748,27 +745,38 @@ class ModeSafetyPage(BasePage):
 
         for btn in (self.disarm_btn, self.set_disarmed_btn, self.force_estop_btn):
             gate(btn, con, "Connect to the robot first.")
-        gate(self.arm_btn, con and st != 9,
-             "Connect first; exit passive pose before arming.")
-        gate(self.clear_btn, con and st in (-1, 10, 11, 12),
-             "No latched fault/E-stop to clear.")
+        gate(
+            self.arm_btn,
+            con and st != 9,
+            "Connect first; exit passive pose before arming.",
+        )
+        gate(
+            self.clear_btn,
+            con and st in (-1, 10, 11, 12),
+            "No latched fault/E-stop to clear.",
+        )
         gate(
             self.enter_maint_btn,
             con and not held and st in (-1, 2, 4),
             "Requires connection and a Disarmed / Stand Ready robot.",
         )
-        gate(self.exit_maint_btn, con and held,
-             "The maintenance lock is not held.")
+        gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
         gate(
             self.enter_passive_btn,
             con and st in (-1, 2, 8),
             "Requires connection and a Disarmed or Maintenance robot.",
         )
-        gate(self.exit_passive_btn, con and st == 9,
-             "The robot is not in passive pose mode.")
+        gate(
+            self.exit_passive_btn,
+            con and st == 9,
+            "The robot is not in passive pose mode.",
+        )
         for btn in self._bench_buttons:
-            gate(btn, con and held,
-                 "Enter Maintenance first (bench control needs the lock).")
+            gate(
+                btn,
+                con and held,
+                "Enter Maintenance first (bench control needs the lock).",
+            )
 
     def _toggle(self, name: str, rate: int, checked: bool) -> None:
         sid = int(tlm.stream_id_from_name(name))
@@ -997,9 +1005,7 @@ class LegLabPage(BasePage):
         slay.addStretch(1)
         self.content.addWidget(safety)
 
-        self.banner = self.add_telemetry_banner(
-            [(tlm.StreamId.LEG_STATE, "leg_state")]
-        )
+        self.banner = self.add_telemetry_banner([(tlm.StreamId.LEG_STATE, "leg_state")])
 
         self._connected = False
         self._state = -1
@@ -1184,11 +1190,9 @@ class LegLabPage(BasePage):
             con and not held and self._state in (-1, 2, 4),
             "Requires connection and a Disarmed / Stand Ready robot.",
         )
-        gate(self.exit_maint_btn, con and held,
-             "The maintenance lock is not held.")
+        gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
         for btn in (self.send_foot_btn, self.send_joint_btn):
-            gate(btn, con and held,
-                 "Enter Maintenance first — targets need the lock.")
+            gate(btn, con and held, "Enter Maintenance first — targets need the lock.")
 
     def _on_maint_result(self, res) -> None:
         if res.token:
@@ -1220,6 +1224,20 @@ class LegLabPage(BasePage):
             self.joint_result.setText("failed (rejected or timed out)")
             return
         state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
+        # center-all sends an aggregate (AllJointTargetResult) with a stored
+        # count and an 18-bit clamp mask; single-joint sends a per-joint result.
+        if hasattr(res, "stored_count"):
+            if res.ok:
+                clamped = bin(res.clamp_mask).count("1")
+                self.joint_result.setText(
+                    f"ok \u2014 {res.stored_count}/18 joints; "
+                    f"{clamped} clamped; state {state}"
+                )
+            else:
+                self.joint_result.setText(
+                    f"rejected (result {res.result}); state {state}"
+                )
+            return
         if res.ok:
             flags = []
             if res.clamped_low:
@@ -2700,7 +2718,8 @@ class PassivePosePage(BasePage):
         enter_ok = con and st in (-1, 2, 8)
         self.enter_btn.setEnabled(enter_ok)
         self.enter_btn.setToolTip(
-            "" if enter_ok
+            ""
+            if enter_ok
             else "Requires connection and a Disarmed or Maintenance robot."
         )
         exit_ok = con and st == 9

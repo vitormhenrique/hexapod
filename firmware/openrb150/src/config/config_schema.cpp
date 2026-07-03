@@ -75,10 +75,6 @@ constexpr LegSeed kLegSeeds[kNumLegs] = {
     {-698, 0, -165, 9000},        // leg 6 mid-left
 };
 
-// Left legs (1, 5, 6) -> index {0, 4, 5} use sign +1; right legs (2, 3, 4) ->
-// index {1, 2, 3} use sign -1 (HexNav IK ref section 7).
-bool isLeftLeg(uint8_t leg) { return leg == 0 || leg == 4 || leg == 5; }
-
 }  // namespace
 
 void defaultRobotConfig(RobotConfig& cfg) {
@@ -119,7 +115,9 @@ void defaultRobotConfig(RobotConfig& cfg) {
     s.id = static_cast<uint8_t>(leg * kJointsPerLeg + joint + 1);
     s.leg = leg;
     s.joint = joint;
-    s.sign = isLeftLeg(leg) ? 1 : -1;
+    // All legs share a +1 servo sign; hardware validation showed the right
+    // legs (2, 3, 4) were mirrored the wrong way under the old -1 rule.
+    s.sign = 1;
     s.trim_ticks = 0;
     s.min_tick = static_cast<uint16_t>(kServoCenterTick - 1024);  // 1024
     s.max_tick = static_cast<uint16_t>(kServoCenterTick + 1024);  // 3072

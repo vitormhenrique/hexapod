@@ -72,6 +72,7 @@ MSG_EXIT_MAINTENANCE = 0x51
 MSG_MAINT_HEARTBEAT = 0x52
 MSG_SET_LEG_TARGET = 0x53
 MSG_SET_JOINT_TARGET = 0x54
+MSG_SET_ALL_JOINT_TARGETS = 0x55
 
 # Telemetry frame msg-id base: a telemetry frame for stream s arrives with
 # header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
@@ -1329,6 +1330,25 @@ def build_set_joint_target(
     )
 
 
+def build_set_all_joint_targets(
+    angles_cdeg: "list[int] | tuple[int, ...]", seq: int = 0
+) -> bytes:
+    """Build a SET_ALL_JOINT_TARGETS command: 18 joint angles in centidegrees,
+    leg-major order (leg 0 coxa/femur/tibia, leg 1, ... leg 5). Stored
+    atomically in firmware so the whole body actuates in a single Sync-Write
+    instead of cascading joint by joint. Maintenance-gated.
+    """
+    if len(angles_cdeg) != 18:
+        raise ValueError(
+            f"SET_ALL_JOINT_TARGETS needs 18 angles, got {len(angles_cdeg)}"
+        )
+    return build_command(
+        MSG_SET_ALL_JOINT_TARGETS,
+        seq=seq,
+        payload=struct.pack("<18h", *angles_cdeg),
+    )
+
+
 @dataclass
 class LegTargetResult:
     result: int
@@ -1350,6 +1370,18 @@ class JointTargetResult:
     clamped_low: bool
     clamped_high: bool
     tick: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == MAINT_TARGET_OK
+
+
+@dataclass
+class AllJointTargetResult:
+    result: int
+    state: int
+    stored_count: int
+    clamp_mask: int  # 18-bit mask, bit = leg*3 + joint set if that joint clamped
 
     @property
     def ok(self) -> bool:
@@ -1398,6 +1430,23 @@ def parse_joint_target_result(payload: bytes) -> JointTargetResult:
         state,
         False,
         False,
+        0,
+    )
+
+
+def parse_all_joint_target_result(payload: bytes) -> AllJointTargetResult:
+    """Decode a SET_ALL_JOINT_TARGETS response
+    ([result, state, stored_count, clamp_mask(3 bytes, little-endian 18 bits)]).
+    A short payload is a rejected/error status with no counts.
+    """
+    if len(payload) >= 6:
+        mask = payload[3] | (payload[4] << 8) | (payload[5] << 16)
+        return AllJointTargetResult(payload[0], payload[1], payload[2], mask)
+    state = payload[1] if len(payload) >= 2 else 0
+    return AllJointTargetResult(
+        payload[0] if payload else MAINT_TARGET_BAD_REQUEST,
+        state,
+        0,
         0,
     )
 
@@ -2031,9 +2080,7 @@ def build_controller_get_bindings(seq: int = 0) -> bytes:
     return build_command(MSG_CONTROLLER_GET_BINDINGS, seq=seq)
 
 
-def build_controller_set_bindings(
-    bindings: ControllerBindings, seq: int = 0
-) -> bytes:
+def build_controller_set_bindings(bindings: ControllerBindings, seq: int = 0) -> bytes:
     """Build a CONTROLLER_SET_BINDINGS command staging a new remap table. The
     firmware validates every source/trick range and rejects bad payloads."""
     return build_command(

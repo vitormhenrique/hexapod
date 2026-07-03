@@ -66,15 +66,15 @@ void test_positive_angle_applies_sign() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  // +45 deg. Left leg (leg 0) sign +1 -> tick above center; right leg (leg 1)
-  // sign -1 -> tick below center. Offset magnitude = 45 * 4096/360 = 512.
+  // +45 deg. All legs use sign +1 -> tick above center for both leg 0 and
+  // leg 1. Offset magnitude = 45 * 4096/360 = 512.
   const float angle = 45.0f * kDegToRad;
   JointCommand left = map.angleToTick(0, 0, angle);
   JointCommand right = map.angleToTick(1, 0, angle);
   assertTickNear(kServoCenterTick + 512, left.tick);
-  assertTickNear(kServoCenterTick - 512, right.tick);
+  assertTickNear(kServoCenterTick + 512, right.tick);
   TEST_ASSERT_FALSE(left.clamped_high);
-  TEST_ASSERT_FALSE(right.clamped_low);
+  TEST_ASSERT_FALSE(right.clamped_high);
 }
 
 void test_trim_offsets_center() {
@@ -124,7 +124,7 @@ void test_round_trip_angle_tick_angle() {
   cfg.servos[3].trim_ticks = -25;  // exercise trim in the inverse too
   ServoMap map(cfg);
 
-  // leg index 1 (right, sign -1), coxa. Pick an in-range angle.
+  // leg index 1 (sign +1), coxa. Pick an in-range angle.
   const float angle = 30.0f * kDegToRad;
   JointCommand c = map.angleToTick(1, 0, angle);
   TEST_ASSERT_FALSE(c.clamped_low);

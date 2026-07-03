@@ -306,10 +306,6 @@ _LEG_SEEDS = (
 )
 
 
-def _is_left_leg(leg: int) -> bool:
-    return leg in (0, 4, 5)
-
-
 def default_robot_config() -> RobotConfig:
     """Compiled SAFE defaults, mirroring ``defaultRobotConfig`` (HexNav)."""
     cfg = RobotConfig(schema_version=SCHEMA_VERSION, robot_name="HexNav")
@@ -331,7 +327,9 @@ def default_robot_config() -> RobotConfig:
                 id=leg * JOINTS_PER_LEG + joint + 1,
                 leg=leg,
                 joint=joint,
-                sign=1 if _is_left_leg(leg) else -1,
+                # All legs share a +1 sign; hardware validation showed the
+                # right legs (2, 3, 4) were mirrored the wrong way under -1.
+                sign=1,
                 trim_ticks=0,
                 min_tick=SERVO_CENTER_TICK - 1024,  # 1024
                 max_tick=SERVO_CENTER_TICK + 1024,  # 3072

@@ -43,11 +43,11 @@ void test_default_servo_map() {
   TEST_ASSERT_EQUAL_UINT8(17, cfg.servos[16].id);  // leg6 femur
   TEST_ASSERT_EQUAL_UINT8(18, cfg.servos[17].id);  // leg6 tibia
 
-  // Left legs (0,4,5) sign +1; right legs (1,2,3) sign -1.
+  // All legs use sign +1 (hardware validation: right legs were mirrored).
   TEST_ASSERT_EQUAL_INT8(1, cfg.servos[0].sign);    // leg 0 (left)
-  TEST_ASSERT_EQUAL_INT8(-1, cfg.servos[3].sign);   // leg 1 (right)
-  TEST_ASSERT_EQUAL_INT8(-1, cfg.servos[6].sign);   // leg 2 (right)
-  TEST_ASSERT_EQUAL_INT8(-1, cfg.servos[9].sign);   // leg 3 (right)
+  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[3].sign);    // leg 1 (right)
+  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[6].sign);    // leg 2 (right)
+  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[9].sign);    // leg 3 (right)
   TEST_ASSERT_EQUAL_INT8(1, cfg.servos[12].sign);   // leg 4 (left)
   TEST_ASSERT_EQUAL_INT8(1, cfg.servos[15].sign);   // leg 5 (left)
 }
@@ -299,7 +299,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(43955, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(6689, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {
