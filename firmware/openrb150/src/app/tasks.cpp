@@ -752,6 +752,13 @@ void controlTask(void*) {
     rc_in.kill = g_rcStatus.kill;
     rc_in.armed = g_rcStatus.armed;
     rc_in.autonomy_enabled = g_rcStatus.autonomy;
+    // Mirror the live USB MaintenanceApi lock (the real ENTER/EXIT/HEARTBEAT
+    // owner) into the arbiter so a held bench lock actually grants
+    // MacMaintenance motion authority (hexapod_src-0y9: previously only the
+    // arbiter's own never-acquired token counted, so the motion gate stayed
+    // closed in maintenance and accepted joint targets were never actuated).
+    const bool maint_held = g_maintApi.lockHeld(now_ms);
+    g_arbiter.setExternalMacLock(maint_held, g_maintApi.token());
     const safety::ArbiterOutput& arb = g_arbiter.update(rc_in, now_ms);
     g_commandSource = static_cast<uint8_t>(arb.source);
     g_motionAuthorized = arb.motion_authorized;
@@ -797,8 +804,8 @@ void controlTask(void*) {
     si.mac_lock_held = g_arbiter.macLockHeld(now_ms);
     // The maintenance lock is owned by the USB MaintenanceApi; a held, fresh
     // lock is both the maintenance request and the lock-held input the FSM
-    // keys on to enter/hold MacMaintenance (AGENTS.md 6.4).
-    const bool maint_held = g_maintApi.lockHeld(now_ms);
+    // keys on to enter/hold MacMaintenance (AGENTS.md 6.4). maint_held was
+    // sampled above (and mirrored into the arbiter) this cycle.
     si.mac_lock_held = si.mac_lock_held || maint_held;
     si.maintenance_request = maint_held;
     si.passive_request = g_passiveApi.requested();
@@ -886,8 +893,19 @@ void controlTask(void*) {
       applied_cfg_rev = cfg_rev;
     }
 
+    // Tracks whether the previous cycle ran under MacMaintenance authority so
+    // the entry edge can clear stale bench targets (see below).
+    static bool prev_maint_authority = false;
+
     if (g_motionGate && arb.source == safety::CommandSource::MacMaintenance) {
       // --- Maintenance actuation (lmt.4) ----------------------------------
+      // On each entry into maintenance authority, forget any joint/leg targets
+      // stored by a previous bench session so enabling torque can never replay
+      // stale motion; servos hold their seed pose until a fresh command lands.
+      if (!prev_maint_authority) {
+        g_maintTargetApi.clearTargets();
+      }
+      prev_maint_authority = true;
       // Bench control: actuate the stored per-joint maintenance target ticks
       // directly (no gait). Only joints the operator has explicitly commanded
       // (set[][]) and that map to a servo are written; uncommanded joints hold
@@ -929,6 +947,7 @@ void controlTask(void*) {
       applied_intent_seq = 0xFFFFFFFFu;
       applied_gait = 0xFF;
     } else if (g_motionGate) {
+      prev_maint_authority = false;
       const protocol::MotionIntent& intent = g_motionApi.intent();
       const bool rc_drives = (arb.source == safety::CommandSource::Rc);
 
@@ -1060,6 +1079,7 @@ void controlTask(void*) {
         xSemaphoreGive(g_goalMutex);
       }
     } else {
+      prev_maint_authority = false;
       g_goalValid = false;
       g_trickEngine.cancel();            // gate closed / E-stop: drop any trick
       applied_intent_seq = 0xFFFFFFFFu;  // force re-apply on next authorisation
@@ -1224,6 +1244,23 @@ void runQueuedDxlJob() {
     }
     case protocol::dxljob::Type::Torque: {
       const bool on = (job.arg0 != 0);
+      if (on) {
+        // Seed goal := present for every servo with a fresh status read before
+        // enabling torque, so no servo snaps to a stale Goal Position register
+        // (same lmt.4 contract as the arming seed-then-enable path).
+        dxl::GoalTarget hold[config::kNumServos];
+        uint8_t hn = 0;
+        for (uint8_t s = 0; s < g_servoStatusCount && hn < config::kNumServos;
+             ++s) {
+          if (!g_servoStatus[s].ok) continue;
+          int32_t pp = g_servoStatus[s].present_position;
+          if (pp < 0) pp = 0;
+          hold[hn].id = g_servoStatus[s].id;
+          hold[hn].tick = static_cast<uint16_t>(pp);
+          ++hn;
+        }
+        if (hn > 0) g_dxlBus.writeGoalPositions(hold, hn);
+      }
       const uint8_t acked = g_dxlBus.setTorqueAll(on);
       data[len++] = on ? 1 : 0;
       data[len++] = acked;
@@ -1463,7 +1500,15 @@ void dxlTask(void*) {
     // the snapshot is normally already fresh on this edge; if it is not (cold
     // start right after a scan) we keep torque off and retry next cycle rather
     // than enable torque against an unknown goal.
-    if (authorized && !prev_authorized && have_servos) {
+    //
+    // Bench exception (hexapod_src-0y9): when MacMaintenance owns motion the
+    // operator controls torque explicitly via the DXL_TORQUE job (which does
+    // its own seed-then-enable), so entering maintenance must NOT silently
+    // stiffen the robot.
+    const bool maint_authority =
+        g_commandSource ==
+        static_cast<uint8_t>(safety::CommandSource::MacMaintenance);
+    if (authorized && !prev_authorized && have_servos && !maint_authority) {
       torque_seed_pending = true;
     }
     if (authorized && torque_seed_pending && have_servos) {

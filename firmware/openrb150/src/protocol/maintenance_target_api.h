@@ -104,6 +104,11 @@ class MaintTargetApi {
 
   const MaintTargetSet& target() const { return target_; }
 
+  // Forget all stored joint/leg targets (keeps config + gate state). Called on
+  // each MacMaintenance entry so a previous bench session's targets can never
+  // replay as motion when torque is next enabled.
+  void clearTargets();
+
   // Dispatch a maintenance target command. Returns false if `msg_id` is not in
   // the maintenance-target range (so the api dispatcher can try the next
   // group). On a handled command writes the response payload and returns true.

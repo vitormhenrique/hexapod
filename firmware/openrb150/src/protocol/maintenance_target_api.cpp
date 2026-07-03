@@ -28,6 +28,10 @@ void MaintTargetApi::reset() {
   cfg_ = nullptr;
   live_state_ = 0;
   lock_held_ = false;
+  clearTargets();
+}
+
+void MaintTargetApi::clearTargets() {
   target_.seq = 0;
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
     for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {

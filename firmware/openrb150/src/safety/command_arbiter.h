@@ -73,7 +73,19 @@ class CommandArbiter {
   bool macLockHeartbeat(uint32_t token, uint32_t now_ms);
   // Release the lock if `token` currently holds it (no-op otherwise).
   void releaseMacLock(uint32_t token);
-  bool macLockHeld(uint32_t now_ms) const { return macLockValid(now_ms); }
+  bool macLockHeld(uint32_t now_ms) const {
+    return macLockValid(now_ms) || ext_mac_held_;
+  }
+
+  // Mirror of the USB MaintenanceApi lock (the live ENTER/EXIT/HEARTBEAT
+  // token+TTL owner). The control task republishes its state each cycle so
+  // the arbiter can grant MacMaintenance motion authority to the real bench
+  // lock, not only to its own (legacy, test-only) token machinery. Kill /
+  // host-estop handling in update() still overrides a mirrored lock.
+  void setExternalMacLock(bool held, uint32_t token) {
+    ext_mac_held_ = held;
+    ext_mac_token_ = held ? token : 0;
+  }
 
   // --- Jetson heartbeat -----------------------------------------------------
   void jetsonHeartbeat(uint32_t now_ms);
@@ -101,6 +113,10 @@ class CommandArbiter {
   uint32_t mac_lock_token_ = 0;
   uint32_t mac_lock_last_ms_ = 0;
   uint32_t next_token_ = 1;  // monotonically increasing, never 0
+
+  // External (MaintenanceApi) lock mirror; see setExternalMacLock().
+  bool ext_mac_held_ = false;
+  uint32_t ext_mac_token_ = 0;
 
   bool host_estop_ = false;
   bool last_kill_ = true;   // start safe (killed)

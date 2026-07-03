@@ -52,6 +52,7 @@ class ConnectionService(QObject):
     passive_result = Signal(str, object)  # kind, api.PassiveResult
     passive_rate_result = Signal(object)  # api.PassiveRateResult
     maint_lock_changed = Signal(bool, int)  # held, token
+    state_changed = Signal(int)  # latest safety state (-1 = unknown/disconnected)
 
     def __init__(self) -> None:
         super().__init__()
@@ -59,7 +60,11 @@ class ConnectionService(QObject):
         self._poll = QTimer(self)
         self._poll.setInterval(1000)
         self._poll.timeout.connect(self._poll_status)
-        self._last_state: Optional[int] = None
+        # Latest firmware safety state (-1 = unknown). Tracked on the GUI
+        # thread via our own status_received signal so pages can gate
+        # controls without each re-decoding StatusInfo.
+        self._robot_state: int = -1
+        self.status_received.connect(self._track_state)
         self._maint_token: int = 0
         # Maintenance-lock keepalive: the firmware lock TTL is 1 s without a
         # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
@@ -80,6 +85,21 @@ class ConnectionService(QObject):
     @property
     def is_connected(self) -> bool:
         return self._client is not None and self._client.connected
+
+    @property
+    def robot_state(self) -> int:
+        """Latest safety state from status polling (-1 when unknown)."""
+        return self._robot_state
+
+    def _track_state(self, st) -> None:
+        if st.state != self._robot_state:
+            self._robot_state = st.state
+            self.state_changed.emit(st.state)
+
+    def _reset_state(self) -> None:
+        if self._robot_state != -1:
+            self._robot_state = -1
+            self.state_changed.emit(-1)
 
     def connect_to(self, port: str, baud: int = 115200) -> None:
         """Open the port and handshake in a worker thread (non-blocking)."""
@@ -220,6 +240,7 @@ class ConnectionService(QObject):
         if self._client is not None:
             self._client.stop()
             self._client = None
+        self._reset_state()
         self.connected.emit(False)
         self.event.emit("disconnect", "link closed")
 
@@ -864,5 +885,6 @@ class ConnectionService(QObject):
         self._drop_maint_lock()
         self.connecting.emit(False)
         self._client = None
+        self._reset_state()
         if not self._connecting:
             self.connected.emit(False)

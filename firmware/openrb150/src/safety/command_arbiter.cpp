@@ -11,6 +11,8 @@ void CommandArbiter::reset() {
   mac_lock_token_ = 0;
   mac_lock_last_ms_ = 0;
   next_token_ = 1;
+  ext_mac_held_ = false;
+  ext_mac_token_ = 0;
   host_estop_ = false;
   last_kill_ = true;
   last_armed_ = false;
@@ -78,6 +80,8 @@ const ArbiterOutput& CommandArbiter::update(const RcInputs& rc,
   // RC kill / host estop overrides everything and revokes any maintenance lock.
   if (kill_active) {
     revokeMacLock();
+    ext_mac_held_ = false;  // the MaintenanceApi is force-revoked in parallel
+    ext_mac_token_ = 0;
     out_.source = CommandSource::None;
     out_.motion_authorized = false;
     out_.mac_lock_held = false;
@@ -85,13 +89,14 @@ const ArbiterOutput& CommandArbiter::update(const RcInputs& rc,
     return out_;
   }
 
-  const bool mac_held = macLockValid(now_ms);
+  const bool mac_held = macLockValid(now_ms) || ext_mac_held_;
   if (!mac_held) {
     // Expired lock: clear the holder so a stale token cannot refresh it.
     if (mac_lock_active_) revokeMacLock();
   }
   out_.mac_lock_held = mac_held;
-  out_.mac_lock_token = mac_held ? mac_lock_token_ : 0;
+  out_.mac_lock_token =
+      macLockValid(now_ms) ? mac_lock_token_ : (ext_mac_held_ ? ext_mac_token_ : 0);
 
   // Mac maintenance lock wins over RC/Jetson while held (bench control). It is
   // only ever granted while disarmed, so it cannot hijack active walking.

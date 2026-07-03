@@ -177,6 +177,41 @@ void test_no_rc_link_denies_motion() {
   TEST_ASSERT_TRUE(o.kill_active);
 }
 
+void test_external_mac_lock_grants_maintenance_authority() {
+  // hexapod_src-0y9: the live MaintenanceApi lock is mirrored into the
+  // arbiter; while mirrored-held, MacMaintenance owns motion.
+  CommandArbiter a = makeArbiter();
+  a.setExternalMacLock(true, 42);
+  const ArbiterOutput& o = a.update(rc(true, false, false, false), 100);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandSource::MacMaintenance),
+                          static_cast<uint8_t>(o.source));
+  TEST_ASSERT_TRUE(o.motion_authorized);
+  TEST_ASSERT_TRUE(o.mac_lock_held);
+  TEST_ASSERT_EQUAL_UINT32(42, o.mac_lock_token);
+
+  // Mirror released -> authority returns to None while disarmed.
+  a.setExternalMacLock(false, 0);
+  const ArbiterOutput& o2 = a.update(rc(true, false, false, false), 110);
+  TEST_ASSERT_FALSE(o2.mac_lock_held);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandSource::None),
+                          static_cast<uint8_t>(o2.source));
+  TEST_ASSERT_FALSE(o2.motion_authorized);
+}
+
+void test_kill_overrides_external_mac_lock() {
+  CommandArbiter a = makeArbiter();
+  a.setExternalMacLock(true, 7);
+  const ArbiterOutput& o = a.update(rc(true, true, false, false), 100);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandSource::None),
+                          static_cast<uint8_t>(o.source));
+  TEST_ASSERT_FALSE(o.motion_authorized);
+  TEST_ASSERT_FALSE(o.mac_lock_held);
+  // The kill path clears the mirror; authority does not return without a
+  // fresh republish from the control task.
+  const ArbiterOutput& o2 = a.update(rc(true, false, false, false), 110);
+  TEST_ASSERT_FALSE(o2.mac_lock_held);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_disarmed_has_no_authority);
@@ -191,5 +226,7 @@ int main(int, char**) {
   RUN_TEST(test_kill_revokes_mac_lock);
   RUN_TEST(test_release_frees_lock_for_new_holder);
   RUN_TEST(test_no_rc_link_denies_motion);
+  RUN_TEST(test_external_mac_lock_grants_maintenance_authority);
+  RUN_TEST(test_kill_overrides_external_mac_lock);
   return UNITY_END();
 }

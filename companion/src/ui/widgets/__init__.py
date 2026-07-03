@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from collections import deque
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
@@ -300,6 +300,122 @@ class EventStrip(QFrame):
         self._events.appendleft(f"{ts}  [{kind}] {detail}")
         self._label.setText(self._events[0])
         self._label.setStyleSheet(f"color: {color};")
+
+
+class TelemetryBanner(QFrame):
+    """Warning strip shown while required telemetry streams are missing/stale.
+
+    Pages that render live data put this above their content. While the link
+    is up but one of the required streams has not delivered a record within
+    ``STALE_AFTER_S`` (never subscribed, subscription dropped, firmware
+    stopped streaming), the banner appears; it hides as soon as data flows.
+
+    ``streams`` is a list of ``(stream_id, display_name)``. With
+    ``require_all=False`` the banner is satisfied when *any* listed stream is
+    fresh (viewer pages that accept joint_state or servo_status).
+    """
+
+    STALE_AFTER_S = 3.0
+
+    def __init__(
+        self,
+        service,
+        streams,
+        hint: str = "",
+        require_all: bool = True,
+        resubscribe=None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.service = service
+        self._streams = [(int(sid), name) for sid, name in streams]
+        self._hint = hint
+        self._require_all = require_all
+        self._active = True
+        self._seen: dict[int, float] = {}
+        self._anchor: float | None = None
+
+        self.setObjectName("TelemetryBanner")
+        self.setStyleSheet(
+            f"QFrame#TelemetryBanner {{"
+            f" background-color: {DRACULA.surface};"
+            f" border: 1px solid {DRACULA.orange};"
+            f" border-radius: 6px; }}"
+        )
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 8, 14, 8)
+        lay.setSpacing(12)
+        warn = QLabel("\u26a0")
+        warn.setStyleSheet(f"color: {DRACULA.orange}; font-size: 16px;")
+        lay.addWidget(warn)
+        self._label = QLabel("")
+        self._label.setWordWrap(True)
+        self._label.setStyleSheet(f"color: {DRACULA.orange};")
+        lay.addWidget(self._label, 1)
+        if resubscribe is not None:
+            btn = QPushButton("Re-subscribe")
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(resubscribe)
+            lay.addWidget(btn)
+        self.hide()
+
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._evaluate)
+        self._timer.start()
+
+        service.telemetry.connect(self._on_telemetry)
+        service.connected.connect(self._on_connected)
+
+    def set_active(self, active: bool) -> None:
+        """Suspend the banner (e.g. while a page is in offline replay mode)."""
+        self._active = active
+        if not active:
+            self.hide()
+
+    def _on_connected(self, connected: bool) -> None:
+        self._seen.clear()
+        self._anchor = time.monotonic() if connected else None
+        if not connected:
+            self.hide()
+
+    def _on_telemetry(self, stream_id: int, _record) -> None:
+        for sid, _name in self._streams:
+            if sid == stream_id:
+                self._seen[sid] = time.monotonic()
+                if not self.isHidden():
+                    self._evaluate()
+                return
+
+    def _evaluate(self) -> None:
+        if not self._active or not self.service.is_connected:
+            self.hide()
+            return
+        now = time.monotonic()
+        if self._anchor is None:
+            self._anchor = now
+        unhappy = []
+        fresh = 0
+        for sid, name in self._streams:
+            last = self._seen.get(sid)
+            if last is not None and now - last <= self.STALE_AFTER_S:
+                fresh += 1
+            elif (last or self._anchor) + self.STALE_AFTER_S <= now:
+                unhappy.append(name)
+        ok = (not unhappy) if self._require_all else fresh > 0
+        # Within the post-connect grace window nothing is flagged yet.
+        if ok or (not unhappy):
+            self.hide()
+            return
+        msg = (
+            "No live data \u2014 telemetry stalled for: "
+            + ", ".join(unhappy)
+            + ". Values shown may be stale."
+        )
+        if self._hint:
+            msg += f" {self._hint}"
+        self._label.setText(msg)
+        self.show()
 
 
 from ui.widgets.hexapod_view import HexapodView  # noqa: E402  (re-export)

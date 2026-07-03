@@ -37,7 +37,7 @@ from hexapod_protocol.framing import MsgType
 
 from services import ConnectionService
 from theme import DRACULA
-from ui.widgets import FeatureToggleCard, StatCard, StatusBadge
+from ui.widgets import FeatureToggleCard, StatCard, StatusBadge, TelemetryBanner
 
 
 class BasePage(QWidget):
@@ -91,6 +91,27 @@ class BasePage(QWidget):
         self.build()
 
     def build(self) -> None:  # override
+        ...
+
+    def add_telemetry_banner(
+        self, streams, hint: str = "", require_all: bool = True
+    ) -> TelemetryBanner:
+        """Insert a stale/missing-telemetry warning strip above the content.
+
+        ``streams`` is ``[(StreamId, name), ...]``. The Re-subscribe button
+        replays this page's connect-time subscriptions.
+        """
+        banner = TelemetryBanner(
+            self.service,
+            streams,
+            hint=hint,
+            require_all=require_all,
+            resubscribe=lambda: self._on_connected(True),
+        )
+        self.content.insertWidget(0, banner)
+        return banner
+
+    def _on_connected(self, connected: bool) -> None:  # override where needed
         ...
 
 
@@ -249,6 +270,14 @@ class OverviewPage(BasePage):
         self.hint.setStyleSheet(f"color: {DRACULA.comment};")
         self.content.addWidget(self.hint)
 
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.CONTROL_STATE, "control_state"),
+                (tlm.StreamId.HEALTH, "health"),
+                (tlm.StreamId.SERVO_STATUS, "servo_status"),
+            ]
+        )
+
         self.service.connected.connect(self._on_connected)
         self.service.status_received.connect(self._on_status)
         self.service.telemetry.connect(self._on_telemetry)
@@ -343,6 +372,10 @@ class ModeSafetyPage(BasePage):
     }
 
     def build(self) -> None:
+        self._connected = False
+        self._state = -1
+        self._lock_held = False
+
         self.content.addWidget(self._safety_controls())
         self.content.addWidget(self._lock_controls())
         self.content.addWidget(self._bench_controls())
@@ -359,12 +392,15 @@ class ModeSafetyPage(BasePage):
         self.content.addWidget(safety)
 
         self.service.connected.connect(self._on_connected)
+        self.service.state_changed.connect(self._on_state_changed)
         self.service.feature_list.connect(self._on_feature_list)
         self.service.feature_result.connect(lambda _r: self.service.refresh_features())
         self.service.maint_result.connect(self._on_maint_result)
         self.service.maint_lock_changed.connect(self._on_lock_changed)
         self.service.control_result.connect(self._on_control_result)
         self.service.dxl_result.connect(self._on_dxl_result)
+
+        self._apply_gates()
 
     # --- groups -----------------------------------------------------------
 
@@ -377,6 +413,7 @@ class ModeSafetyPage(BasePage):
         arm = QPushButton("Arm")
         arm.setToolTip("Release the host disarm latch (RC arm switch still required).")
         arm.clicked.connect(lambda: self.service.set_arming(True))
+        self.arm_btn = arm
 
         disarm = QPushButton("Disarm")
         disarm.clicked.connect(
@@ -386,6 +423,7 @@ class ModeSafetyPage(BasePage):
                 lambda: self.service.set_arming(False),
             )
         )
+        self.disarm_btn = disarm
 
         clear = QPushButton("Clear Fault")
         clear.clicked.connect(
@@ -395,9 +433,11 @@ class ModeSafetyPage(BasePage):
                 self.service.clear_fault,
             )
         )
+        self.clear_btn = clear
 
         set_disarmed = QPushButton("Set mode: Disarmed")
         set_disarmed.clicked.connect(lambda: self.service.set_mode(2))
+        self.set_disarmed_btn = set_disarmed
 
         force_estop = QPushButton("Set mode: E-stop")
         force_estop.clicked.connect(
@@ -407,6 +447,7 @@ class ModeSafetyPage(BasePage):
                 lambda: self.service.set_mode(12),
             )
         )
+        self.force_estop_btn = force_estop
 
         for i, btn in enumerate((arm, disarm, clear, set_disarmed, force_estop)):
             btn.setCursor(Qt.PointingHandCursor)
@@ -438,8 +479,10 @@ class ModeSafetyPage(BasePage):
 
         enter_m = QPushButton("Enter Maintenance")
         enter_m.clicked.connect(self.service.enter_maintenance)
+        self.enter_maint_btn = enter_m
         exit_m = QPushButton("Exit Maintenance")
         exit_m.clicked.connect(self.service.exit_maintenance)
+        self.exit_maint_btn = exit_m
 
         enter_p = QPushButton("Enter Passive Pose")
         enter_p.clicked.connect(
@@ -449,8 +492,10 @@ class ModeSafetyPage(BasePage):
                 self.service.passive_enter,
             )
         )
+        self.enter_passive_btn = enter_p
         exit_p = QPushButton("Exit Passive Pose")
         exit_p.clicked.connect(self.service.passive_exit)
+        self.exit_passive_btn = exit_p
 
         for i, btn in enumerate((enter_m, exit_m, enter_p, exit_p)):
             btn.setCursor(Qt.PointingHandCursor)
@@ -611,15 +656,15 @@ class ModeSafetyPage(BasePage):
             self.lock_lbl.setText(f"Maintenance lock: rejected (result {res.result})")
 
     def _on_lock_changed(self, held: bool, token: int) -> None:
+        self._lock_held = held
         if held:
             self.lock_lbl.setText(
                 f"Maintenance lock: held (token {token}, heartbeating)"
             )
         else:
             self.lock_lbl.setText("Maintenance lock: none")
-        for btn in self._bench_buttons:
-            btn.setEnabled(held)
         self.bench_lbl.setText("Ready." if held else "Requires the maintenance lock.")
+        self._apply_gates()
 
     def _on_scan(self) -> None:
         self.bench_lbl.setText("Scanning IDs 1-30 (takes a few seconds)\u2026")
@@ -670,11 +715,60 @@ class ModeSafetyPage(BasePage):
         self.action_lbl.setText(text)
 
     def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
         if connected:
             self.service.refresh_features()
         else:
+            self._state = -1
+            self._lock_held = False
             self.lock_lbl.setText("Maintenance lock: none")
             self.action_lbl.setText("No command sent yet.")
+        self._apply_gates()
+
+    def _on_state_changed(self, state: int) -> None:
+        self._state = state
+        self._apply_gates()
+
+    def _apply_gates(self) -> None:
+        """Enable only the controls that make sense right now.
+
+        Gating mirrors the firmware safety machine (DISARMED=2,
+        STAND_READY=4, MAC_MAINTENANCE=8, PASSIVE_POSE_STREAM=9) so the UI
+        does not offer actions the firmware would reject. E-stop is never
+        gated. State -1 (unknown, before the first status poll) keeps entry
+        actions enabled — the firmware still validates every request.
+        """
+        con = self._connected
+        st = self._state
+        held = self._lock_held
+
+        def gate(btn, enabled: bool, why: str) -> None:
+            btn.setEnabled(enabled)
+            btn.setToolTip("" if enabled else why)
+
+        for btn in (self.disarm_btn, self.set_disarmed_btn, self.force_estop_btn):
+            gate(btn, con, "Connect to the robot first.")
+        gate(self.arm_btn, con and st != 9,
+             "Connect first; exit passive pose before arming.")
+        gate(self.clear_btn, con and st in (-1, 10, 11, 12),
+             "No latched fault/E-stop to clear.")
+        gate(
+            self.enter_maint_btn,
+            con and not held and st in (-1, 2, 4),
+            "Requires connection and a Disarmed / Stand Ready robot.",
+        )
+        gate(self.exit_maint_btn, con and held,
+             "The maintenance lock is not held.")
+        gate(
+            self.enter_passive_btn,
+            con and st in (-1, 2, 8),
+            "Requires connection and a Disarmed or Maintenance robot.",
+        )
+        gate(self.exit_passive_btn, con and st == 9,
+             "The robot is not in passive pose mode.")
+        for btn in self._bench_buttons:
+            gate(btn, con and held,
+                 "Enter Maintenance first (bench control needs the lock).")
 
     def _toggle(self, name: str, rate: int, checked: bool) -> None:
         sid = int(tlm.stream_id_from_name(name))
@@ -716,6 +810,10 @@ class GaitLabPage(BasePage):
         slay.addWidget(estop)
         slay.addStretch(1)
         self.content.addWidget(safety)
+
+        self.banner = self.add_telemetry_banner(
+            [(tlm.StreamId.CONTROL_STATE, "control_state")]
+        )
 
         self.service.connected.connect(self._on_connected)
         self.service.motion_result.connect(self._on_motion_result)
@@ -899,11 +997,23 @@ class LegLabPage(BasePage):
         slay.addStretch(1)
         self.content.addWidget(safety)
 
+        self.banner = self.add_telemetry_banner(
+            [(tlm.StreamId.LEG_STATE, "leg_state")]
+        )
+
+        self._connected = False
+        self._state = -1
+        self._lock_held = False
+
         self.service.connected.connect(self._on_connected)
+        self.service.state_changed.connect(self._on_state_changed)
         self.service.maint_result.connect(self._on_maint_result)
+        self.service.maint_lock_changed.connect(self._on_lock_changed)
         self.service.leg_target_result.connect(self._on_leg_result)
         self.service.joint_target_result.connect(self._on_joint_result)
         self.service.telemetry.connect(self._on_telemetry)
+
+        self._apply_gates()
 
     # --- groups -----------------------------------------------------------
 
@@ -922,8 +1032,10 @@ class LegLabPage(BasePage):
         row = QHBoxLayout()
         enter = QPushButton("Enter Maintenance")
         enter.clicked.connect(self.service.enter_maintenance)
+        self.enter_maint_btn = enter
         leave = QPushButton("Exit Maintenance")
         leave.clicked.connect(self.service.exit_maintenance)
+        self.exit_maint_btn = leave
         row.addWidget(enter)
         row.addWidget(leave)
         row.addStretch(1)
@@ -961,6 +1073,7 @@ class LegLabPage(BasePage):
         send = QPushButton("Send foot target")
         send.setProperty("accent", True)
         send.clicked.connect(self._send_foot_target)
+        self.send_foot_btn = send
         form.addRow("", send)
         self.foot_result = QLabel("--")
         self.foot_result.setObjectName("MonoLabel")
@@ -985,6 +1098,7 @@ class LegLabPage(BasePage):
         send = QPushButton("Send joint target")
         send.setProperty("accent", True)
         send.clicked.connect(self._send_joint_target)
+        self.send_joint_btn = send
         form.addRow("", send)
         self.joint_result = QLabel("--")
         self.joint_result.setObjectName("MonoLabel")
@@ -1029,14 +1143,52 @@ class LegLabPage(BasePage):
     # --- reactions --------------------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
         if connected:
             self.service.subscribe(int(tlm.StreamId.LEG_STATE), 10)
         else:
+            self._state = -1
+            self._lock_held = False
             self.lock_lbl.setText("Maintenance lock: none")
             self.foot_result.setText("--")
             self.joint_result.setText("--")
             self.leg_table.setRowCount(0)
             self._leg_rows.clear()
+        self._apply_gates()
+
+    def _on_state_changed(self, state: int) -> None:
+        self._state = state
+        self._apply_gates()
+
+    def _on_lock_changed(self, held: bool, token: int) -> None:
+        self._lock_held = held
+        if held:
+            self.lock_lbl.setText(
+                f"Maintenance lock: held (token {token}, heartbeating)"
+            )
+        else:
+            self.lock_lbl.setText("Maintenance lock: none")
+        self._apply_gates()
+
+    def _apply_gates(self) -> None:
+        """Only offer commands the firmware would accept right now."""
+        con = self._connected
+        held = self._lock_held
+
+        def gate(btn, enabled: bool, why: str) -> None:
+            btn.setEnabled(enabled)
+            btn.setToolTip("" if enabled else why)
+
+        gate(
+            self.enter_maint_btn,
+            con and not held and self._state in (-1, 2, 4),
+            "Requires connection and a Disarmed / Stand Ready robot.",
+        )
+        gate(self.exit_maint_btn, con and held,
+             "The maintenance lock is not held.")
+        for btn in (self.send_foot_btn, self.send_joint_btn):
+            gate(btn, con and held,
+                 "Enter Maintenance first — targets need the lock.")
 
     def _on_maint_result(self, res) -> None:
         if res.token:
@@ -1543,6 +1695,14 @@ class ServoTuningPage(BasePage):
         self.content.addWidget(self._limits_editor())
         self.content.addWidget(self._expert_panel())
 
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.SERVO_STATUS, "servo_status"),
+                (tlm.StreamId.SERVO_GOALS, "servo_goals"),
+            ],
+            hint="Servo frames also require DXL power on and servos scanned.",
+        )
+
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
         self.service.dxl_result.connect(self._on_dxl_result)
@@ -1936,6 +2096,10 @@ class FootContactPage(BasePage):
         self.content.addWidget(self._threshold_editor())
         self.content.addWidget(self._calibrate_controls())
 
+        self.banner = self.add_telemetry_banner(
+            [(tlm.StreamId.CONTACT_STATE, "contact_state")]
+        )
+
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
         self.service.sensor_feature_result.connect(self._on_feature_result)
@@ -2151,6 +2315,14 @@ class SensorDashboardPage(BasePage):
         self.content.addWidget(self._topology_group())
         self.content.addWidget(self._live_group())
         self.content.addWidget(self._controls_group())
+
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.I2C_SENSORS_RAW, "i2c_sensors_raw"),
+                (tlm.StreamId.CONTACT_STATE, "contact_state"),
+            ],
+            hint="Sensor streams also require sensor polling to be enabled.",
+        )
 
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
@@ -2395,10 +2567,24 @@ class PassivePosePage(BasePage):
         self.content.addWidget(self._stream_controls())
         self.content.addWidget(self._joint_table())
 
+        self.banner = self.add_telemetry_banner(
+            [(tlm.StreamId.JOINT_STATE, "joint_state")],
+            hint=(
+                "Joint angles stream only while passive pose mode is active "
+                "— use Enter passive above."
+            ),
+        )
+
+        self._connected = False
+        self._state = -1
+
         self.service.connected.connect(self._on_connected)
+        self.service.state_changed.connect(self._on_state_changed)
         self.service.telemetry.connect(self._on_telemetry)
         self.service.passive_result.connect(self._on_passive_result)
         self.service.passive_rate_result.connect(self._on_rate_result)
+
+        self._apply_gates()
 
     # --- groups -----------------------------------------------------------
 
@@ -2487,12 +2673,41 @@ class PassivePosePage(BasePage):
     # --- telemetry & results ---------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
         if connected:
             self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
         else:
+            self._state = -1
             self.table.setRowCount(0)
             self._rows.clear()
             self.mode_badge.set("disconnected", "idle")
+        self._apply_gates()
+
+    def _on_state_changed(self, state: int) -> None:
+        self._state = state
+        if state == 9:
+            self.mode_badge.set("passive (torque off)", "warn")
+        elif self._connected:
+            self.mode_badge.set(
+                tlm.SAFETY_STATE_NAMES.get(state, str(state)).lower(), "idle"
+            )
+        self._apply_gates()
+
+    def _apply_gates(self) -> None:
+        """Enter needs a Disarmed/Maintenance robot; Exit only in passive."""
+        con = self._connected
+        st = self._state
+        enter_ok = con and st in (-1, 2, 8)
+        self.enter_btn.setEnabled(enter_ok)
+        self.enter_btn.setToolTip(
+            "" if enter_ok
+            else "Requires connection and a Disarmed or Maintenance robot."
+        )
+        exit_ok = con and st == 9
+        self.exit_btn.setEnabled(exit_ok)
+        self.exit_btn.setToolTip(
+            "" if exit_ok else "The robot is not in passive pose mode."
+        )
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id != int(tlm.StreamId.JOINT_STATE):
@@ -2578,6 +2793,13 @@ class RcTroubleshootingPage(BasePage):
         self.content.addWidget(self._frames_group())
         self.content.addWidget(self._switches_group())
         self.content.addWidget(self._channel_group())
+
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.RC_INPUT, "rc_input"),
+                (tlm.StreamId.RC_DIAGNOSTICS, "rc_diagnostics"),
+            ]
+        )
 
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
@@ -3056,6 +3278,15 @@ class ModelViewerPage(BasePage):
         self.view = HexapodView()
         self.view.set_legs(self._model.legs())
         self.content.addWidget(self.view, 1)
+
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.JOINT_STATE, "joint_state"),
+                (tlm.StreamId.SERVO_STATUS, "servo_status"),
+            ],
+            hint="servo_status frames require DXL power on.",
+            require_all=False,
+        )
 
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
@@ -3575,6 +3806,15 @@ class UrdfViewerPage(BasePage):
         self.content.addLayout(self._controls())
         self.content.addWidget(self._view, 1)
 
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.JOINT_STATE, "joint_state"),
+                (tlm.StreamId.SERVO_STATUS, "servo_status"),
+            ],
+            hint="servo_status frames require DXL power on.",
+            require_all=False,
+        )
+
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
 
@@ -3636,6 +3876,8 @@ class UrdfViewerPage(BasePage):
         replay_ready = self._mode == "replay" and bool(self._replay_frames)
         self._play_btn.setEnabled(replay_ready)
         self._scrub.setEnabled(replay_ready)
+        # The stale-telemetry banner only applies to the live feed.
+        self.banner.set_active(self._mode == "live")
         if self._mode == "live":
             self._stop_play()
             self._ensure_subscriptions()
