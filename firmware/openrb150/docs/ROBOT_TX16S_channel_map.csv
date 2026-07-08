@@ -1,0 +1,17 @@
+channel,source,robot_use
+CH01,Rud,left stick X / gimbal LX
+CH02,Thr,left stick Y / gimbal LY
+CH03,Ail,right stick X / gimbal RX
+CH04,Ele,right stick Y / gimbal RY
+CH05,S1,speed
+CH06,S2,body height
+CH07,LS,stride virtual encoder
+CH08,RS,step-height virtual encoder
+CH09,SE,mode select
+CH10,SD,gait select
+CH11,SA/SF mix,arm + estop mask
+CH12,SB/SC/SG mix,features mask
+CH13,GV1 ACT,action selector
+CH14,SH,action fire
+CH15,MAX 0,reserved center
+CH16,MAX 0,reserved center

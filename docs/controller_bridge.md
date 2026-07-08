@@ -35,7 +35,7 @@ Serial2 bytes ──► crsf::Parser ──► raw 11-bit ticks ch[16]
   ticks (ChannelPack range 191..1792).
 - `controller::ControllerBridge` (this feature) turns those ticks into a
   high-level `ControllerCommand`. It depends **only** on the vendored
-  `ChannelPack.h` and is fully host-testable (20 native tests in
+  `ChannelPack.h` and is fully host-testable (40 native tests in
   `test/test_controller_bridge/`).
 
 ### Physical inputs available (from `ChannelPackInputs_t`)
@@ -141,6 +141,118 @@ boolean source → any `TrickId`, up to `kMaxTrickBindings` = 8).
 
 ---
 
+## 5b. Input profiles: custom ChannelPack vs. TX16S MK3 direct
+
+The bridge supports **two input profiles**, selected automatically:
+
+1. **`CustomControllerChannelPack`** — the ESP32-S3 TX described above, which
+   packs switches/buttons/toggles/nav into the CH9–CH11 bitfields and centres
+   CH12–CH16. This is the original behaviour and is unchanged.
+2. **`Tx16sMk3Direct`** — a RadioMaster **TX16S MK3** running ELRS with a saved
+   EdgeTX model, driving the robot directly. Its channels carry conventional
+   per-channel stick/knob/switch values, which the bridge decodes into the
+   **same** `ChannelPackInputs_t` fields so all binding/command logic downstream
+   is identical.
+
+**Both arrive as ordinary CRSF *RC channels* frames** — the CRSF frame *type* is
+the same for both. Detection therefore happens at the **decoded 16-channel
+layout** level, never from the frame type:
+
+- `looksLikeCustomChannelPack(ch)` validates the packed-bitfield shape: CH9 uses
+  only bits 0–5 (bits 6–7 reserved/clear), CH10's two tri-fields are ≤ 2 with
+  nothing above bit 7, CH11 uses only bits 0–9, and CH12–CH16 sit near CRSF
+  centre. A frame that fails this is treated as TX16S direct.
+- Detection requires `kProfileDetectFrames` (3) consecutive agreeing link-up
+  frames before it **locks**, so a glitchy startup frame cannot pick the wrong
+  profile. Until a profile locks the bridge holds **failsafe**.
+- Once locked the profile **never auto-switches** until `reset()`. A link drop
+  after lock keeps the same profile (no re-detection on return). A link drop
+  *before* lock clears the pending streak so stale startup frames cannot combine
+  with later frames.
+
+`ControllerBridge::detectedProfile()` / `profileLocked()` expose the state.
+
+### TX16S MK3 direct channel map
+
+Saved from EdgeTX model `ROBOT_TX16S_DIRECT` (see
+`firmware/openrb150/docs/ROBOT_TX16S_channel_map.csv`):
+
+| CRSF ch | EdgeTX source | Robot use | Decoded into |
+| --- | --- | --- | --- |
+| CH1 | Rud | left stick X | `gimbal[0]` (LX) |
+| CH2 | Thr | left stick Y | `gimbal[1]` (LY) |
+| CH3 | Ail | right stick X | `gimbal[2]` (RX) |
+| CH4 | Ele | right stick Y | `gimbal[3]` (RY) |
+| CH5 | S1 | speed | `pot[0]` |
+| CH6 | S2 | body height | `pot[1]` |
+| CH7 | LS | stride | `encoder[0]` + `enc_accum_[0]` (absolute) |
+| CH8 | RS | step height | `encoder[1]` + `enc_accum_[1]` (absolute) |
+| CH9 | SE | mode select | `toggles[0]` / SwE (0/1/2) |
+| CH10 | SD | gait select | `toggles[1]` / SwF (0/1/2) |
+| CH11 | SA/SF mix | safety mask (2 bits) | bit0→SwA arm, bit1→SwB estop |
+| CH12 | SB/SC/SG mix | feature mask (4 bits) | SwC/SwD/SwG/SwH |
+| CH13 | GV1 ACT | action selector (13 pos) | picks one button/nav |
+| CH14 | SH | action fire (momentary) | gates the CH13 selection |
+| CH15 | MAX 0 | reserved centre | (none) |
+| CH16 | MAX 0 | reserved centre | (none) |
+
+Notes on the direct profile:
+
+- **Virtual encoders (CH7/CH8):** the TX16S has no physical relative encoders,
+  so the LS/RS sliders are decoded as **absolute** 0..1 values written straight
+  into `enc_accum_[]` (and a 0..2047 debug value into `encoder[]`). The relative
+  wrap-delta integration runs **only** for the custom controller.
+- **Safety mask (CH11):** `mask 0`=disarmed/no-estop, `1`=armed, `2`=estop,
+  `3`=armed+estop. Existing command logic still applies: `arm_request = SwA &&
+  !SwB`, `estop = SwB`, so mask 2 and 3 both force estop and disarm.
+- **Feature mask (CH12):** always parsed as a full 4-bit / 16-position mask on
+  the robot side. If the current EdgeTX mix only drives bits 0–2, bit 3
+  (`host_authority`) simply stays false until the radio mix/Lua helper is
+  updated — the robot-side mapping is not changed to work around that.
+- **Action selector/fire (CH13/CH14):** CH13 selects *which* logical
+  button/nav boolean to arm; CH14 (SH) fires it. When SH is inactive **none**
+  fire. This reuses the existing rising-edge/debounce logic for trims and
+  tricks. `Nav2Right` is deliberately unmapped and always stays false.
+
+### Saved EdgeTX model profile
+
+```
+Model name: ROBOT_TX16S_DIRECT
+
+RF:
+- Internal RF: CRSF (built-in ELRS)
+- External RF: Off (unless using an external ELRS module)
+- Channel range: CH1–CH16
+- ELRS Lua:
+  - Packet rate: 100Hz Full or 333Hz Full
+  - Switch mode: 16ch Rate/2 Full Res
+
+Mixes:
+- CH01 = Rud = left stick X
+- CH02 = Thr = left stick Y
+- CH03 = Ail = right stick X
+- CH04 = Ele = right stick Y
+- CH05 = S1 knob
+- CH06 = S2 knob
+- CH07 = LS slider
+- CH08 = RS slider
+- CH09 = SE, 3-position mode selector
+- CH10 = SD, 3-position gait selector
+- CH11 = SA/SF mix, safety mask, 4 positions / 2 bits
+- CH12 = SB/SC/SG mix, feature mask, 16 positions / 4 bits (robot side)
+- CH13 = GV1 ACT, action selector, 13 positions
+- CH14 = SH, action fire momentary
+- CH15 = MAX 0, center/reserved
+- CH16 = MAX 0, center/reserved
+```
+
+The mask/selector channels (CH11/CH12/CH13) need discrete positions, produced by
+EdgeTX mixes/logical switches or a small EdgeTX Lua/mixer helper on the radio.
+The robot-side parser is implemented cleanly regardless; missing radio positions
+just leave the corresponding features/actions inactive.
+
+---
+
 ## 6. Failsafe
 
 - If the CRSF link is down (`link_up=false`) the bridge enters failsafe: `valid=false`,
@@ -198,7 +310,7 @@ Notes:
 | Item | Location / Beads |
 | --- | --- |
 | Portable bridge (this pass) | `firmware/openrb150/src/input/controller_bridge.{h,cpp}` |
-| Native tests (20) | `firmware/openrb150/test/test_controller_bridge/` |
+| Native tests (40) | `firmware/openrb150/test/test_controller_bridge/` |
 | Wire into `rcTask`/`controlTask` (move core without stepping) | `oha.3` |
 | USB `CONTROLLER_*` API + `controller_state` stream | `oha.4` |
 | Trick/choreography engine | `oha.5` |

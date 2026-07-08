@@ -29,12 +29,59 @@ ChannelPackInputs_t makeNeutral() {
   return in;
 }
 
+// Detection needs kProfileDetectFrames agreeing link-up frames before it locks
+// a profile (glitch resistance), so a single logical frame would otherwise sit
+// in failsafe. feedCh()/feed() prime the lock with detection-only frames (which
+// do NOT decode inputs or advance encoder/edge state) so the returned frame is
+// the one that locks + decodes -- letting the existing single-frame tests keep
+// their exact semantics.
+const ControllerCommand& feedCh(ControllerBridge& b,
+                                const uint16_t ch[CPACK_NUM_CHANNELS], uint32_t t,
+                                bool link = true) {
+  if (link && !b.profileLocked()) {
+    for (int i = 0; i < kProfileDetectFrames - 1; ++i) b.update(ch, true, t);
+  }
+  return b.update(ch, link, t);
+}
+
 const ControllerCommand& feed(ControllerBridge& b, const ChannelPackInputs_t& in,
                               uint32_t t, bool link = true) {
   uint16_t ch[CPACK_NUM_CHANNELS];
   ChannelPack::packInputs(&in, ch);
-  return b.update(ch, link, t);
+  return feedCh(b, ch, t, link);
 }
+
+// --- TX16S MK3 direct frame builders (conventional per-channel CRSF) --------
+
+// Unit 0..1 -> conventional CRSF value in the 191..1792 span.
+uint16_t crsfFromUnit(float u) {
+  if (u < 0.0f) u = 0.0f;
+  if (u > 1.0f) u = 1.0f;
+  return static_cast<uint16_t>(CPACK_CRSF_MIN +
+                               u * (CPACK_CRSF_MAX - CPACK_CRSF_MIN));
+}
+
+// CRSF value that lands in the centre of discrete bin `idx` of `bins`.
+uint16_t crsfForBin(uint8_t idx, uint8_t bins) {
+  return crsfFromUnit((static_cast<float>(idx) + 0.5f) / static_cast<float>(bins));
+}
+
+// A neutral TX16S direct frame: sticks centred, knobs/sliders low, SE/SD
+// centred, masks 0, action off, reserved centred. Classifies as Tx16sMk3Direct
+// (CH9 at MID is not a valid packed custom switch field).
+void makeTxNeutral(uint16_t ch[CPACK_NUM_CHANNELS]) {
+  ch[0] = ch[1] = ch[2] = ch[3] = CPACK_CRSF_MID;  // sticks centred
+  ch[4] = ch[5] = CPACK_CRSF_MIN;                  // S1/S2 knobs low
+  ch[6] = ch[7] = CPACK_CRSF_MIN;                  // LS/RS sliders low
+  ch[8] = CPACK_CRSF_MID;                          // SE mode -> CENTER
+  ch[9] = CPACK_CRSF_MID;                          // SD gait -> CENTER
+  ch[10] = CPACK_CRSF_MIN;                         // safety mask 0
+  ch[11] = CPACK_CRSF_MIN;                         // feature mask 0
+  ch[12] = CPACK_CRSF_MIN;                         // action selector 0
+  ch[13] = CPACK_CRSF_MIN;                         // action fire off
+  ch[14] = ch[15] = CPACK_CRSF_MID;                // MAX 0 reserved centre
+}
+
 
 // --- modes / twist ---------------------------------------------------------
 
@@ -298,7 +345,348 @@ void test_setbindings_remaps_source() {
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, feed(b, in, 10).twist_vx);
 }
 
+// --- input-profile detection & lock ----------------------------------------
+
+void test_custom_profile_locks_after_stable_frames() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  // First two link-up frames only accumulate the streak -> failsafe hold.
+  const ControllerCommand& c1 = b.update(ch, true, 10);
+  TEST_ASSERT_FALSE(b.profileLocked());
+  TEST_ASSERT_TRUE(c1.failsafe);
+  TEST_ASSERT_FALSE(c1.valid);
+  b.update(ch, true, 20);
+  TEST_ASSERT_FALSE(b.profileLocked());
+  // Third agreeing frame locks the custom profile and decodes.
+  const ControllerCommand& c3 = b.update(ch, true, 30);
+  TEST_ASSERT_TRUE(b.profileLocked());
+  TEST_ASSERT_EQUAL_UINT(
+      static_cast<uint8_t>(InputProfile::CustomControllerChannelPack),
+      static_cast<uint8_t>(b.detectedProfile()));
+  TEST_ASSERT_TRUE(c3.valid);
+}
+
+void test_custom_btn4_uses_four_buttons() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.buttons[3] = true;  // Btn4 -> CrouchToggle proves CH10 packs 4 buttons
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::CrouchToggle),
+                         static_cast<uint8_t>(feed(b, in, 100).trick));
+}
+
+void test_custom_detection_rejects_reserved_switch_bits() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  ch[CPACK_CH_SWITCHES] |= (1u << 6);  // reserved bit 6 set -> not custom
+  for (int i = 0; i < kProfileDetectFrames; ++i) b.update(ch, true, 10 + i * 10);
+  TEST_ASSERT_TRUE(b.profileLocked());
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Tx16sMk3Direct),
+                         static_cast<uint8_t>(b.detectedProfile()));
+}
+
+void test_tx16s_profile_locks_after_stable_frames() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  b.update(ch, true, 10);
+  TEST_ASSERT_FALSE(b.profileLocked());
+  b.update(ch, true, 20);
+  TEST_ASSERT_FALSE(b.profileLocked());
+  const ControllerCommand& c3 = b.update(ch, true, 30);
+  TEST_ASSERT_TRUE(b.profileLocked());
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Tx16sMk3Direct),
+                         static_cast<uint8_t>(b.detectedProfile()));
+  TEST_ASSERT_TRUE(c3.valid);
+}
+
+// --- TX16S direct decode ---------------------------------------------------
+
+void test_tx16s_gimbals_and_pots() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  ch[0] = CPACK_CRSF_MAX;   // Rud full -> gimbal LX +1000
+  ch[1] = CPACK_CRSF_MIN;   // Thr low  -> gimbal LY -1000
+  ch[4] = CPACK_CRSF_MAX;   // S1 full  -> pot0 1000 (speed 1.0)
+  ch[5] = crsfFromUnit(0.25f);
+  const ControllerCommand& c = feedCh(b, ch, 10);
+  TEST_ASSERT_TRUE(c.valid);
+  TEST_ASSERT_INT_WITHIN(5, 1000, b.rawInputs().gimbal[0]);
+  TEST_ASSERT_INT_WITHIN(5, -1000, b.rawInputs().gimbal[1]);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.speed);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.25f, c.body_height);
+}
+
+void test_tx16s_encoders_are_absolute() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  ch[6] = CPACK_CRSF_MAX;   // LS full -> stride 1.0
+  ch[7] = CPACK_CRSF_MID;   // RS mid  -> step_height ~0.5
+  const ControllerCommand& c = feedCh(b, ch, 10);
+  TEST_ASSERT_INT_WITHIN(4, 2047, b.rawInputs().encoder[0]);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.stride);
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, 0.5f, c.step_height);
+  // Absolute, not integrated: feeding the same value again does not drift.
+  const ControllerCommand& c2 = feedCh(b, ch, 20);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c2.stride);
+}
+
+void test_tx16s_toggles_mode_and_gait() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  ch[8] = CPACK_CRSF_MIN;  // SE UP -> Walk
+  ch[9] = CPACK_CRSF_MAX;  // SD DOWN -> gait 2
+  const ControllerCommand& c = feedCh(b, ch, 10);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
+                         static_cast<uint8_t>(c.mode));
+  TEST_ASSERT_EQUAL_UINT(2, c.gait_index);
+}
+
+void test_tx16s_safety_mask() {
+  // mask 1 = armed, no estop.
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[10] = crsfForBin(1, 4);
+    const ControllerCommand& c = feedCh(b, ch, 10);
+    TEST_ASSERT_TRUE(c.arm_request);
+    TEST_ASSERT_FALSE(c.estop);
+  }
+  // mask 2 = disarmed, estop.
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[10] = crsfForBin(2, 4);
+    const ControllerCommand& c = feedCh(b, ch, 10);
+    TEST_ASSERT_TRUE(c.estop);
+    TEST_ASSERT_FALSE(c.arm_request);
+  }
+  // mask 3 (MAX endpoint) = armed + estop -> estop wins, disarmed.
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[10] = CPACK_CRSF_MAX;
+    const ControllerCommand& c = feedCh(b, ch, 10);
+    TEST_ASSERT_TRUE(c.estop);
+    TEST_ASSERT_FALSE(c.arm_request);
+  }
+}
+
+void test_tx16s_feature_mask() {
+  // All four feature bits set (MAX endpoint -> bin 15).
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[11] = CPACK_CRSF_MAX;
+    const ControllerCommand& c = feedCh(b, ch, 10);
+    TEST_ASSERT_TRUE(c.feat_foot_contact);
+    TEST_ASSERT_TRUE(c.feat_terrain_leveling);
+    TEST_ASSERT_TRUE(c.feat_passive_pose);
+    TEST_ASSERT_TRUE(c.host_authority);
+  }
+  // Bits 0 and 2 only (foot contact + passive pose).
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[11] = crsfForBin(0x5, 16);
+    const ControllerCommand& c = feedCh(b, ch, 10);
+    TEST_ASSERT_TRUE(c.feat_foot_contact);
+    TEST_ASSERT_FALSE(c.feat_terrain_leveling);
+    TEST_ASSERT_TRUE(c.feat_passive_pose);
+    TEST_ASSERT_FALSE(c.host_authority);
+  }
+}
+
+void test_tx16s_action_selector_and_fire() {
+  // Selector 5 + fire -> Btn1 -> StandUp trick.
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[12] = crsfForBin(5, 13);
+    ch[13] = CPACK_CRSF_MAX;  // fire
+    const ControllerCommand& c = feedCh(b, ch, 100);
+    TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::StandUp),
+                           static_cast<uint8_t>(c.trick));
+    TEST_ASSERT_TRUE(b.rawInputs().buttons[0]);
+  }
+  // Selector 0 + fire -> Nav1Up -> pitch trim up.
+  {
+    ControllerBridge b;
+    uint16_t ch[CPACK_NUM_CHANNELS];
+    makeTxNeutral(ch);
+    ch[12] = crsfForBin(0, 13);
+    ch[13] = CPACK_CRSF_MAX;
+    const ControllerCommand& c = feedCh(b, ch, 100);
+    TEST_ASSERT_FLOAT_WITHIN(1e-4f, kTrimStepRad, c.trim_pitch);
+  }
+}
+
+void test_tx16s_action_fire_inactive_no_fire() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  ch[12] = crsfForBin(5, 13);  // would be StandUp
+  ch[13] = CPACK_CRSF_MIN;     // fire inactive
+  const ControllerCommand& c = feedCh(b, ch, 100);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::None),
+                         static_cast<uint8_t>(c.trick));
+  TEST_ASSERT_FALSE(b.rawInputs().buttons[0]);
+}
+
+void test_tx16s_nav2right_unmapped() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  // Sweep every action selector with fire held; Nav2Right must never be set.
+  for (uint8_t a = 0; a < 13; ++a) {
+    ch[12] = crsfForBin(a, 13);
+    ch[13] = CPACK_CRSF_MAX;
+    feedCh(b, ch, 100 + a * 10);
+    TEST_ASSERT_FALSE(b.rawInputs().nav[1][CPACK_NAV_RIGHT]);
+  }
+}
+
+// --- lock-once behaviour ---------------------------------------------------
+
+void test_lock_once_custom_then_tx_ignored() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  feed(b, in, 10);  // primes + locks custom
+  TEST_ASSERT_EQUAL_UINT(
+      static_cast<uint8_t>(InputProfile::CustomControllerChannelPack),
+      static_cast<uint8_t>(b.detectedProfile()));
+  // Now feed a TX16S-looking frame many times: profile must not switch.
+  uint16_t tx[CPACK_NUM_CHANNELS];
+  makeTxNeutral(tx);
+  for (int i = 0; i < 5; ++i) b.update(tx, true, 100 + i * 10);
+  TEST_ASSERT_EQUAL_UINT(
+      static_cast<uint8_t>(InputProfile::CustomControllerChannelPack),
+      static_cast<uint8_t>(b.detectedProfile()));
+}
+
+void test_lock_once_tx_then_custom_ignored() {
+  ControllerBridge b;
+  uint16_t tx[CPACK_NUM_CHANNELS];
+  makeTxNeutral(tx);
+  feedCh(b, tx, 10);  // primes + locks TX16S
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Tx16sMk3Direct),
+                         static_cast<uint8_t>(b.detectedProfile()));
+  ChannelPackInputs_t in = makeNeutral();
+  uint16_t cp[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, cp);
+  for (int i = 0; i < 5; ++i) b.update(cp, true, 100 + i * 10);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Tx16sMk3Direct),
+                         static_cast<uint8_t>(b.detectedProfile()));
+}
+
+// --- link loss behaviour ---------------------------------------------------
+
+void test_link_loss_after_lock_keeps_profile() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.switches[0] = true;  // SwA arm
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  feedCh(b, ch, 10);  // locks custom
+  TEST_ASSERT_TRUE(b.profileLocked());
+  // Link drops -> failsafe, but the locked profile is retained.
+  const ControllerCommand& down = b.update(ch, /*link=*/false, 20);
+  TEST_ASSERT_TRUE(down.failsafe);
+  TEST_ASSERT_TRUE(b.profileLocked());
+  TEST_ASSERT_EQUAL_UINT(
+      static_cast<uint8_t>(InputProfile::CustomControllerChannelPack),
+      static_cast<uint8_t>(b.detectedProfile()));
+  // Link returns -> the very next frame decodes (no 3-frame re-detection).
+  const ControllerCommand& up = b.update(ch, true, 30);
+  TEST_ASSERT_TRUE(up.valid);
+  TEST_ASSERT_TRUE(up.arm_request);
+}
+
+void test_link_loss_before_lock_clears_streak() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  b.update(ch, true, 10);  // streak = 1, not locked
+  TEST_ASSERT_FALSE(b.profileLocked());
+  b.update(ch, false, 20);  // link drop clears the pending streak
+  TEST_ASSERT_FALSE(b.profileLocked());
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Unknown),
+                         static_cast<uint8_t>(b.detectedProfile()));
+  // Needs a fresh full streak: two frames still not locked, third locks.
+  b.update(ch, true, 30);
+  b.update(ch, true, 40);
+  TEST_ASSERT_FALSE(b.profileLocked());
+  b.update(ch, true, 50);
+  TEST_ASSERT_TRUE(b.profileLocked());
+}
+
+void test_failsafe_before_profile_locked() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  const ControllerCommand& c = b.update(ch, true, 10);  // 1st frame, not locked
+  TEST_ASSERT_FALSE(b.profileLocked());
+  TEST_ASSERT_TRUE(c.failsafe);
+  TEST_ASSERT_FALSE(c.valid);
+  TEST_ASSERT_TRUE(c.estop);
+}
+
+// --- clamp / normalisation -------------------------------------------------
+
+void test_tx16s_crsf_clamps_out_of_range() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  feedCh(b, ch, 10);  // lock TX16S first
+  // Out-of-range values must clamp before conversion (no unsigned underflow).
+  ch[0] = 100;   // below CPACK_CRSF_MIN -> gimbal -1000
+  ch[1] = 1900;  // above CPACK_CRSF_MAX -> gimbal +1000
+  b.update(ch, true, 20);
+  TEST_ASSERT_INT_WITHIN(2, -1000, b.rawInputs().gimbal[0]);
+  TEST_ASSERT_INT_WITHIN(2, 1000, b.rawInputs().gimbal[1]);
+}
+
+void test_tx16s_reserved_channels_have_no_effect() {
+  ControllerBridge b;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  makeTxNeutral(ch);
+  ch[14] = CPACK_CRSF_MAX;  // MAX 0 spare channels driven high
+  ch[15] = CPACK_CRSF_MAX;
+  const ControllerCommand& c = feedCh(b, ch, 10);
+  TEST_ASSERT_TRUE(c.valid);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::None),
+                         static_cast<uint8_t>(c.trick));
+  TEST_ASSERT_FALSE(c.arm_request);
+  TEST_ASSERT_FALSE(c.feat_foot_contact);
+}
+
+void test_reset_returns_to_unknown_unlocked() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  feed(b, in, 10);  // locks custom
+  TEST_ASSERT_TRUE(b.profileLocked());
+  b.reset();
+  TEST_ASSERT_FALSE(b.profileLocked());
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Unknown),
+                         static_cast<uint8_t>(b.detectedProfile()));
+}
+
 }  // namespace
+
 
 void setUp() {}
 void tearDown() {}
@@ -325,5 +713,29 @@ int main(int, char**) {
   RUN_TEST(test_deadband_kills_centre_jitter);
   RUN_TEST(test_invert_flips_axis);
   RUN_TEST(test_setbindings_remaps_source);
+  // Input-profile detection & lock.
+  RUN_TEST(test_custom_profile_locks_after_stable_frames);
+  RUN_TEST(test_custom_btn4_uses_four_buttons);
+  RUN_TEST(test_custom_detection_rejects_reserved_switch_bits);
+  RUN_TEST(test_tx16s_profile_locks_after_stable_frames);
+  // TX16S direct decode.
+  RUN_TEST(test_tx16s_gimbals_and_pots);
+  RUN_TEST(test_tx16s_encoders_are_absolute);
+  RUN_TEST(test_tx16s_toggles_mode_and_gait);
+  RUN_TEST(test_tx16s_safety_mask);
+  RUN_TEST(test_tx16s_feature_mask);
+  RUN_TEST(test_tx16s_action_selector_and_fire);
+  RUN_TEST(test_tx16s_action_fire_inactive_no_fire);
+  RUN_TEST(test_tx16s_nav2right_unmapped);
+  // Lock-once & link-loss behaviour.
+  RUN_TEST(test_lock_once_custom_then_tx_ignored);
+  RUN_TEST(test_lock_once_tx_then_custom_ignored);
+  RUN_TEST(test_link_loss_after_lock_keeps_profile);
+  RUN_TEST(test_link_loss_before_lock_clears_streak);
+  RUN_TEST(test_failsafe_before_profile_locked);
+  RUN_TEST(test_reset_returns_to_unknown_unlocked);
+  // Clamp / normalisation.
+  RUN_TEST(test_tx16s_crsf_clamps_out_of_range);
+  RUN_TEST(test_tx16s_reserved_channels_have_no_effect);
   return UNITY_END();
 }

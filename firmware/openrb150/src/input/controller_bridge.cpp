@@ -39,6 +39,69 @@ inline float gimbalUnit(int16_t g) {
   return clampf(static_cast<float>(g) / 1000.0f, -1.0f, 1.0f);
 }
 
+// --- Conventional-CRSF normalisation (TX16S MK3 direct profile) ------------
+//
+// TX16S direct frames carry ordinary per-channel stick/knob/switch values that
+// may sit slightly outside the ChannelPack 191..1792 span, so clamp before any
+// unsigned subtraction to avoid underflow.
+inline uint16_t clampCrsf(uint16_t v) {
+  if (v < CPACK_CRSF_MIN) return CPACK_CRSF_MIN;
+  if (v > CPACK_CRSF_MAX) return CPACK_CRSF_MAX;
+  return v;
+}
+
+// Conventional CRSF value -> unit 0..1.
+inline float crsfUnit01(uint16_t v) {
+  v = clampCrsf(v);
+  return static_cast<float>(v - CPACK_CRSF_MIN) /
+         static_cast<float>(CPACK_CRSF_MAX - CPACK_CRSF_MIN);
+}
+
+// Conventional CRSF value -> bipolar gimbal ticks (-1000..+1000).
+inline int16_t crsfToGimbalSafe(uint16_t v) {
+  return static_cast<int16_t>(crsfUnit01(v) * 2000.0f - 1000.0f);
+}
+
+// Conventional CRSF value -> unipolar pot ticks (0..1000).
+inline int16_t crsfToPotSafe(uint16_t v) {
+  return static_cast<int16_t>(crsfUnit01(v) * 1000.0f);
+}
+
+// Conventional CRSF value -> 3-position toggle (0=UP, 1=CENTER, 2=DOWN).
+inline uint8_t crsfToTri(uint16_t v) {
+  const float u = crsfUnit01(v);
+  if (u < 0.3333f) return 0;
+  if (u < 0.6666f) return 1;
+  return 2;
+}
+
+// Conventional CRSF value -> bool (high half).
+inline bool crsfToBoolHigh(uint16_t v) { return crsfUnit01(v) > 0.5f; }
+
+// Conventional CRSF value -> one of `bins` discrete positions [0, bins-1].
+inline uint8_t crsfToBins(uint16_t v, uint8_t bins) {
+  if (bins == 0) return 0;
+  const float u = crsfUnit01(v);
+  int idx = static_cast<int>(u * static_cast<float>(bins));
+  if (idx < 0) idx = 0;
+  if (idx >= static_cast<int>(bins)) idx = static_cast<int>(bins) - 1;
+  return static_cast<uint8_t>(idx);
+}
+
+// Reset every raw input to a neutral/false state before a TX16S direct decode
+// fills only the mapped fields (never inherit last-frame contents).
+inline void clearRawInputs(ChannelPackInputs_t* out) {
+  for (int i = 0; i < 4; ++i) out->gimbal[i] = 0;
+  for (int i = 0; i < 2; ++i) out->pot[i] = 0;
+  for (int i = 0; i < 2; ++i) out->encoder[i] = 0;
+  for (int i = 0; i < 8; ++i) out->switches[i] = false;
+  for (int i = 0; i < 4; ++i) out->buttons[i] = false;
+  for (int i = 0; i < 2; ++i) out->toggles[i] = 1;  // neutral/CENTER
+  for (int n = 0; n < 2; ++n) {
+    for (int d = 0; d < 5; ++d) out->nav[n][d] = false;
+  }
+}
+
 }  // namespace
 
 BindingConfig defaultBindings() {
@@ -96,6 +159,10 @@ ControllerBridge::ControllerBridge() {
 void ControllerBridge::reset() {
   cmd_ = ControllerCommand();
   raw_ = ChannelPackInputs_t();
+  detected_profile_ = InputProfile::Unknown;
+  profile_locked_ = false;
+  custom_layout_streak_ = 0;
+  tx_direct_layout_streak_ = 0;
   for (uint8_t i = 0; i < 2; ++i) {
     enc_last_[i] = 0;
     enc_seen_[i] = false;
@@ -128,6 +195,152 @@ void ControllerBridge::integrateEncoders() {
                                                   kEncoderCountsFullScale),
                            0.0f, 1.0f);
   }
+}
+
+// --- Input-profile detection (decoded LAYOUT, never CRSF frame type) --------
+
+bool ControllerBridge::nearCrsfMid(uint16_t v) {
+  const int d = static_cast<int>(v) - static_cast<int>(CPACK_CRSF_MID);
+  return (d < 0 ? -d : d) <= 16;
+}
+
+bool ControllerBridge::looksLikeCustomChannelPack(
+    const uint16_t ch[CPACK_NUM_CHANNELS]) {
+  // CH9: packed 2-pos switches. Only bits 0..5 (SwA,B,C,D,G,H) are used by the
+  // current robot-side abstraction; bits 6..7 are reserved and must be clear.
+  const bool switches_ok = (ch[CPACK_CH_SWITCHES] & ~uint16_t(0x003F)) == 0;
+
+  // CH10: 4 buttons (bits 0..3) + SwE tri (bits 4..5) + SwF tri (bits 6..7).
+  // A tri field of 3 is invalid, and nothing above bit 7 may be set.
+  const uint16_t bt = ch[CPACK_CH_BTN_TOGGLE];
+  const bool btn_toggle_ok = (bt & ~uint16_t(0x00FF)) == 0 &&
+                             (((bt >> 4) & 0x03) <= 2) &&
+                             (((bt >> 6) & 0x03) <= 2);
+
+  // CH11: packed nav (Nav1 bits 0..4, Nav2 bits 5..9); nothing above bit 9.
+  const bool nav_ok = (ch[CPACK_CH_NAV] & ~uint16_t(0x03FF)) == 0;
+
+  // CH12..CH16 are reserved and packed near CRSF centre by the TX.
+  bool reserved_ok = true;
+  for (int i = 11; i < CPACK_NUM_CHANNELS; ++i) {
+    reserved_ok = reserved_ok && nearCrsfMid(ch[i]);
+  }
+
+  return switches_ok && btn_toggle_ok && nav_ok && reserved_ok;
+}
+
+InputProfile ControllerBridge::classifyFirstFrame(
+    const uint16_t ch[CPACK_NUM_CHANNELS]) {
+  return looksLikeCustomChannelPack(ch) ? InputProfile::CustomControllerChannelPack
+                                        : InputProfile::Tx16sMk3Direct;
+}
+
+void ControllerBridge::attemptProfileDetection(
+    const uint16_t ch[CPACK_NUM_CHANNELS]) {
+  if (profile_locked_) return;
+
+  if (looksLikeCustomChannelPack(ch)) {
+    if (custom_layout_streak_ < kProfileDetectFrames) ++custom_layout_streak_;
+    tx_direct_layout_streak_ = 0;
+    if (custom_layout_streak_ >= kProfileDetectFrames) {
+      detected_profile_ = InputProfile::CustomControllerChannelPack;
+      profile_locked_ = true;
+    }
+  } else {
+    if (tx_direct_layout_streak_ < kProfileDetectFrames) {
+      ++tx_direct_layout_streak_;
+    }
+    custom_layout_streak_ = 0;
+    if (tx_direct_layout_streak_ >= kProfileDetectFrames) {
+      detected_profile_ = InputProfile::Tx16sMk3Direct;
+      profile_locked_ = true;
+    }
+  }
+}
+
+// --- TX16S MK3 direct ELRS/EdgeTX decode ------------------------------------
+//
+// Conventional per-channel CRSF values from the saved ROBOT_TX16S_DIRECT model
+// are mapped into the SAME logical raw_ fields the custom controller produces,
+// so all downstream binding/command logic is unchanged. See the channel map in
+// docs/controller_bridge.md and docs/ROBOT_TX16S_channel_map.csv.
+void ControllerBridge::unpackTx16sMk3DirectChannels(
+    const uint16_t ch[CPACK_NUM_CHANNELS], ChannelPackInputs_t* out) {
+  clearRawInputs(out);
+
+  // CH1..CH4: Rud/Thr/Ail/Ele -> gimbals LX, LY, RX, RY.
+  out->gimbal[0] = crsfToGimbalSafe(ch[0]);
+  out->gimbal[1] = crsfToGimbalSafe(ch[1]);
+  out->gimbal[2] = crsfToGimbalSafe(ch[2]);
+  out->gimbal[3] = crsfToGimbalSafe(ch[3]);
+
+  // CH5..CH6: S1/S2 knobs -> Pot1 (speed), Pot2 (body height).
+  out->pot[0] = crsfToPotSafe(ch[4]);
+  out->pot[1] = crsfToPotSafe(ch[5]);
+
+  // CH9..CH10: SE/SD -> SwE mode select, SwF gait select (3-position).
+  out->toggles[0] = crsfToTri(ch[8]);
+  out->toggles[1] = crsfToTri(ch[9]);
+
+  // CH11: SA/SF mix -> 2-bit safety mask (bit0=arm/SwA, bit1=estop/SwB).
+  const uint8_t safety_mask = crsfToBins(ch[10], 4);
+  out->switches[0] = (safety_mask & 0x01) != 0;  // SwA arm
+  out->switches[1] = (safety_mask & 0x02) != 0;  // SwB estop
+
+  // CH12: SB/SC/SG mix -> 4-bit feature mask. bit3/host_authority stays false
+  // until the EdgeTX mix produces it, but the robot side is always 4-bit.
+  const uint8_t feature_mask = crsfToBins(ch[11], 16);
+  out->switches[2] = (feature_mask & 0x01) != 0;  // SwC foot contact
+  out->switches[3] = (feature_mask & 0x02) != 0;  // SwD terrain leveling
+  out->switches[4] = (feature_mask & 0x04) != 0;  // SwG passive pose
+  out->switches[5] = (feature_mask & 0x08) != 0;  // SwH host authority
+
+  // CH13/CH14: GV1 ACT action selector (13 positions) gated by SH action fire.
+  // Selecting an action arms exactly one existing button/nav boolean so the
+  // downstream rising-edge debounce keeps working. Nav2Right is deliberately
+  // unmapped and must stay false.
+  const uint8_t action = crsfToBins(ch[12], 13);
+  const bool fire = crsfToBoolHigh(ch[13]);
+  if (fire) {
+    switch (action) {
+      case 0:  out->nav[0][CPACK_NAV_UP] = true; break;      // trim_pitch_up
+      case 1:  out->nav[0][CPACK_NAV_DOWN] = true; break;    // trim_pitch_down
+      case 2:  out->nav[0][CPACK_NAV_LEFT] = true; break;    // trim_roll_left
+      case 3:  out->nav[0][CPACK_NAV_RIGHT] = true; break;   // trim_roll_right
+      case 4:  out->nav[0][CPACK_NAV_CENTER] = true; break;  // trim_reset
+      case 5:  out->buttons[0] = true; break;                // StandUp
+      case 6:  out->buttons[1] = true; break;                // SitDown
+      case 7:  out->buttons[2] = true; break;                // Wave
+      case 8:  out->buttons[3] = true; break;                // CrouchToggle
+      case 9:  out->nav[1][CPACK_NAV_UP] = true; break;      // Twirl
+      case 10: out->nav[1][CPACK_NAV_DOWN] = true; break;    // Stretch
+      case 11: out->nav[1][CPACK_NAV_LEFT] = true; break;    // LeanLook
+      case 12: out->nav[1][CPACK_NAV_CENTER] = true; break;  // DanceLoop
+      default: break;
+    }
+  }
+  // CH15/CH16 are EdgeTX "MAX 0" -> centred/reserved, no logical effect.
+}
+
+void ControllerBridge::updateTx16sDirectVirtualEncoders(
+    const uint16_t ch[CPACK_NUM_CHANNELS]) {
+  // CH7/CH8 (LS/RS sliders) are ABSOLUTE controls on the TX16S -- there is no
+  // physical relative encoder, so drive enc_accum_[] straight from the value
+  // instead of integrating a wrap-delta. readAxisUnipolar(Enc1/Enc2) then keeps
+  // returning enc_accum_[0/1] so stride/step_height work with defaultBindings().
+  const float enc0 = crsfUnit01(ch[6]);
+  const float enc1 = crsfUnit01(ch[7]);
+
+  raw_.encoder[0] = static_cast<int32_t>(enc0 * 2047.0f);
+  raw_.encoder[1] = static_cast<int32_t>(enc1 * 2047.0f);
+
+  enc_accum_[0] = clampf(enc0, 0.0f, 1.0f);
+  enc_accum_[1] = clampf(enc1, 0.0f, 1.0f);
+
+  enc_seen_[0] = true;
+  enc_seen_[1] = true;
+  enc_last_[0] = raw_.encoder[0];
+  enc_last_[1] = raw_.encoder[1];
 }
 
 float ControllerBridge::readAxisBipolar(const AxisBinding& b) const {
@@ -229,12 +442,38 @@ void ControllerBridge::enterFailsafe(uint32_t now_ms) {
 const ControllerCommand& ControllerBridge::update(
     const uint16_t ch[CPACK_NUM_CHANNELS], bool link_up, uint32_t now_ms) {
   if (!link_up) {
+    // A drop before a profile is locked clears pending streaks so stale startup
+    // frames cannot combine with later frames to lock the wrong layout. Once a
+    // profile is locked it survives link loss (no re-detection on return).
+    if (!profile_locked_) {
+      detected_profile_ = InputProfile::Unknown;
+      custom_layout_streak_ = 0;
+      tx_direct_layout_streak_ = 0;
+    }
     enterFailsafe(now_ms);
     return cmd_;
   }
 
-  ChannelPack::unpackChannels(ch, &raw_);
-  integrateEncoders();
+  // On the first stable connection, classify the decoded layout. Until a profile
+  // stabilises, hold failsafe rather than emit commands from an unknown layout.
+  if (!profile_locked_) {
+    attemptProfileDetection(ch);
+    if (!profile_locked_) {
+      enterFailsafe(now_ms);
+      return cmd_;
+    }
+  }
+
+  if (detected_profile_ == InputProfile::CustomControllerChannelPack) {
+    ChannelPack::unpackChannels(ch, &raw_);
+    integrateEncoders();  // relative wrap-delta integration (custom only)
+  } else if (detected_profile_ == InputProfile::Tx16sMk3Direct) {
+    unpackTx16sMk3DirectChannels(ch, &raw_);
+    updateTx16sDirectVirtualEncoders(ch);  // absolute slider passthrough
+  } else {
+    enterFailsafe(now_ms);
+    return cmd_;
+  }
 
   cmd_.valid = true;
   cmd_.failsafe = false;

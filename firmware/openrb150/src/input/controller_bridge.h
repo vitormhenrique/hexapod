@@ -89,6 +89,21 @@ enum class TriSource : uint8_t {
   SwF,
 };
 
+// --- Input profile (which decoded channel LAYOUT is on the wire) ------------
+//
+// Both the custom ESP32 ChannelPack controller AND a RadioMaster TX16S MK3 in
+// direct ELRS/EdgeTX mode arrive as ordinary CRSF *RC channels* frames -- the
+// CRSF frame TYPE is identical, so detection must NOT look at the frame type.
+// Instead we classify the decoded 16-channel LAYOUT: the custom controller
+// packs switches/buttons/toggles/nav as bitfields into CH9..CH11 and centres
+// CH12..CH16, while the TX16S direct model sends conventional per-channel
+// stick/knob/switch values. See docs/controller_bridge.md.
+enum class InputProfile : uint8_t {
+  Unknown = 0,
+  CustomControllerChannelPack,
+  Tx16sMk3Direct,
+};
+
 // --- Decoded high-level outputs --------------------------------------------
 
 // High-level control mode selected by a 3-position toggle (or a USB override).
@@ -198,6 +213,10 @@ constexpr float kTrimMaxRad = poselim::kMaxRotRad;
 constexpr uint32_t kEdgeRefractoryMs = 150;
 // No fresh frame within this window -> failsafe hold.
 constexpr uint32_t kDefaultFailsafeMs = 250;
+// Consecutive link-up frames that must agree on a layout before the input
+// profile is locked. Prefer stable detection over a first-frame lock so a
+// glitchy startup frame cannot pick the wrong profile.
+constexpr uint8_t kProfileDetectFrames = 3;
 
 // One decoded command the control layer consumes each cycle. All motion fields
 // are already clamped to the safe envelope.
@@ -268,11 +287,32 @@ class ControllerBridge {
   // The most recent raw decoded inputs (for USB raw passthrough, oha.4).
   const ChannelPackInputs_t& rawInputs() const { return raw_; }
 
+  // Input profile detected on the first stable connection (for tests/debug).
+  InputProfile detectedProfile() const { return detected_profile_; }
+  bool profileLocked() const { return profile_locked_; }
+
  private:
   // Integrate the relative encoder deltas into enc_accum_[] once per frame, so
   // the axis readers below stay pure (an encoder bound to several functions is
-  // counted exactly once).
+  // counted exactly once). Custom-controller profile only.
   void integrateEncoders();
+
+  // --- Input-profile detection (layout-level, not CRSF frame type) ----------
+  // Tolerant "near CRSF centre" test for the reserved channels.
+  static bool nearCrsfMid(uint16_t v);
+  // True if the decoded layout matches a packed custom ChannelPack frame.
+  static bool looksLikeCustomChannelPack(const uint16_t ch[CPACK_NUM_CHANNELS]);
+  // Classify a single frame's layout (no streak/lock state).
+  static InputProfile classifyFirstFrame(const uint16_t ch[CPACK_NUM_CHANNELS]);
+  // Accumulate agreeing frames and lock a profile once stable.
+  void attemptProfileDetection(const uint16_t ch[CPACK_NUM_CHANNELS]);
+
+  // Decode a conventional TX16S MK3 direct ELRS/EdgeTX frame into raw_ fields.
+  static void unpackTx16sMk3DirectChannels(
+      const uint16_t ch[CPACK_NUM_CHANNELS], ChannelPackInputs_t* out);
+  // Absolute (not relative) virtual-encoder handling for the TX16S direct
+  // sliders on CH7/CH8. Drives enc_accum_[] directly, bypassing integration.
+  void updateTx16sDirectVirtualEncoders(const uint16_t ch[CPACK_NUM_CHANNELS]);
 
   // Read helpers, normalising whatever source a binding points at.
   float readAxisBipolar(const AxisBinding& b) const;   // -> [-1, 1]
@@ -288,6 +328,13 @@ class ControllerBridge {
   BindingConfig cfg_;
   ControllerCommand cmd_;
   ChannelPackInputs_t raw_;
+
+  // Input-profile detection state. Locked once, never auto-switches until
+  // reset(); a link drop after lock keeps the same profile.
+  InputProfile detected_profile_ = InputProfile::Unknown;
+  bool profile_locked_ = false;
+  uint8_t custom_layout_streak_ = 0;
+  uint8_t tx_direct_layout_streak_ = 0;
 
   // Encoder integration state for shape trims (Enc1, Enc2).
   int32_t enc_last_[2];
