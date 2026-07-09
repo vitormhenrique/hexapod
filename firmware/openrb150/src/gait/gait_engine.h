@@ -45,6 +45,8 @@ constexpr float kSitFootZMm = -8.0f;    // body-down sit pose
 // Cycle frequency range mapped from the speed knob (0..255).
 constexpr float kMinFreqHz = 0.25f;
 constexpr float kMaxFreqHz = 1.20f;
+// Keep a non-zero swing interval even when the host requests 100% stance.
+constexpr float kMaxDutyFactor = 0.95f;
 
 // Normalised body twist command. Each component is clamped to [-1, 1].
 struct BodyTwist {
@@ -94,6 +96,7 @@ class GaitEngine {
   float stride_mm_ = 60.0f;
   float step_mm_ = 30.0f;
   float body_height_mm_ = 40.0f;
+  float requested_duty_ = 0.5f;
   float speed_ = 0.5f;  // 0..1 normalised
   BodyTwist twist_;
 };

@@ -290,6 +290,28 @@ void test_body_pose_neutral_restores_walk_path() {
   }
 }
 
+// The protocol/controller pose envelope is not itself an IK workspace. Even a
+// worst-case valid combined pose must be pulled into the safe annulus rather
+// than producing unreachable joint targets.
+void test_extreme_body_pose_is_reach_limited_not_unreachable() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  BodyPose pose;
+  pose.x_mm = 50.0f;
+  pose.y_mm = -50.0f;
+  pose.z_mm = 50.0f;
+  pose.roll = 0.4363f;
+  pose.pitch = -0.4363f;
+  pose.yaw = 0.4363f;
+  pipe.setBodyPose(pose);
+
+  PipelineOutput out;
+  pipe.update(20, out);
+  TEST_ASSERT_TRUE(out.any_reach_limited);
+  TEST_ASSERT_FALSE(out.any_unreachable);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
@@ -303,5 +325,6 @@ int main(int, char**) {
   RUN_TEST(test_stand_is_not_reach_limited);
   RUN_TEST(test_body_pose_moves_core_over_planted_feet);
   RUN_TEST(test_body_pose_neutral_restores_walk_path);
+  RUN_TEST(test_extreme_body_pose_is_reach_limited_not_unreachable);
   return UNITY_END();
 }

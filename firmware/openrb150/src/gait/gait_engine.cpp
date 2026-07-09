@@ -17,8 +17,10 @@ constexpr float kHomeFootXy[config::kNumLegs][2] = {
     {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
 };
 
-// Per-gait stance duty factor (fraction of the cycle a leg is grounded).
-float gaitDuty(config::GaitId g) {
+// Per-gait minimum stance duty factor (fraction of the cycle grounded). A
+// requested duty may lengthen stance but must never destabilize a gait by
+// dropping below this nominal support pattern.
+float minimumGaitDuty(config::GaitId g) {
   switch (g) {
     case config::GaitId::Tripod:
       return 0.5f;
@@ -79,6 +81,8 @@ void GaitEngine::configure(const config::GaitDefaults& d) {
   stride_mm_ = clampf(static_cast<float>(d.stride_len_mm), 0.0f, kMaxStrideMm);
   step_mm_ = clampf(static_cast<float>(d.step_height_mm), 0.0f, kMaxStepMm);
   body_height_mm_ = static_cast<float>(d.body_height_mm);
+  requested_duty_ = clampf(static_cast<float>(d.duty_x255) / 255.0f, 0.0f,
+                           kMaxDutyFactor);
   speed_ = clampf(static_cast<float>(d.speed_x255) / 255.0f, 0.0f, 1.0f);
 }
 
@@ -92,7 +96,16 @@ void GaitEngine::setTwist(const BodyTwist& t) {
 
 void GaitEngine::reset() { phase_ = 0.0f; }
 
-float GaitEngine::dutyFactor() const { return gaitDuty(gait_); }
+float GaitEngine::dutyFactor() const {
+  const float minimum = minimumGaitDuty(gait_);
+  if (minimum >= 1.0f) return 1.0f;
+  // x255 cannot encode 0.5 exactly (128/255 is ~0.502). Treat values within
+  // one wire quantization step of the nominal duty as nominal so the tripod
+  // groups remain exactly opposite at the conventional value 128.
+  constexpr float kDutyQuantization = 1.0f / 255.0f;
+  return requested_duty_ > minimum + kDutyQuantization ? requested_duty_
+                                                        : minimum;
+}
 
 void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
   x = kHomeFootXy[leg][0];
@@ -120,7 +133,7 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
   const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
   phase_ = frac01(phase_ + freq * dt_s);
 
-  const float beta = gaitDuty(gait_);
+  const float beta = dutyFactor();
   const float swing_span = (beta < 1.0f) ? (1.0f - beta) : 1.0f;
 
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {

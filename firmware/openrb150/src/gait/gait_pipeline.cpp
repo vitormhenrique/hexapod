@@ -66,10 +66,15 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
     if (apply_pose_) {
       // Body-pose mode: the gait foot target is treated as a world-fixed
       // foothold and re-expressed in the moved body frame, so the body shifts
-      // and tilts over planted feet (oha.3). The pose is already clamped to a
-      // safe envelope by the caller, so no reach-margin pull-in is applied;
-      // unreachable targets are still reported.
-      ik = body_.solveBodyPose(leg, pose_, f.x_mm, f.y_mm, f.z_mm);
+      // and tilts over planted feet (oha.3). The API envelope alone cannot
+      // guarantee every transformed leg target is reachable, so apply the same
+      // final safe-annulus clamp used by ordinary gait targets.
+      bool reach_limited = false;
+      ik = body_.solveBodyPoseLimited(leg, pose_, f.x_mm, f.y_mm, f.z_mm,
+                                      reach_limited);
+      if (reach_limited) {
+        out.any_reach_limited = true;
+      }
     } else {
       bool reach_limited = false;
       ik = body_.solveBodyLimited(leg, f.x_mm, f.y_mm, f.z_mm, reach_limited);

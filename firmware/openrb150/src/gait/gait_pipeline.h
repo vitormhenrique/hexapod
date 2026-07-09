@@ -93,9 +93,9 @@ class GaitPipeline {
   // moving the legs" (oha.3). A neutral (all-zero) pose restores the normal
   // walking path (with reachability-aware stride limiting); a non-neutral pose
   // re-expresses each gait foot target in the moved body frame via
-  // BodyKinematics::solveBodyPose. Translation in mm, rotation in radians; the
-  // caller is responsible for clamping to a safe envelope (the bridge clamps to
-  // controller::poselim, which mirrors protocol::motionlim).
+  // BodyKinematics::solveBodyPoseLimited and clamps it to the safe IK annulus.
+  // Translation is in mm and rotation in radians; callers should still clamp
+  // to their command envelope (controller::poselim / protocol::motionlim).
   void setBodyPose(const BodyPose& pose);
 
   // Reset the gait cycle phase to 0 (e.g. when motion is (re)authorised).

@@ -83,6 +83,12 @@ class BodyKinematics {
   IkResult solveBodyPose(uint8_t leg, const BodyPose& pose, float wx, float wy,
                          float wz) const;
 
+  // Body-pose chain with the same safe-annulus clamp used by walking targets.
+  // Sets `reach_limited` when the transformed foothold had to be adjusted.
+  IkResult solveBodyPoseLimited(uint8_t leg, const BodyPose& pose, float wx,
+                                float wy, float wz,
+                                bool& reach_limited) const;
+
   const LegIk& legIk() const { return ik_; }
 
  private:

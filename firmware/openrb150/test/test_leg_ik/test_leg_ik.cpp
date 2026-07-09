@@ -171,6 +171,17 @@ void test_clamp_reach_preserves_hip_yaw() {
   TEST_ASSERT_TRUE(ik.solve(x, y, z).reachable);
 }
 
+// A target inside the folded two-link boundary is pushed out into the safe
+// annulus while preserving its height.
+void test_clamp_reach_pushes_inner_unreachable_outward() {
+  LegIk ik(kL1, kL2, kL3);
+  float x = kL1 + 20.0f, y = 0.0f, z = 0.0f;
+  const bool clamped = ik.clampToReach(x, y, z);
+  TEST_ASSERT_TRUE(clamped);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, z);
+  TEST_ASSERT_TRUE(ik.solve(x, y, z).reachable);
+}
+
 // ---- BodyKinematics ------------------------------------------------------
 
 void test_body_to_coxa_maps_home_to_radial() {
@@ -312,6 +323,31 @@ void test_solve_body_limited_flags_and_recovers_overreach() {
   TEST_ASSERT_TRUE(far.reachable);  // and the result is back inside the annulus
 }
 
+void test_solve_body_pose_limited_recovers_extreme_pose() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics bk(cfg);
+
+  BodyPose pose;
+  pose.x_mm = 50.0f;
+  pose.y_mm = -50.0f;
+  pose.z_mm = 50.0f;
+  pose.roll = 0.4363f;
+  pose.pitch = -0.4363f;
+  pose.yaw = 0.4363f;
+
+  bool saw_limit = false;
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    bool limited = false;
+    const IkResult r = bk.solveBodyPoseLimited(
+        leg, pose, kHomeFootB[leg].x, kHomeFootB[leg].y, kHomeFootB[leg].z,
+        limited);
+    TEST_ASSERT_TRUE(r.reachable);
+    if (limited) saw_limit = true;
+  }
+  TEST_ASSERT_TRUE(saw_limit);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_home_foot_maps_to_zero_angles);
@@ -325,6 +361,7 @@ int main(int, char**) {
   RUN_TEST(test_clamp_reach_leaves_home_unchanged);
   RUN_TEST(test_clamp_reach_pulls_overreach_to_margin_keeping_height);
   RUN_TEST(test_clamp_reach_preserves_hip_yaw);
+  RUN_TEST(test_clamp_reach_pushes_inner_unreachable_outward);
   RUN_TEST(test_body_to_coxa_maps_home_to_radial);
   RUN_TEST(test_solve_body_home_is_near_zero_all_legs);
   RUN_TEST(test_apply_body_pose_identity);
@@ -334,5 +371,6 @@ int main(int, char**) {
   RUN_TEST(test_solve_body_invalid_leg);
   RUN_TEST(test_body_geometry_from_config_coxa_lift);
   RUN_TEST(test_solve_body_limited_flags_and_recovers_overreach);
+  RUN_TEST(test_solve_body_pose_limited_recovers_extreme_pose);
   return UNITY_END();
 }

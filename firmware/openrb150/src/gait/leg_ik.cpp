@@ -72,21 +72,23 @@ bool LegIk::clampToReach(float& x_mm, float& y_mm, float& z_mm) const {
   const float dz = z_mm;
   const float d = sqrtf(planar_r * planar_r + dz * dz);
   const float d_max = kReachMarginFrac * (l2_ + l3_);
-  if (d <= d_max) {
-    return false;  // already inside the safe reach margin
+  const float d_min = fabsf(l2_ - l3_) +
+                      (1.0f - kReachMarginFrac) * (l2_ + l3_);
+  if (d >= d_min && d <= d_max) {
+    return false;  // already inside the safe reachable annulus
   }
 
-  // Prefer to keep the foot height (dz) fixed and shorten only the radial reach,
-  // so a stance foot stays on its ground plane while the stride is bounded. If
-  // the foot is lower than the whole reach margin (no radial solution at that
-  // height), fall back to scaling both components toward the reach centre.
+  // Prefer to keep the foot height fixed and adjust only radial reach, so a
+  // stance foot stays on its ground plane. For outer over-reach with no radial
+  // solution at this height, scale both components toward the reach centre.
   float planar_r_new;
   float dz_new = dz;
-  if (fabsf(dz) < d_max) {
-    planar_r_new = sqrtf(d_max * d_max - dz * dz);
+  const float target_d = d > d_max ? d_max : d_min;
+  if (fabsf(dz) < target_d) {
+    planar_r_new = sqrtf(target_d * target_d - dz * dz);
     if (planar_r < 0.0f) planar_r_new = -planar_r_new;  // preserve radial sign
   } else {
-    const float s = d_max / d;
+    const float s = target_d / d;
     planar_r_new = planar_r * s;
     dz_new = dz * s;
   }

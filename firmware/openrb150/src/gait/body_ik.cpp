@@ -98,4 +98,12 @@ IkResult BodyKinematics::solveBodyPose(uint8_t leg, const BodyPose& pose,
   return solveBody(leg, bx, by, bz);
 }
 
+IkResult BodyKinematics::solveBodyPoseLimited(
+    uint8_t leg, const BodyPose& pose, float wx, float wy, float wz,
+    bool& reach_limited) const {
+  float bx, by, bz;
+  applyBodyPose(pose, wx, wy, wz, bx, by, bz);
+  return solveBodyLimited(leg, bx, by, bz, reach_limited);
+}
+
 }  // namespace gait

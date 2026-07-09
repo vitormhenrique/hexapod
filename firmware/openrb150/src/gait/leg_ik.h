@@ -63,12 +63,10 @@ class LegIk {
   // is outside the two-link annulus.
   IkResult solve(float x_mm, float y_mm, float z_mm) const;
 
-  // Reachability-aware stride limiter (lmt.14): pull a coxa-frame foot target
-  // radially inward, in place, so its planar reach distance stays within
-  // kReachMarginFrac * (l2 + l3). Foot height (z) and hip-yaw direction are
-  // preserved when possible (only the radial reach is shortened), so a stance
-  // foot stays on its ground plane while the effective stride is bounded.
-  // Returns true if the target was modified (i.e. the raw stride over-reached).
+  // Reachability-aware limiter (lmt.14): clamp a coxa-frame foot target into a
+  // safe annulus, clear of both full extension and the fully-folded boundary.
+  // Foot height and hip-yaw direction are preserved when possible, so a stance
+  // foot stays on its ground plane. Returns true if the target was modified.
   bool clampToReach(float& x_mm, float& y_mm, float& z_mm) const;
 
   // Raw planar rest angles at the home foot (radians), exposed for tests/FK.

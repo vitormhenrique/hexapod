@@ -88,6 +88,29 @@ void test_duty_factors() {
   TEST_ASSERT_FLOAT_WITHIN(1e-3f, 1.0f, ge.dutyFactor());
 }
 
+void test_requested_duty_is_honored_above_stable_minimum() {
+  GaitEngine ge;
+  GaitDefaults d = defaultGait();
+  d.gait = static_cast<uint8_t>(GaitId::Tripod);
+  d.duty_x255 = 204;  // 0.8
+  ge.configure(d);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.8f, ge.dutyFactor());
+
+  // The request follows gait changes but cannot undercut a gait's nominal
+  // support requirement.
+  ge.setGait(GaitId::Wave);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.833f, ge.dutyFactor());
+}
+
+void test_requested_duty_is_bounded_to_leave_swing_time() {
+  GaitEngine ge;
+  GaitDefaults d = defaultGait();
+  d.gait = static_cast<uint8_t>(GaitId::Tripod);
+  d.duty_x255 = 255;
+  ge.configure(d);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kMaxDutyFactor, ge.dutyFactor());
+}
+
 void test_targets_bounded_over_full_cycle() {
   const GaitId gaits[] = {GaitId::Tripod, GaitId::Ripple, GaitId::Wave,
                           GaitId::Crawl};
@@ -207,6 +230,8 @@ int main(int, char**) {
   RUN_TEST(test_sit_lowers_body);
   RUN_TEST(test_tripod_groups_are_opposite_at_phase_zero);
   RUN_TEST(test_duty_factors);
+  RUN_TEST(test_requested_duty_is_honored_above_stable_minimum);
+  RUN_TEST(test_requested_duty_is_bounded_to_leave_swing_time);
   RUN_TEST(test_targets_bounded_over_full_cycle);
   RUN_TEST(test_swing_lift_reaches_step_height);
   RUN_TEST(test_forward_twist_moves_stance_foot_backward);

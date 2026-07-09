@@ -977,7 +977,17 @@ void controlTask(void*) {
       float eff_vx = intent.twist_vx;
       float eff_vy = intent.twist_vy;
       float eff_wz = intent.twist_wz;
-      gait::BodyPose body_pose;  // neutral unless an RC body mode is active
+      gait::BodyPose body_pose;
+      if (!rc_drives) {
+        // Mac/Jetson pose commands are already range-checked by MotionApi.
+        // Feed all six fields into the same body-IK path used by RC body mode.
+        body_pose.x_mm = intent.pose_x_mm;
+        body_pose.y_mm = intent.pose_y_mm;
+        body_pose.z_mm = intent.pose_z_mm;
+        body_pose.roll = intent.pose_roll;
+        body_pose.pitch = intent.pose_pitch;
+        body_pose.yaw = intent.pose_yaw;
+      }
       if (rc_drives) {
         // The controller bridge is the RC command source (oha.3). Snapshot it
         // once so a mid-cycle rcTask write cannot tear the read.
