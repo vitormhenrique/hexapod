@@ -38,6 +38,59 @@ def test_leg_select_lists_all_legs(qtbot) -> None:
     assert page.leg_combo.itemData(cfg.NUM_LEGS - 1) == cfg.NUM_LEGS - 1
 
 
+def test_each_leg_defaults_to_configured_safe_home(qtbot) -> None:
+    _service, page = _make_page(qtbot)
+    for leg in range(page.leg_combo.count()):
+        page.leg_combo.setCurrentIndex(leg)
+        foot = page._workspace_model.home_foot(leg)
+        assert page._foot_spins["x"].value() == round(foot.x)
+        assert page._foot_spins["y"].value() == round(foot.y)
+        assert page._foot_spins["z"].value() == round(foot.z)
+        assert page._target_reachable
+        assert page.reach_badge._value.text() == "SAFE"
+
+
+def test_joint_defaults_to_180_and_sends_relative_centidegrees(
+    qtbot, monkeypatch
+) -> None:
+    service, page = _make_page(qtbot)
+    sent = []
+    monkeypatch.setattr(
+        service,
+        "set_joint_target",
+        lambda leg, joint, angle: sent.append((leg, joint, angle)),
+    )
+
+    assert page.joint_angle.minimum() == 90
+    assert page.joint_angle.maximum() == 270
+    assert page.joint_angle.value() == 180
+    assert "1024–3072 ticks" in page.joint_limit_hint.text()
+    page._send_joint_target()
+    assert sent[-1] == (0, 0, 0)
+
+    page.joint_angle.setValue(195)
+    page._send_joint_target()
+    assert sent[-1] == (0, 0, 1500)
+
+
+def test_unreachable_xyz_is_flagged_and_send_is_blocked(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    service.connected.emit(True)
+    service.maint_lock_changed.emit(True, 7)
+    assert page.send_foot_btn.isEnabled()
+
+    for spin in page._foot_spins.values():
+        spin.setValue(350)
+    assert not page._target_reachable
+    assert page.reach_badge._value.text() == "OUTSIDE"
+    assert not page.send_foot_btn.isEnabled()
+    assert "blocked" in page.reach_detail.text()
+
+    page._set_safe_home()
+    assert page._target_reachable
+    assert page.send_foot_btn.isEnabled()
+
+
 def test_leg_target_result_shows_ticks_and_clamp(qtbot) -> None:
     service, page = _make_page(qtbot)
     # bit1 (femur) low-clamped, bit2 (tibia) high-clamped.

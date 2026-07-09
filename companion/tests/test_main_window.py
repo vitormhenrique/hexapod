@@ -71,6 +71,20 @@ def test_safety_bar_estop_triggers_service(qtbot, monkeypatch) -> None:
     assert fired == [True]
 
 
+def test_literal_ampersands_are_escaped_for_qt_mnemonics(qtbot) -> None:
+    from main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+    assert window.nav._buttons["mode_safety"].text() == "Mode && Safety"
+    assert window.nav._buttons["servo_tuning"].text() == "Servo && DXL"
+
+    connect_page = window.stack.widget(window._pages["connect"])
+    mode_page = window.stack.widget(window._pages["mode_safety"])
+    assert connect_page.title == "Connect && Setup"
+    assert mode_page.title == "Mode && Safety Center"
+
+
 def test_app_main_entry_point_launches_headless(monkeypatch) -> None:
     """Exercise the hexapod-companion entry point end-to-end without blocking.
 

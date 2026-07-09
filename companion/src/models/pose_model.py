@@ -39,6 +39,19 @@ class Point3:
     z: float
 
 
+@dataclass(frozen=True)
+class LegReachAssessment:
+    """Geometric reach verdict for a body-frame foot target."""
+
+    reachable: bool
+    inside_safe_margin: bool
+    distance_mm: float
+    minimum_mm: float
+    maximum_mm: float
+    safe_minimum_mm: float
+    safe_maximum_mm: float
+
+
 @dataclass
 class LegPose:
     """One leg's solved chain in the body frame (mm) plus its joint angles."""
@@ -136,6 +149,16 @@ class _LegXform:
         dy = -self.sin_a * p.x + self.cos_a * p.y
         return Point3(self.hip_x_mm + dx, self.hip_y_mm + dy, self.z_off_mm + p.z)
 
+    def from_body(self, p: Point3) -> Point3:
+        """Body frame -> coxa frame, mirroring firmware ``footBodyToCoxa``."""
+        dx = p.x - self.hip_x_mm
+        dy = p.y - self.hip_y_mm
+        return Point3(
+            self.cos_a * dx - self.sin_a * dy,
+            self.sin_a * dx + self.cos_a * dy,
+            p.z - self.z_off_mm,
+        )
+
 
 class HexapodPoseModel:
     """Mutable per-leg pose state driven by joint telemetry.
@@ -165,6 +188,9 @@ class HexapodPoseModel:
             home_radius_mm,
             home_foot_z_mm,
         )
+        self._l1_mm = config.links.coxa_cmm / 100.0
+        self._l2_mm = config.links.femur_cmm / 100.0
+        self._l3_mm = config.links.tibia_cmm / 100.0
         self._xforms: list[_LegXform] = []
         for leg in config.legs:
             yaw = leg.mount_yaw_cdeg * (math.pi / 180.0) / 100.0
@@ -192,6 +218,37 @@ class HexapodPoseModel:
 
     def leg(self, index: int) -> LegPose:
         return self._legs[index]
+
+    def home_foot(self, leg: int) -> Point3:
+        """Configured all-joints-centered foot target in the body frame."""
+        return self._legs[leg].foot
+
+    def assess_foot_target(
+        self, leg: int, x_mm: float, y_mm: float, z_mm: float
+    ) -> LegReachAssessment:
+        """Assess a body-frame XYZ target using the firmware IK annulus.
+
+        ``reachable`` matches the exact two-link annulus used by ``LegIk``.
+        ``inside_safe_margin`` additionally stays 5% clear of both singular
+        boundaries, matching the gait pipeline's conservative reach margin.
+        """
+        coxa = self._xforms[leg].from_body(Point3(x_mm, y_mm, z_mm))
+        planar_r = math.hypot(coxa.x, coxa.y) - self._l1_mm
+        distance = math.hypot(planar_r, coxa.z)
+        minimum = abs(self._l2_mm - self._l3_mm)
+        maximum = self._l2_mm + self._l3_mm
+        margin = 0.05 * maximum
+        safe_minimum = minimum + margin
+        safe_maximum = 0.95 * maximum
+        return LegReachAssessment(
+            reachable=minimum <= distance <= maximum,
+            inside_safe_margin=safe_minimum <= distance <= safe_maximum,
+            distance_mm=distance,
+            minimum_mm=minimum,
+            maximum_mm=maximum,
+            safe_minimum_mm=safe_minimum,
+            safe_maximum_mm=safe_maximum,
+        )
 
     # --- feeds ------------------------------------------------------------
 

@@ -33,6 +33,24 @@ def test_zero_angles_place_foot_at_home_all_legs() -> None:
         assert math.isclose(foot.z, hz, abs_tol=0.5)
 
 
+def test_home_targets_are_inside_recommended_reach_margin() -> None:
+    m = _model()
+    for leg in range(m.num_legs):
+        foot = m.home_foot(leg)
+        reach = m.assess_foot_target(leg, foot.x, foot.y, foot.z)
+        assert reach.reachable
+        assert reach.inside_safe_margin
+        assert reach.safe_minimum_mm < reach.distance_mm < reach.safe_maximum_mm
+
+
+def test_far_body_target_is_reported_outside_reach() -> None:
+    m = _model()
+    reach = m.assess_foot_target(0, 350.0, 350.0, 350.0)
+    assert not reach.reachable
+    assert not reach.inside_safe_margin
+    assert reach.distance_mm > reach.maximum_mm
+
+
 def test_hip_points_match_mount_plus_lift() -> None:
     config = cfg.default_robot_config()
     m = HexapodPoseModel(config)

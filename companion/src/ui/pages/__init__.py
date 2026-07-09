@@ -116,7 +116,7 @@ class BasePage(QWidget):
 
 
 class ConnectPage(BasePage):
-    title = "Connect & Setup"
+    title = "Connect && Setup"
     subtitle = "Discover the USB port, handshake, and verify firmware capabilities."
 
     def build(self) -> None:
@@ -265,7 +265,7 @@ class OverviewPage(BasePage):
         self.content.addWidget(grid_box)
 
         self.hint = QLabel(
-            "Subscribe on the Mode & Safety page or connect to see live data."
+            "Subscribe on the Mode && Safety page or connect to see live data."
         )
         self.hint.setStyleSheet(f"color: {DRACULA.comment};")
         self.content.addWidget(self.hint)
@@ -340,7 +340,7 @@ class OverviewPage(BasePage):
 
 
 class ModeSafetyPage(BasePage):
-    title = "Mode & Safety Center"
+    title = "Mode && Safety Center"
     subtitle = "Arming, fault recovery, maintenance/passive locks, and feature flags."
 
     STREAMS = [
@@ -471,7 +471,7 @@ class ModeSafetyPage(BasePage):
         return box
 
     def _lock_controls(self) -> QGroupBox:
-        box = QGroupBox("Maintenance & passive pose")
+        box = QGroupBox("Maintenance && passive pose")
         grid = QGridLayout(box)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
@@ -983,9 +983,13 @@ class LegLabPage(BasePage):
 
     def build(self) -> None:
         from hexapod_protocol import config as cfg
+        from models import HexapodPoseModel
 
         self._num_legs = cfg.NUM_LEGS
         self._leg_rows: dict[int, int] = {}  # leg index -> live table row
+        self._workspace_config = cfg.default_robot_config()
+        self._workspace_model = HexapodPoseModel(self._workspace_config)
+        self._target_reachable = True
 
         self.content.addWidget(self._maintenance_box())
         self.content.addWidget(self._leg_select())
@@ -1015,10 +1019,13 @@ class LegLabPage(BasePage):
         self.service.state_changed.connect(self._on_state_changed)
         self.service.maint_result.connect(self._on_maint_result)
         self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self.service.config_loaded.connect(self._on_config_loaded)
         self.service.leg_target_result.connect(self._on_leg_result)
         self.service.joint_target_result.connect(self._on_joint_result)
         self.service.telemetry.connect(self._on_telemetry)
 
+        self._set_safe_home()
+        self._update_joint_limits()
         self._apply_gates()
 
     # --- groups -----------------------------------------------------------
@@ -1058,8 +1065,17 @@ class LegLabPage(BasePage):
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
         self.leg_combo = QComboBox()
-        for leg in range(self._num_legs):
-            self.leg_combo.addItem(f"Leg {leg}", leg)
+        names = (
+            "rear left",
+            "rear right",
+            "middle right",
+            "front right",
+            "front left",
+            "middle left",
+        )
+        for leg, name in enumerate(names[: self._num_legs]):
+            self.leg_combo.addItem(f"Leg {leg + 1} — {name}", leg)
+        self.leg_combo.currentIndexChanged.connect(self._on_leg_changed)
         form.addRow("Active leg", self.leg_combo)
         return box
 
@@ -1068,19 +1084,51 @@ class LegLabPage(BasePage):
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
+        hint = QLabel(
+            "X moves forward/back, Y moves left/right, and Z moves up/down. "
+            "Start from Safe home and make small changes; the preview uses the "
+            "active robot geometry before a command can be sent."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DRACULA.comment};")
+        form.addRow(hint)
         self._foot_spins = {}
         for attr, label in (("x", "X (forward)"), ("y", "Y (left)"), ("z", "Z (up)")):
             spin = QSpinBox()
-            spin.setRange(-400, 400)
+            spin.setRange(-350, 350)
             spin.setValue(0)
             spin.setSuffix(" mm")
+            spin.setSingleStep(1)
+            spin.setAccelerated(True)
+            spin.valueChanged.connect(self._update_reach_preview)
             self._foot_spins[attr] = spin
             form.addRow(label, spin)
+
+        self.reach_badge = StatusBadge("Reach preview")
+        self.reach_badge.set("checking", "idle")
+        self.reach_detail = QLabel("")
+        self.reach_detail.setObjectName("MonoLabel")
+        self.reach_detail.setWordWrap(True)
+        reach_row = QHBoxLayout()
+        reach_row.addWidget(self.reach_badge)
+        reach_row.addWidget(self.reach_detail, 1)
+        form.addRow("Workspace", self._wrap(reach_row))
+
+        reset = QPushButton("Use safe home")
+        reset.setToolTip(
+            "Load the selected leg's configured all-joints-at-180° home target."
+        )
+        reset.clicked.connect(self._set_safe_home)
+        self.safe_home_btn = reset
         send = QPushButton("Send foot target")
         send.setProperty("accent", True)
         send.clicked.connect(self._send_foot_target)
         self.send_foot_btn = send
-        form.addRow("", send)
+        actions = QHBoxLayout()
+        actions.addWidget(reset)
+        actions.addWidget(send)
+        actions.addStretch(1)
+        form.addRow("", self._wrap(actions))
         self.foot_result = QLabel("--")
         self.foot_result.setObjectName("MonoLabel")
         self.foot_result.setWordWrap(True)
@@ -1088,24 +1136,44 @@ class LegLabPage(BasePage):
         return box
 
     def _joint_target(self) -> QGroupBox:
-        box = QGroupBox("Joint target (URDF-zero relative)")
+        box = QGroupBox("Joint target (physical servo angle)")
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
+        note = QLabel(
+            "180° is the safe calibrated center (firmware-relative 0° / nominal "
+            "MX-28 center tick 2048). Move one joint at a time and watch clamp feedback."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {DRACULA.comment};")
+        form.addRow(note)
         self.joint_combo = QComboBox()
         for label, jid in self.JOINTS:
             self.joint_combo.addItem(label, jid)
+        self.joint_combo.currentIndexChanged.connect(self._update_joint_limits)
         form.addRow("Joint", self.joint_combo)
         self.joint_angle = QSpinBox()
-        self.joint_angle.setRange(-180, 180)
-        self.joint_angle.setValue(0)
+        self.joint_angle.setRange(0, 360)
+        self.joint_angle.setValue(180)
         self.joint_angle.setSuffix(" \u00b0")
-        form.addRow("Angle", self.joint_angle)
+        self.joint_angle.setToolTip(
+            "Displayed as a physical servo angle; 180° is sent as 0° relative."
+        )
+        form.addRow("Servo angle", self.joint_angle)
+        self.joint_limit_hint = QLabel("")
+        self.joint_limit_hint.setObjectName("MonoLabel")
+        form.addRow("Configured travel", self.joint_limit_hint)
+        center = QPushButton("Reset to 180° center")
+        center.clicked.connect(lambda: self.joint_angle.setValue(180))
         send = QPushButton("Send joint target")
         send.setProperty("accent", True)
         send.clicked.connect(self._send_joint_target)
         self.send_joint_btn = send
-        form.addRow("", send)
+        actions = QHBoxLayout()
+        actions.addWidget(center)
+        actions.addWidget(send)
+        actions.addStretch(1)
+        form.addRow("", self._wrap(actions))
         self.joint_result = QLabel("--")
         self.joint_result.setObjectName("MonoLabel")
         self.joint_result.setWordWrap(True)
@@ -1139,12 +1207,84 @@ class LegLabPage(BasePage):
 
     def _send_joint_target(self) -> None:
         self.joint_result.setText("sending\u2026")
-        # Firmware expects centidegrees; the spinbox is whole degrees.
+        # The UI shows the physical servo convention (180° center); firmware
+        # expects a URDF-zero-relative centidegree angle.
         self.service.set_joint_target(
             self.leg_combo.currentData(),
             self.joint_combo.currentData(),
-            self.joint_angle.value() * 100,
+            (self.joint_angle.value() - 180) * 100,
         )
+
+    def _on_leg_changed(self, _index: int) -> None:
+        self.joint_angle.setValue(180)
+        self._set_safe_home()
+        self._update_joint_limits()
+
+    def _update_joint_limits(self, _index: int | None = None) -> None:
+        import math
+
+        from hexapod_protocol import config as cfg
+
+        leg = self.leg_combo.currentData()
+        joint = self.joint_combo.currentData()
+        if leg is None or joint is None:
+            return
+        servo = cfg.ServoMap(self._workspace_config).servo_for(int(leg), int(joint))
+        if servo is None:
+            self.joint_angle.setRange(180, 180)
+            self.joint_limit_hint.setText("unmapped joint")
+            return
+        physical = sorted(
+            (
+                180.0 + math.degrees(cfg.tick_to_angle(servo, servo.min_tick)),
+                180.0 + math.degrees(cfg.tick_to_angle(servo, servo.max_tick)),
+            )
+        )
+        low = max(0, math.ceil(physical[0]))
+        high = min(360, math.floor(physical[1]))
+        self.joint_angle.setRange(low, high)
+        self.joint_angle.setValue(min(high, max(low, 180)))
+        self.joint_limit_hint.setText(
+            f"{low}°–{high}° from servo {servo.id} limits "
+            f"({servo.min_tick}–{servo.max_tick} ticks)"
+        )
+
+    def _set_safe_home(self) -> None:
+        leg = self.leg_combo.currentData()
+        if leg is None:
+            return
+        foot = self._workspace_model.home_foot(int(leg))
+        self._foot_spins["x"].setValue(round(foot.x))
+        self._foot_spins["y"].setValue(round(foot.y))
+        self._foot_spins["z"].setValue(round(foot.z))
+        self._update_reach_preview()
+
+    def _update_reach_preview(self, _value: int | None = None) -> None:
+        leg = self.leg_combo.currentData()
+        if leg is None:
+            return
+        reach = self._workspace_model.assess_foot_target(
+            int(leg),
+            self._foot_spins["x"].value(),
+            self._foot_spins["y"].value(),
+            self._foot_spins["z"].value(),
+        )
+        self._target_reachable = reach.reachable
+        if reach.inside_safe_margin:
+            self.reach_badge.set("SAFE", "ok")
+            verdict = "inside recommended margin"
+        elif reach.reachable:
+            self.reach_badge.set("EDGE", "warn")
+            verdict = "reachable, but near an IK boundary"
+        else:
+            self.reach_badge.set("OUTSIDE", "error")
+            verdict = "outside geometric reach — command blocked"
+        self.reach_detail.setText(
+            f"{verdict}; planar reach {reach.distance_mm:.1f} mm · "
+            f"recommended {reach.safe_minimum_mm:.1f}–{reach.safe_maximum_mm:.1f} mm"
+        )
+        if hasattr(self, "send_foot_btn"):
+            self._apply_gates()
 
     # --- reactions --------------------------------------------------------
 
@@ -1161,6 +1301,16 @@ class LegLabPage(BasePage):
             self.leg_table.setRowCount(0)
             self._leg_rows.clear()
         self._apply_gates()
+
+    def _on_config_loaded(self, config) -> None:
+        if config is None:
+            return
+        from models import HexapodPoseModel
+
+        self._workspace_config = config
+        self._workspace_model = HexapodPoseModel(config)
+        self._set_safe_home()
+        self._update_joint_limits()
 
     def _on_state_changed(self, state: int) -> None:
         self._state = state
@@ -1191,8 +1341,18 @@ class LegLabPage(BasePage):
             "Requires connection and a Disarmed / Stand Ready robot.",
         )
         gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
-        for btn in (self.send_foot_btn, self.send_joint_btn):
-            gate(btn, con and held, "Enter Maintenance first — targets need the lock.")
+        gate(
+            self.send_foot_btn,
+            con and held and self._target_reachable,
+            "Adjust XYZ into the reachable workspace."
+            if con and held
+            else "Enter Maintenance first — targets need the lock.",
+        )
+        gate(
+            self.send_joint_btn,
+            con and held,
+            "Enter Maintenance first — targets need the lock.",
+        )
 
     def _on_maint_result(self, res) -> None:
         if res.token:
@@ -1291,7 +1451,7 @@ class LegLabPage(BasePage):
 
 
 class ServoConfigPage(BasePage):
-    title = "Servo Map & Config"
+    title = "Servo Map && Config"
     subtitle = (
         "View, edit, validate, diff, stage, and commit the EEPROM-backed servo "
         "map. Export/import the full robot config as JSON."
@@ -1649,7 +1809,7 @@ class ServoConfigPage(BasePage):
 
 
 class ServoTuningPage(BasePage):
-    title = "Servo Monitor & DXL Tuning"
+    title = "Servo Monitor && DXL Tuning"
     subtitle = (
         "Live per-servo status and safe logical-parameter writes "
         "(staged, verified, read-back)."
@@ -1776,7 +1936,7 @@ class ServoTuningPage(BasePage):
         self.param_value.setRange(self.INT32_MIN, self.INT32_MAX)
         form.addRow("New value", self.param_value)
 
-        write = QPushButton("Stage & write")
+        write = QPushButton("Stage && write")
         write.setProperty("accent", True)
         write.clicked.connect(self._write_param)
         form.addRow("", write)
@@ -2090,7 +2250,7 @@ class ServoTuningPage(BasePage):
 
 
 class FootContactPage(BasePage):
-    title = "Foot Contact & Leveling"
+    title = "Foot Contact && Leveling"
     subtitle = (
         "Per-leg touchdown state, live proximity/pressure, threshold tuning, "
         "and contact/leveling enable with reasons."
@@ -2143,7 +2303,7 @@ class FootContactPage(BasePage):
         return box
 
     def _feature_controls(self) -> QGroupBox:
-        box = QGroupBox("Contact & terrain leveling")
+        box = QGroupBox("Contact && terrain leveling")
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
@@ -2197,7 +2357,7 @@ class FootContactPage(BasePage):
         self.thr_load.setRange(0, 0xFFFF)
         form.addRow("Load (Δpressure)", self.thr_load)
 
-        write = QPushButton("Stage & write thresholds")
+        write = QPushButton("Stage && write thresholds")
         write.setProperty("accent", True)
         write.clicked.connect(self._write_thresholds)
         form.addRow("", write)
@@ -2318,7 +2478,7 @@ class FootContactPage(BasePage):
 
 
 class SensorDashboardPage(BasePage):
-    title = "Sensor Dashboard & I2C"
+    title = "Sensor Dashboard && I2C"
     subtitle = (
         "Root I2C topology, TCA9548A mux channels, live Robotic Finger Sensor v2 "
         "values, poll-rate control, and baseline calibration."
@@ -2414,7 +2574,7 @@ class SensorDashboardPage(BasePage):
         return box
 
     def _controls_group(self) -> QGroupBox:
-        box = QGroupBox("Polling & calibration")
+        box = QGroupBox("Polling && calibration")
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
@@ -2570,7 +2730,7 @@ class SensorDashboardPage(BasePage):
 
 class PassivePosePage(BasePage):
 
-    title = "Passive Pose & Stream"
+    title = "Passive Pose && Stream"
     subtitle = (
         "Torque-off passive streaming: hand-pose the robot and watch joint "
         "angles update live for calibration and URDF capture."
@@ -2887,7 +3047,7 @@ class RcTroubleshootingPage(BasePage):
         return box
 
     def _channel_group(self) -> QGroupBox:
-        box = QGroupBox("Channels — raw ticks & parsed values")
+        box = QGroupBox("Channels — raw ticks && parsed values")
         lay = QVBoxLayout(box)
         self.table = QTableWidget(self.NUM_CH, len(self.CHANNEL_COLUMNS))
         self.table.setHorizontalHeaderLabels(self.CHANNEL_COLUMNS)
