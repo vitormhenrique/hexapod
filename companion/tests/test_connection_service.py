@@ -83,6 +83,114 @@ def test_command_when_disconnected_emits_error(qtbot) -> None:
     assert "not connected" in msg
 
 
+def test_gait_test_session_sets_up_and_unwinds_without_rc(qtbot, monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def dxl_power(self, on):
+            self.calls.append(("power", on))
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([int(on), 1])
+            )
+
+        def dxl_scan(self, first, last):
+            self.calls.append(("scan", first, last))
+            records = b"".join(
+                bytes([sid, 29, 0, 1, 2, 1]) for sid in range(1, 19)
+            )
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([18]) + records
+            )
+
+        def set_maint_control_mode(self, mode):
+            self.calls.append(("mode", mode))
+            return api.MaintControlModeResult(api.MAINT_TARGET_OK, 8, mode)
+
+        def set_gait_params(self, *args):
+            self.calls.append(("params", *args))
+
+        def set_body_pose(self, *args):
+            self.calls.append(("pose", *args))
+
+        def set_body_twist(self, *args):
+            self.calls.append(("twist", *args))
+
+        def set_gait(self, gait):
+            self.calls.append(("gait", gait))
+
+        def stop_motion(self):
+            self.calls.append(("stop",))
+
+        def dxl_torque(self, on):
+            self.calls.append(("torque", on))
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE,
+                api.DXL_CODE_OK,
+                    bytes([int(on), 18]),
+            )
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    service._acquire_maint_lock = lambda _c: True  # type: ignore[method-assign]
+    service._wait_state = lambda *_a, **_k: True  # type: ignore[method-assign]
+    released = []
+    service._release_maint_lock = lambda _c: released.append(True)  # type: ignore[method-assign]
+    monkeypatch.setattr(services_mod.time, "sleep", lambda _s: None)
+
+    service.start_gait_test(40, 60, 30, 128, 180)
+    qtbot.waitUntil(lambda: service.gait_test_active, timeout=2000)
+    assert ("mode", api.MAINT_CONTROL_GAIT_PIPELINE) in client.calls
+    assert ("torque", True) in client.calls
+    assert client.calls.index(("gait", api.GAIT_STAND)) < client.calls.index(
+        ("torque", True)
+    )
+
+    service.stop_gait_test()
+    qtbot.waitUntil(
+        lambda: not service.gait_test_active and not service.gait_test_busy,
+        timeout=2000,
+    )
+    assert ("torque", False) in client.calls
+    assert ("mode", api.MAINT_CONTROL_JOINT_TARGETS) in client.calls
+    assert ("power", False) in client.calls
+    assert released == [True]
+
+
+def test_gait_test_stop_requires_all_torque_off_acknowledgements(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def set_body_twist(self, *_args):
+            pass
+
+        def set_body_pose(self, *_args):
+            pass
+
+        def stop_motion(self):
+            pass
+
+        def dxl_torque(self, _on):
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([0, 17])
+            )
+
+    service = ConnectionService()
+    service._client = FakeClient()  # type: ignore[assignment]
+    service._gait_test_active = True
+    errors = []
+    service.error.connect(errors.append)
+
+    service.stop_gait_test()
+    qtbot.waitUntil(lambda: not service.gait_test_busy, timeout=2000)
+    assert service.gait_test_active
+    assert errors and "torque off not confirmed" in errors[-1]
+
+
 def test_dxl_get_param_emits_decoded_result(qtbot) -> None:
     import struct
 

@@ -677,6 +677,24 @@ def test_build_set_all_joint_targets_requires_18():
         api.build_set_all_joint_targets([0] * 17)
 
 
+def test_maintenance_control_mode_roundtrip():
+    wire = api.build_set_maint_control_mode(
+        api.MAINT_CONTROL_GAIT_PIPELINE, seq=12
+    )
+    hdr, payload = decode_frame_body(wire[1:-1])
+    assert hdr.msg_id == api.MSG_SET_MAINT_CONTROL_MODE == 0x56
+    assert payload == bytes([api.MAINT_CONTROL_GAIT_PIPELINE])
+
+    result = api.parse_maint_control_mode_result(
+        bytes([api.MAINT_TARGET_OK, 8, api.MAINT_CONTROL_GAIT_PIPELINE])
+    )
+    assert result.ok and result.state == 8
+    assert result.mode == api.MAINT_CONTROL_GAIT_PIPELINE
+
+    with pytest.raises(ValueError):
+        api.build_set_maint_control_mode(2)
+
+
 def test_parse_all_joint_target_result():
     ok = api.parse_all_joint_target_result(
         bytes([api.MAINT_TARGET_OK, 8, 18, 0x00, 0x00, 0x00])

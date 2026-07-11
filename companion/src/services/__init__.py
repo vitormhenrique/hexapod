@@ -59,6 +59,8 @@ class ConnectionService(QObject):
     passive_result = Signal(str, object)  # kind, api.PassiveResult
     passive_rate_result = Signal(object)  # api.PassiveRateResult
     maint_lock_changed = Signal(bool, int)  # held, token
+    gait_test_changed = Signal(bool, str)  # active, phase/detail
+    gait_test_busy_changed = Signal(bool)
     state_changed = Signal(int)  # latest safety state (-1 = unknown/disconnected)
 
     def __init__(self) -> None:
@@ -85,6 +87,10 @@ class ConnectionService(QObject):
         # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
         # background thread or MacMaintenance silently lapses to Disarmed.
         self._maint_hb_stop: Optional[threading.Event] = None
+        self._gait_test_active = False
+        self._gait_test_busy = False
+        self._gait_test_owns_lock = False
+        self._gait_test_cancel = threading.Event()
         # True while a passive-pose flow owns the maintenance lock + DXL power
         # it set up, so passive_exit only unwinds what it created (a user who
         # was already doing bench maintenance is left in maintenance).
@@ -833,6 +839,228 @@ class ConnectionService(QObject):
             self.maint_lock_changed.emit(False, 0)
             if notify:
                 self.event.emit("error", "maintenance lock lost (link down)")
+        if self._gait_test_active or self._gait_test_busy:
+            self._gait_test_active = False
+            self._gait_test_busy = False
+            self._gait_test_owns_lock = False
+            self._gait_test_cancel.set()
+            self.gait_test_busy_changed.emit(False)
+            self.gait_test_changed.emit(False, "connection lost")
+
+    @property
+    def gait_test_active(self) -> bool:
+        return self._gait_test_active
+
+    @property
+    def gait_test_busy(self) -> bool:
+        return self._gait_test_busy
+
+    def start_gait_test(
+        self,
+        body_height_mm: int,
+        stride_len_mm: int,
+        step_height_mm: int,
+        duty_x255: int,
+        speed_x255: int,
+    ) -> None:
+        """Start high-level gait control under MacMaintenance, without RC."""
+        client = self._client
+        if client is None:
+            self.error.emit("gait test: not connected")
+            return
+        if self._gait_test_active:
+            self.gait_test_changed.emit(True, "running")
+            return
+        if self._gait_test_busy:
+            return
+
+        self._gait_test_busy = True
+        self._gait_test_cancel.clear()
+        self.gait_test_busy_changed.emit(True)
+        self.gait_test_changed.emit(False, "starting")
+        acquired_here = not bool(self._maint_token)
+
+        def fail(detail: str, acquired_here: bool) -> None:
+            try:
+                client.stop_motion()
+                client.dxl_torque(False)
+                client.set_maint_control_mode(api.MAINT_CONTROL_JOINT_TARGETS)
+                if acquired_here:
+                    client.dxl_power(False)
+                    self._release_maint_lock(client)
+            except Exception:
+                pass
+            self._gait_test_active = False
+            self._gait_test_busy = False
+            self._gait_test_owns_lock = False
+            self.gait_test_busy_changed.emit(False)
+            self.gait_test_changed.emit(False, detail)
+            if detail != "start cancelled":
+                self.error.emit(f"gait test: {detail}")
+
+        def cancelled(acquired_here: bool) -> bool:
+            if not self._gait_test_cancel.is_set():
+                return False
+            fail("start cancelled", acquired_here)
+            return True
+
+        def worker() -> None:
+            self.gait_test_changed.emit(False, "acquiring maintenance")
+            if not self._acquire_maint_lock(client):
+                fail("maintenance lock rejected", acquired_here)
+                return
+            if cancelled(acquired_here):
+                return
+            if not self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0):
+                fail("did not reach MacMaintenance", acquired_here)
+                return
+            if cancelled(acquired_here):
+                return
+
+            self.gait_test_changed.emit(False, "powering DXL bus")
+            power = client.dxl_power(True)
+            power_state = power.power() if power and power.done else None
+            if power_state is None or not power_state.power_on:
+                fail("DXL power on failed", acquired_here)
+                return
+            if cancelled(acquired_here):
+                return
+
+            self.gait_test_changed.emit(False, "discovering 18 servos")
+            servos = []
+            for _ in range(4):
+                time.sleep(1.0)
+                if self._client is not client:
+                    return
+                scan = client.dxl_scan(1, 18)
+                servos = scan.servos() if scan and scan.done else []
+                if len(servos) == 18:
+                    break
+                if cancelled(acquired_here):
+                    return
+            if len(servos) != 18:
+                fail(f"expected 18 servos, found {len(servos)}", acquired_here)
+                return
+            if cancelled(acquired_here):
+                return
+
+            mode = client.set_maint_control_mode(
+                api.MAINT_CONTROL_GAIT_PIPELINE
+            )
+            if mode is None or not mode.ok:
+                fail("firmware rejected gait-pipeline mode", acquired_here)
+                return
+            if cancelled(acquired_here):
+                return
+
+            # Seed a neutral, static intent before torque is enabled. The DXL
+            # torque job separately seeds every Goal Position from its measured
+            # Present Position, so this transition cannot replay stale goals.
+            client.set_gait_params(
+                body_height_mm,
+                stride_len_mm,
+                step_height_mm,
+                duty_x255,
+                speed_x255,
+            )
+            client.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            client.set_body_twist(0.0, 0.0, 0.0)
+            client.set_gait(api.GAIT_STAND)
+
+            self.gait_test_changed.emit(False, "enabling torque")
+            torque = client.dxl_torque(True)
+            torque_ok = (
+                torque is not None
+                and torque.done
+                and torque.code == api.DXL_CODE_OK
+                and len(torque.data) >= 2
+                and torque.data[0] == 1
+                and torque.data[1] == 18
+            )
+            if not torque_ok:
+                fail("not all 18 servos enabled torque", acquired_here)
+                return
+
+            self._gait_test_active = True
+            self._gait_test_busy = False
+            self._gait_test_owns_lock = acquired_here
+            self.gait_test_busy_changed.emit(False)
+            self.gait_test_changed.emit(True, "running in MacMaintenance")
+            self.event.emit("commit", "gait test running without RC")
+
+        def guarded_worker() -> None:
+            try:
+                worker()
+            except Exception as exc:
+                fail(f"setup failed: {exc}", acquired_here)
+
+        threading.Thread(
+            target=guarded_worker, name="hexapod-gait-start", daemon=True
+        ).start()
+
+    def stop_gait_test(self) -> None:
+        """Stop motion, disable torque, and unwind this page's bench session."""
+        client = self._client
+        if client is None:
+            self._gait_test_active = False
+            self._gait_test_busy = False
+            self.gait_test_busy_changed.emit(False)
+            self.gait_test_changed.emit(False, "disconnected")
+            return
+        if self._gait_test_busy and not self._gait_test_active:
+            self._gait_test_cancel.set()
+            self.gait_test_changed.emit(False, "stopping setup")
+            return
+        if not self._gait_test_active:
+            return
+
+        self._gait_test_busy = True
+        self.gait_test_busy_changed.emit(True)
+        self.gait_test_changed.emit(True, "stopping")
+
+        def worker() -> None:
+            try:
+                client.set_body_twist(0.0, 0.0, 0.0)
+                client.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                client.stop_motion()
+                time.sleep(0.35)
+                torque = client.dxl_torque(False)
+            except Exception as exc:
+                self._gait_test_busy = False
+                self.gait_test_busy_changed.emit(False)
+                detail = f"stop failed: {exc}; retry Stop or use ESTOP"
+                self.gait_test_changed.emit(True, detail)
+                self.error.emit(f"gait test: {detail}")
+                return
+
+            torque_off = (
+                torque is not None
+                and torque.done
+                and torque.code == api.DXL_CODE_OK
+                and len(torque.data) >= 2
+                and torque.data[0] == 0
+                and torque.data[1] == 18
+            )
+            if not torque_off:
+                self._gait_test_busy = False
+                self.gait_test_busy_changed.emit(False)
+                detail = "torque off not confirmed; retry Stop or use ESTOP"
+                self.gait_test_changed.emit(True, detail)
+                self.error.emit(f"gait test: {detail}")
+                return
+
+            client.set_maint_control_mode(api.MAINT_CONTROL_JOINT_TARGETS)
+            if self._gait_test_owns_lock:
+                client.dxl_power(False)
+                self._release_maint_lock(client)
+            self._gait_test_active = False
+            self._gait_test_busy = False
+            self._gait_test_owns_lock = False
+            self.gait_test_busy_changed.emit(False)
+            self.gait_test_changed.emit(False, "stopped; torque off")
+            self.event.emit("commit", "gait test stopped")
+
+        threading.Thread(target=worker, name="hexapod-gait-stop", daemon=True).start()
 
     def set_leg_target(self, leg: int, x_mm: int, y_mm: int, z_mm: int) -> None:
         """Command one leg's foot to (x, y, z) mm (body frame); emit IK verdict.

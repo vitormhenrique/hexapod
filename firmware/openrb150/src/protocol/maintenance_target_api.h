@@ -47,8 +47,9 @@ namespace mainttargetmsg {
 constexpr uint8_t kSetLegTarget = 0x53;
 constexpr uint8_t kSetJointTarget = 0x54;
 constexpr uint8_t kSetAllJoints = 0x55;
+constexpr uint8_t kSetControlMode = 0x56;
 constexpr uint8_t kFirst = kSetLegTarget;
-constexpr uint8_t kLast = kSetAllJoints;
+constexpr uint8_t kLast = kSetControlMode;
 inline bool isMaintTargetMsg(uint8_t id) { return id >= kFirst && id <= kLast; }
 }  // namespace mainttargetmsg
 
@@ -57,6 +58,11 @@ enum class MaintTargetResult : uint8_t {
   Rejected = 1,     // not in MacMaintenance / lock not held / no config
   BadRequest = 2,   // malformed payload or bad leg/joint index
   Unreachable = 3,  // leg-target IK outside workspace (computed, NOT stored)
+};
+
+enum class MaintControlMode : uint8_t {
+  JointTargets = 0,
+  GaitPipeline = 1,
 };
 
 // Live safety state value that gates maintenance moves (safety::State value).
@@ -107,6 +113,8 @@ class MaintTargetApi {
   }
 
   const MaintTargetSet& target() const { return target_; }
+  MaintControlMode controlMode() const { return control_mode_; }
+  void resetControlMode() { control_mode_ = MaintControlMode::JointTargets; }
 
   // Forget all stored joint/leg targets (keeps config + gate state). Called on
   // each MacMaintenance entry so a previous bench session's targets can never
@@ -133,6 +141,7 @@ class MaintTargetApi {
   const config::RobotConfig* cfg_ = nullptr;
   uint8_t live_state_ = 0;
   bool lock_held_ = false;
+  MaintControlMode control_mode_ = MaintControlMode::JointTargets;
   MaintTargetSet target_;
 };
 

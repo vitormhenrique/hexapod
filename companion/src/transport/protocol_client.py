@@ -561,6 +561,12 @@ class ProtocolClient:
         r = self._send_built(api.build_set_all_joint_targets(angles_cdeg))
         return api.parse_all_joint_target_result(r.payload) if r else None
 
+    def set_maint_control_mode(
+        self, mode: int
+    ) -> Optional[api.MaintControlModeResult]:
+        r = self._send_built(api.build_set_maint_control_mode(mode))
+        return api.parse_maint_control_mode_result(r.payload) if r else None
+
     # --- EEPROM-backed robot config --------------------------------------
     #
     # The serialized RobotConfig is larger than one frame, so reads/writes are

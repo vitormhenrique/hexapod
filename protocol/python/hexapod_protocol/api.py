@@ -73,6 +73,10 @@ MSG_MAINT_HEARTBEAT = 0x52
 MSG_SET_LEG_TARGET = 0x53
 MSG_SET_JOINT_TARGET = 0x54
 MSG_SET_ALL_JOINT_TARGETS = 0x55
+MSG_SET_MAINT_CONTROL_MODE = 0x56
+
+MAINT_CONTROL_JOINT_TARGETS = 0
+MAINT_CONTROL_GAIT_PIPELINE = 1
 
 # Telemetry frame msg-id base: a telemetry frame for stream s arrives with
 # header msg_id = MSG_TELEMETRY_BASE + s (header msg_type == TELEMETRY).
@@ -1378,6 +1382,38 @@ def build_set_all_joint_targets(
         MSG_SET_ALL_JOINT_TARGETS,
         seq=seq,
         payload=struct.pack("<18h", *angles_cdeg),
+    )
+
+
+def build_set_maint_control_mode(mode: int, seq: int = 0) -> bytes:
+    """Select joint-target or high-level gait control for MacMaintenance."""
+    if mode not in (MAINT_CONTROL_JOINT_TARGETS, MAINT_CONTROL_GAIT_PIPELINE):
+        raise ValueError(f"invalid maintenance control mode: {mode}")
+    return build_command(
+        MSG_SET_MAINT_CONTROL_MODE, seq=seq, payload=bytes([mode])
+    )
+
+
+@dataclass
+class MaintControlModeResult:
+    result: int
+    state: int
+    mode: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == MAINT_TARGET_OK
+
+
+def parse_maint_control_mode_result(payload: bytes) -> MaintControlModeResult:
+    if len(payload) >= 3:
+        return MaintControlModeResult(payload[0], payload[1], payload[2])
+    if len(payload) >= 2:
+        return MaintControlModeResult(payload[0], payload[1], MAINT_CONTROL_JOINT_TARGETS)
+    return MaintControlModeResult(
+        payload[0] if payload else MAINT_TARGET_BAD_REQUEST,
+        0,
+        MAINT_CONTROL_JOINT_TARGETS,
     )
 
 

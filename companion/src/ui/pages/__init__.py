@@ -788,7 +788,7 @@ class ModeSafetyPage(BasePage):
 
 class GaitLabPage(BasePage):
     title = "Gait Lab"
-    subtitle = "Select a gait, tune gait parameters, and command safe body motion."
+    subtitle = "Bench-test gait families and body modes under maintenance authority."
 
     # (label, GAIT_* id). Stand/Sit are postures; the rest are walking gaits.
     GAITS = [
@@ -801,16 +801,36 @@ class GaitLabPage(BasePage):
     ]
 
     def build(self) -> None:
-        self.content.addWidget(self._arming_banner())
-        self.content.addWidget(self._gait_select())
-        self.content.addWidget(self._gait_params())
-        self.content.addWidget(self._body_twist())
+        self._connected = self.service.is_connected
+        self._session_active = False
+        self._session_busy = False
+        self._session_controls = []
+
+        self.content.addWidget(self._session_panel())
+        self.gait_box = self._gait_select()
+        self.params_box = self._gait_params()
+        self.mode_box = self._mode_select()
+        self.walk_box = self._body_twist()
+        self.translate_box = self._body_translation()
+        self.rotate_box = self._body_rotation()
+        for box in (
+            self.gait_box,
+            self.params_box,
+            self.mode_box,
+            self.walk_box,
+            self.translate_box,
+            self.rotate_box,
+        ):
+            self.content.addWidget(box)
+            self._session_controls.append(box)
+        self.translate_box.hide()
+        self.rotate_box.hide()
 
         # Always-available stop + emergency stop row.
         safety = QGroupBox("Stop")
         slay = QHBoxLayout(safety)
-        stop = QPushButton("Stop motion (hold Stand)")
-        stop.clicked.connect(self.service.stop_motion)
+        stop = QPushButton("Hold Stand")
+        stop.clicked.connect(self._hold_stand)
         estop = QPushButton("\u23fb  EMERGENCY STOP")
         estop.setObjectName("EmergencyStop")
         estop.clicked.connect(self.service.emergency_stop)
@@ -824,25 +844,37 @@ class GaitLabPage(BasePage):
         )
 
         self.service.connected.connect(self._on_connected)
+        self.service.gait_test_changed.connect(self._on_session_changed)
+        self.service.gait_test_busy_changed.connect(self._on_session_busy)
         self.service.motion_result.connect(self._on_motion_result)
         self.service.telemetry.connect(self._on_telemetry)
+        self._apply_session_gate()
 
     # --- groups -----------------------------------------------------------
 
-    def _arming_banner(self) -> QGroupBox:
-        box = QGroupBox("Command authority")
-        lay = QVBoxLayout(box)
-        self.authority_lbl = QLabel(
-            "Connect and arm the robot (RC arm switch required) before commanding "
-            "motion. The firmware rejects motion commands unless the motion gate "
-            "is OPEN."
-        )
-        self.authority_lbl.setWordWrap(True)
-        self.authority_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+    def _session_panel(self) -> QGroupBox:
+        box = QGroupBox("Maintenance gait session")
+        lay = QGridLayout(box)
+        lay.setHorizontalSpacing(12)
+        lay.setVerticalSpacing(10)
+        self.session_badge = StatusBadge("bench session")
+        self.session_badge.set("stopped", "idle")
         self.gate_badge = StatusBadge("motion gate")
         self.gate_badge.set("unknown", "idle")
-        lay.addWidget(self.gate_badge)
-        lay.addWidget(self.authority_lbl)
+        self.start_btn = QPushButton("Start gait test")
+        self.start_btn.setProperty("accent", True)
+        self.start_btn.clicked.connect(self._start_session)
+        self.stop_session_btn = QPushButton("Stop && torque off")
+        self.stop_session_btn.clicked.connect(self.service.stop_gait_test)
+        self.authority_lbl = QLabel("Disconnected")
+        self.authority_lbl.setStyleSheet(f"color: {DRACULA.comment};")
+        lay.addWidget(self.session_badge, 0, 0)
+        lay.addWidget(self.gate_badge, 0, 1)
+        lay.addWidget(self.start_btn, 1, 0)
+        lay.addWidget(self.stop_session_btn, 1, 1)
+        lay.addWidget(self.authority_lbl, 2, 0, 1, 2)
+        lay.setColumnStretch(0, 1)
+        lay.setColumnStretch(1, 1)
         return box
 
     def _gait_select(self) -> QGroupBox:
@@ -851,14 +883,18 @@ class GaitLabPage(BasePage):
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         self._gait_buttons = {}
+        self._gait_group = QButtonGroup(self)
+        self._gait_group.setExclusive(True)
         for i, (label, gait) in enumerate(self.GAITS):
             btn = QPushButton(label)
             btn.setCheckable(True)
             btn.clicked.connect(
                 lambda _=False, g=gait, name=label: self._select_gait(g, name)
             )
+            self._gait_group.addButton(btn)
             grid.addWidget(btn, i // 3, i % 3)
             self._gait_buttons[gait] = btn
+        self._gait_buttons[api.GAIT_STAND].setChecked(True)
         for c in range(3):
             grid.setColumnStretch(c, 1)
         return box
@@ -877,8 +913,8 @@ class GaitLabPage(BasePage):
         self._param_spins = {}
         for attr, label, lo, hi, default in (
             ("body_height", "Body height (mm)", 0, 120, 40),
-            ("stride_len", "Stride length (mm)", 0, 160, 60),
-            ("step_height", "Step height (mm)", 0, 80, 30),
+            ("stride_len", "Stride length (mm)", 0, 80, 60),
+            ("step_height", "Step height (mm)", 0, 50, 30),
             ("duty", "Duty cycle (0-255)", 0, 255, 128),
             ("speed", "Speed (0-255)", 0, 255, 128),
         ):
@@ -890,10 +926,34 @@ class GaitLabPage(BasePage):
         send = QPushButton("Apply gait parameters")
         send.clicked.connect(self._send_gait_params)
         form.addRow("", send)
+        presets = QHBoxLayout()
+        for label, value in (("Slow", 64), ("Medium", 128), ("Fast", 220)):
+            btn = QPushButton(label)
+            btn.clicked.connect(lambda _=False, v=value: self._set_speed(v))
+            presets.addWidget(btn)
+        presets.addStretch(1)
+        form.addRow("Speed preset", self._wrap(presets))
+        return box
+
+    def _mode_select(self) -> QGroupBox:
+        box = QGroupBox("Control mode")
+        row = QHBoxLayout(box)
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._mode_buttons = {}
+        for mode, label in (("walk", "Walk"), ("translate", "Translate"), ("rotate", "Rotate")):
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda _=False, m=mode: self._set_mode(m))
+            self._mode_group.addButton(btn)
+            self._mode_buttons[mode] = btn
+            row.addWidget(btn)
+        self._mode_buttons["walk"].setChecked(True)
+        row.addStretch(1)
         return box
 
     def _body_twist(self) -> QGroupBox:
-        box = QGroupBox("Body twist (normalised -100..100 %)")
+        box = QGroupBox("Walk command")
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
@@ -919,12 +979,70 @@ class GaitLabPage(BasePage):
         form.addRow("", self._wrap(row))
         return box
 
+    def _body_translation(self) -> QGroupBox:
+        box = QGroupBox("Body translation with feet planted")
+        form = QFormLayout(box)
+        self._translate_spins = {}
+        for attr, label in (("x", "Forward (mm)"), ("y", "Left (mm)"), ("z", "Up (mm)")):
+            spin = QSpinBox()
+            spin.setRange(-50, 50)
+            self._translate_spins[attr] = spin
+            form.addRow(label, spin)
+        send = QPushButton("Apply translation")
+        send.clicked.connect(self._send_translation)
+        form.addRow("", send)
+        return box
+
+    def _body_rotation(self) -> QGroupBox:
+        box = QGroupBox("Body rotation with feet planted")
+        form = QFormLayout(box)
+        self._rotate_spins = {}
+        for attr, label in (("roll", "Roll (deg)"), ("pitch", "Pitch (deg)"), ("yaw", "Yaw (deg)")):
+            spin = QSpinBox()
+            spin.setRange(-25, 25)
+            self._rotate_spins[attr] = spin
+            form.addRow(label, spin)
+        send = QPushButton("Apply rotation")
+        send.clicked.connect(self._send_rotation)
+        form.addRow("", send)
+        return box
+
     def _wrap(self, layout) -> QWidget:
         w = QWidget()
         w.setLayout(layout)
         return w
 
     # --- actions ----------------------------------------------------------
+
+    def _start_session(self) -> None:
+        self.service.start_gait_test(
+            self._param_spins["body_height"].value(),
+            self._param_spins["stride_len"].value(),
+            self._param_spins["step_height"].value(),
+            self._param_spins["duty"].value(),
+            self._param_spins["speed"].value(),
+        )
+
+    def _set_speed(self, value: int) -> None:
+        self._param_spins["speed"].setValue(value)
+        if self._session_active:
+            self._send_gait_params()
+
+    def _set_mode(self, mode: str) -> None:
+        self.walk_box.setVisible(mode == "walk")
+        self.translate_box.setVisible(mode == "translate")
+        self.rotate_box.setVisible(mode == "rotate")
+        if not self._session_active:
+            return
+        self.service.set_body_twist(0.0, 0.0, 0.0)
+        self.service.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        if mode != "walk":
+            self.service.set_gait(api.GAIT_STAND)
+
+    def _hold_stand(self) -> None:
+        self._zero_twist()
+        self.service.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.service.stop_motion()
 
     def _send_gait_params(self) -> None:
         self.service.set_gait_params(
@@ -942,6 +1060,28 @@ class GaitLabPage(BasePage):
             self._twist_spins["wz"].value() / 100.0,
         )
 
+    def _send_translation(self) -> None:
+        self.service.set_gait(api.GAIT_STAND)
+        self.service.set_body_pose(
+            self._translate_spins["x"].value(),
+            self._translate_spins["y"].value(),
+            self._translate_spins["z"].value(),
+            0.0,
+            0.0,
+            0.0,
+        )
+
+    def _send_rotation(self) -> None:
+        self.service.set_gait(api.GAIT_STAND)
+        self.service.set_body_pose(
+            0.0,
+            0.0,
+            0.0,
+            self._rotate_spins["roll"].value(),
+            self._rotate_spins["pitch"].value(),
+            self._rotate_spins["yaw"].value(),
+        )
+
     def _zero_twist(self) -> None:
         for spin in self._twist_spins.values():
             spin.setValue(0)
@@ -950,10 +1090,40 @@ class GaitLabPage(BasePage):
     # --- reactions --------------------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
         if connected:
             self.service.subscribe(int(tlm.StreamId.CONTROL_STATE), 10)
+            self.authority_lbl.setText("Ready to start maintenance gait session")
         else:
+            self._session_active = False
+            self._session_busy = False
             self.gate_badge.set("unknown", "idle")
+            self.session_badge.set("stopped", "idle")
+            self.authority_lbl.setText("Disconnected")
+        self._apply_session_gate()
+
+    def _on_session_busy(self, busy: bool) -> None:
+        self._session_busy = busy
+        self._apply_session_gate()
+
+    def _on_session_changed(self, active: bool, detail: str) -> None:
+        self._session_active = active
+        self.session_badge.set(
+            "RUNNING" if active else detail,
+            "warn" if active else "idle",
+        )
+        self.authority_lbl.setText(detail)
+        self._apply_session_gate()
+
+    def _apply_session_gate(self) -> None:
+        self.start_btn.setEnabled(
+            self._connected and not self._session_active and not self._session_busy
+        )
+        self.stop_session_btn.setEnabled(
+            self._connected and (self._session_active or self._session_busy)
+        )
+        for control in self._session_controls:
+            control.setEnabled(self._session_active)
 
     def _on_motion_result(self, kind: str, res) -> None:
         state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
@@ -967,8 +1137,6 @@ class GaitLabPage(BasePage):
                 "OPEN" if record.motion_gate else "CLOSED",
                 "ok" if record.motion_gate else "warn",
             )
-            for gait, btn in self._gait_buttons.items():
-                btn.setChecked(False)
 
 
 class LegLabPage(BasePage):

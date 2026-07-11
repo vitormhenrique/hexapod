@@ -1,4 +1,4 @@
-"""Headless tests for the Gait Lab page (nzi.3).
+"""Headless tests for the maintenance Gait Lab page.
 
 The page must build under offscreen Qt, route gait/parameter/twist controls to
 the :class:`ConnectionService`, surface the motion gate from control-state
@@ -52,8 +52,42 @@ def test_gait_button_sends_set_gait(qtbot) -> None:
     service, page = _page(qtbot)
     calls = []
     service.set_gait = lambda g: calls.append(g)  # type: ignore[method-assign]
+    service.connected.emit(True)
+    service.gait_test_changed.emit(True, "running in MacMaintenance")
     page._gait_buttons[api.GAIT_TRIPOD].click()
     assert calls == [api.GAIT_TRIPOD]
+
+
+def test_motion_controls_require_ready_session(qtbot) -> None:
+    service, page = _page(qtbot)
+    calls = []
+    service.set_gait = lambda g: calls.append(g)  # type: ignore[method-assign]
+    service.connected.emit(True)
+    assert not page.gait_box.isEnabled()
+    page._gait_buttons[api.GAIT_TRIPOD].click()
+    assert calls == []
+
+    service.gait_test_changed.emit(True, "running in MacMaintenance")
+    assert page.gait_box.isEnabled()
+
+
+def test_start_session_uses_current_gait_parameters(qtbot) -> None:
+    service, page = _page(qtbot)
+    calls = []
+    service.start_gait_test = lambda *a: calls.append(a)  # type: ignore[method-assign]
+    service.connected.emit(True)
+    page._param_spins["body_height"].setValue(45)
+    page._param_spins["speed"].setValue(200)
+    page.start_btn.click()
+    assert calls == [(45, 60, 30, 128, 200)]
+
+
+def test_busy_session_prevents_duplicate_start_and_allows_stop(qtbot) -> None:
+    service, page = _page(qtbot)
+    service.connected.emit(True)
+    service.gait_test_busy_changed.emit(True)
+    assert not page.start_btn.isEnabled()
+    assert page.stop_session_btn.isEnabled()
 
 
 def test_apply_params_sends_gait_params(qtbot) -> None:

@@ -970,15 +970,24 @@ void controlTask(void*) {
     // Tracks whether the previous cycle ran under MacMaintenance authority so
     // the entry edge can clear stale bench targets (see below).
     static bool prev_maint_authority = false;
+    const bool maint_authority =
+      g_motionGate && arb.source == safety::CommandSource::MacMaintenance;
 
-    if (g_motionGate && arb.source == safety::CommandSource::MacMaintenance) {
+    // Every new maintenance session starts in explicit joint-target mode. A
+    // host must opt into the gait pipeline after the state transition, so an
+    // old gait intent can never replay merely because a new lock was acquired.
+    if (maint_authority && !prev_maint_authority) {
+      g_maintTargetApi.clearTargets();
+      g_maintTargetApi.resetControlMode();
+    }
+
+    if (maint_authority &&
+      g_maintTargetApi.controlMode() ==
+        protocol::MaintControlMode::JointTargets) {
       // --- Maintenance actuation (lmt.4) ----------------------------------
       // On each entry into maintenance authority, forget any joint/leg targets
       // stored by a previous bench session so enabling torque can never replay
       // stale motion; servos hold their seed pose until a fresh command lands.
-      if (!prev_maint_authority) {
-        g_maintTargetApi.clearTargets();
-      }
       prev_maint_authority = true;
       // Bench control: actuate the stored per-joint maintenance target ticks
       // directly (no gait). Only joints the operator has explicitly commanded
@@ -1021,7 +1030,7 @@ void controlTask(void*) {
       applied_intent_seq = 0xFFFFFFFFu;
       applied_gait = 0xFF;
     } else if (g_motionGate) {
-      prev_maint_authority = false;
+      prev_maint_authority = maint_authority;
       const protocol::MotionIntent& intent = g_motionApi.intent();
       const bool rc_drives = (arb.source == safety::CommandSource::Rc);
 

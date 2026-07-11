@@ -307,6 +307,47 @@ void test_all_joints_short_payload_is_bad_request() {
   TEST_ASSERT_EQUAL_UINT32(0, api_obj.target().seq);
 }
 
+void test_control_mode_is_maintenance_gated_and_targets_restore_joint_mode() {
+  config::RobotConfig cfg;
+  config::defaultRobotConfig(cfg);
+  MaintTargetApi api_obj;
+  api_obj.reset();
+  api_obj.setConfig(&cfg);
+
+  uint8_t mode[1] = {
+    static_cast<uint8_t>(MaintControlMode::GaitPipeline)};
+  Header h;
+  uint8_t rp[kMaxPayload];
+  size_t n = 0;
+  api_obj.setLiveState(kDisarmed, true);
+  runTarget(api_obj, mainttargetmsg::kSetControlMode, mode, 1, &h, rp, &n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintTargetResult::Rejected),
+              rp[0]);
+  TEST_ASSERT_EQUAL_UINT8(
+    static_cast<uint8_t>(MaintControlMode::JointTargets),
+    static_cast<uint8_t>(api_obj.controlMode()));
+
+  api_obj.setLiveState(kMacMaintenance, true);
+  runTarget(api_obj, mainttargetmsg::kSetControlMode, mode, 1, &h, rp, &n);
+  TEST_ASSERT_EQUAL_UINT(3, n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintTargetResult::Ok), rp[0]);
+  TEST_ASSERT_EQUAL_UINT8(
+    static_cast<uint8_t>(MaintControlMode::GaitPipeline), rp[2]);
+
+  uint8_t joint[4] = {0, 0, 0, 0};
+  runTarget(api_obj, mainttargetmsg::kSetJointTarget, joint, 4, &h, rp, &n);
+  TEST_ASSERT_EQUAL_UINT8(
+    static_cast<uint8_t>(MaintControlMode::JointTargets),
+    static_cast<uint8_t>(api_obj.controlMode()));
+
+  runTarget(api_obj, mainttargetmsg::kSetControlMode, mode, 1, &h, rp, &n);
+  uint8_t all_joints[36] = {0};
+  runTarget(api_obj, mainttargetmsg::kSetAllJoints, all_joints, 36, &h, rp, &n);
+  TEST_ASSERT_EQUAL_UINT8(
+    static_cast<uint8_t>(MaintControlMode::JointTargets),
+    static_cast<uint8_t>(api_obj.controlMode()));
+}
+
 void test_rejected_when_not_in_maintenance() {
   config::RobotConfig cfg;
   config::defaultRobotConfig(cfg);
@@ -411,6 +452,7 @@ int main(int, char**) {
   RUN_TEST(test_joint_target_clamps_high);
   RUN_TEST(test_all_joints_stores_atomically_and_bumps_seq_once);
   RUN_TEST(test_all_joints_short_payload_is_bad_request);
+  RUN_TEST(test_control_mode_is_maintenance_gated_and_targets_restore_joint_mode);
   RUN_TEST(test_rejected_when_not_in_maintenance);
   RUN_TEST(test_rejected_when_lock_not_held);
   RUN_TEST(test_rejected_when_no_config);

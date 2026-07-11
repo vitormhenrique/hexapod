@@ -28,6 +28,7 @@ void MaintTargetApi::reset() {
   cfg_ = nullptr;
   live_state_ = 0;
   lock_held_ = false;
+  resetControlMode();
   clearTargets();
 }
 
@@ -87,6 +88,7 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
         return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
                            out_flags);
       }
+      control_mode_ = MaintControlMode::JointTargets;
       const float bx = static_cast<float>(readI16(&req[1]));
       const float by = static_cast<float>(readI16(&req[3]));
       const float bz = static_cast<float>(readI16(&req[5]));
@@ -157,6 +159,7 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
         return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
                            out_flags);
       }
+      control_mode_ = MaintControlMode::JointTargets;
       const float angle_rad =
           static_cast<float>(readI16(&req[2])) * kCentiDegToRad;
 
@@ -187,6 +190,23 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
       *out_flags = 0x00;
       return true;
     }
+    case mainttargetmsg::kSetControlMode: {
+      if (req_len < 1 || req[0] > static_cast<uint8_t>(MaintControlMode::GaitPipeline)) {
+        return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
+                           out_flags);
+      }
+      control_mode_ = static_cast<MaintControlMode>(req[0]);
+      if (out_cap < 3) {
+        return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
+                           out_flags);
+      }
+      out[0] = static_cast<uint8_t>(MaintTargetResult::Ok);
+      out[1] = live_state_;
+      out[2] = static_cast<uint8_t>(control_mode_);
+      *out_len = 3;
+      *out_flags = 0;
+      return true;
+    }
     case mainttargetmsg::kSetAllJoints: {
       // 18 x angle_cdeg(i16), leg-major (leg 0 coxa/femur/tibia, leg 1, ...).
       // Stored atomically in one handler call so controlTask rebuilds the full
@@ -198,6 +218,7 @@ bool MaintTargetApi::handle(uint8_t msg_id, const uint8_t* req,
         return writeStatus(MaintTargetResult::BadRequest, out, out_cap, out_len,
                            out_flags);
       }
+      control_mode_ = MaintControlMode::JointTargets;
       dxl::ServoMap sm(*cfg_);
       uint8_t stored = 0;
       uint8_t clamp_mask[3] = {0, 0, 0};  // 18 bits, bit = leg*3 + joint

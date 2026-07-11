@@ -157,6 +157,23 @@ def test_motion_commands():
         client.stop()
 
 
+def test_set_maintenance_control_mode():
+    seen = []
+
+    def handler(payload):
+        seen.append(payload)
+        return bytes([api.MAINT_TARGET_OK, 8, payload[0]]), False
+
+    client, _ = _make_client({api.MSG_SET_MAINT_CONTROL_MODE: handler})
+    try:
+        res = client.set_maint_control_mode(api.MAINT_CONTROL_GAIT_PIPELINE)
+        assert res is not None and res.ok
+        assert res.state == 8 and res.mode == api.MAINT_CONTROL_GAIT_PIPELINE
+        assert seen == [bytes([api.MAINT_CONTROL_GAIT_PIPELINE])]
+    finally:
+        client.stop()
+
+
 def test_feature_set_roundtrip():
     def handler(payload):
         feature, enable = payload[0], payload[1]
