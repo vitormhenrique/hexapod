@@ -8,6 +8,7 @@ namespace {
 
 bool g_userLedOn = false;
 bool g_dxlPowerOn = false;
+uint32_t g_dxlPowerTransitions = 0;
 
 }  // namespace
 
@@ -19,6 +20,7 @@ void init() {
     digitalWrite(pins::kDxlPowerEnable, LOW);
   }
   g_dxlPowerOn = false;
+  g_dxlPowerTransitions = 0;
 
   // --- USER LED: output, off. ---------------------------------------------
   pinMode(pins::kUserLed, OUTPUT);
@@ -49,11 +51,15 @@ void setDxlPower(bool on) {
     g_dxlPowerOn = false;
     return;
   }
+  if (on == g_dxlPowerOn) return;
   digitalWrite(pins::kDxlPowerEnable, on ? HIGH : LOW);
   g_dxlPowerOn = on;
+  ++g_dxlPowerTransitions;
 }
 
 bool dxlPowerEnabled() { return g_dxlPowerOn; }
+
+uint32_t dxlPowerTransitions() { return g_dxlPowerTransitions; }
 
 uint16_t readBatteryRaw() {
   return static_cast<uint16_t>(analogRead(pins::kBatteryAdc));

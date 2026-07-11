@@ -15,8 +15,12 @@
 //   HELLO            (21B): proto_major, proto_minor, fw_major, fw_minor,
 //                           fw_patch, name[16]
 //   HEARTBEAT         (5B): uptime_ms(4), state(1)
-//   GET_STATUS       (12B): uptime_ms(4), state(1), status_flags(1),
-//                           battery_mv(2), watchdog_missed(4)
+//   GET_STATUS       (28B): uptime_ms(4), state(1), status_flags(1),
+//                           battery_mv(2), watchdog_missed(4), reset_cause(1),
+//                           last_reset_watchdog_missed(4), reset_progress(1),
+//                           control_stack_free(2), dxl_stack_free(2),
+//                           reset_control_progress(1), reset_state(1),
+//                           dxl_power_transitions(4)
 //   GET_CAPABILITIES (25B): proto_major, proto_minor, fw_major, fw_minor,
 //                           fw_patch, feature_bits(4), name[16]
 //                           feature_bits: per-Feature availability bitmask,
@@ -220,6 +224,14 @@ struct StatusSnapshot {
   bool dxl_power_control = false;
   uint16_t battery_mv = 0;
   uint32_t watchdog_missed = 0;
+  uint8_t reset_cause = 0;  // SAMD21 PM->RCAUSE bits captured at boot
+  uint32_t last_reset_watchdog_missed = 0;
+  uint8_t last_reset_progress_marker = 0;
+  uint16_t control_stack_free_words = 0;
+  uint16_t dxl_stack_free_words = 0;
+  uint8_t last_reset_control_progress = 0;
+  uint8_t last_reset_safety_state = 0;
+  uint32_t dxl_power_transitions = 0;
 };
 
 // Decode one COBS-encoded request body (bytes between 0x00 delimiters),

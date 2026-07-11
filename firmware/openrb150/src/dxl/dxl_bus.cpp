@@ -89,6 +89,21 @@ uint8_t DxlBus::scan(uint8_t first_id, uint8_t last_id) {
   return count_;
 }
 
+void DxlBus::beginDiscovery() {
+  count_ = 0;
+  status_rr_ = 0;
+  stats_.scans++;
+}
+
+bool DxlBus::discoverId(uint8_t id) {
+  if (!ready_ || count_ >= kMaxServos || id > kMaxServoId) return false;
+  if (profileById(id) != nullptr) return true;
+  ServoProfile profile;
+  if (!ping(id, profile)) return false;
+  servos_[count_++] = profile;
+  return true;
+}
+
 bool DxlBus::readStatus(uint8_t id, ServoStatus& out) {
   out = ServoStatus{};
   out.id = id;
@@ -98,15 +113,24 @@ bool DxlBus::readStatus(uint8_t id, ServoStatus& out) {
 
   const ServoProfile* p = profileById(id);
   const bool is_mx2 = (p != nullptr) && (p->table_kind == TableKind::Mx28V2);
+  const bool is_protocol1 = (p == nullptr) || (p->protocol_version == 1);
   // Use the servo's known protocol when available, else default to 1.0 (the
   // MX-28AT factory default table).
   dxl_.setPortProtocolVersion((p != nullptr && p->protocol_version == 2) ? 2.0f
                                                                          : 1.0f);
 
   int32_t v = 0;
+  uint8_t protocol1_status_error = 0;
+  const auto readStatusItem = [&](uint8_t item_idx, int32_t& value) {
+    const bool ok = readItem(item_idx, id, value);
+    if (ok && is_protocol1) {
+      protocol1_status_error |= dxl_.getLastStatusPacketError();
+    }
+    return ok;
+  };
 
   // Present position is the key field; its success defines a usable read.
-  if (readItem(PRESENT_POSITION, id, v)) {
+  if (readStatusItem(PRESENT_POSITION, v)) {
     out.present_position = v;
     out.ok = true;
   } else {
@@ -115,28 +139,31 @@ bool DxlBus::readStatus(uint8_t id, ServoStatus& out) {
   }
 
   // Velocity register name differs between the two tables.
-  if (readItem(is_mx2 ? PRESENT_VELOCITY : PRESENT_SPEED, id, v)) {
+  if (readStatusItem(is_mx2 ? PRESENT_VELOCITY : PRESENT_SPEED, v)) {
     out.present_velocity = v;
   }
 
   // Present load/PWM proxy. Both tables expose Present Load; values are
   // sign-magnitude on legacy and signed 0.1% on MX(2.0).
-  if (readItem(PRESENT_LOAD, id, v)) {
+  if (readStatusItem(PRESENT_LOAD, v)) {
     out.present_load = v;
   }
 
   // Input voltage register name differs; both report in 0.1 V units.
-  if (readItem(is_mx2 ? PRESENT_INPUT_VOLTAGE : PRESENT_VOLTAGE, id, v)) {
+  if (readStatusItem(is_mx2 ? PRESENT_INPUT_VOLTAGE : PRESENT_VOLTAGE, v)) {
     out.present_voltage_mv = static_cast<uint16_t>(v * 100);
   }
 
-  if (readItem(PRESENT_TEMPERATURE, id, v)) {
+  if (readStatusItem(PRESENT_TEMPERATURE, v)) {
     out.present_temperature_c = static_cast<int8_t>(v);
   }
 
-  // Hardware Error Status only exists on the MX(2.0) table.
-  if (is_mx2 && readItem(HARDWARE_ERROR_STATUS, id, v)) {
+  // MX(2.0) exposes a register; Protocol 1 reports its seven alarm bits in
+  // every status packet. Preserve either representation in the same wire byte.
+  if (is_mx2 && readStatusItem(HARDWARE_ERROR_STATUS, v)) {
     out.hardware_error = static_cast<uint8_t>(v);
+  } else if (is_protocol1) {
+    out.hardware_error = protocol1_status_error;
   }
 
   out.torque_enabled = dxl_.getTorqueEnableStat(id);
@@ -156,7 +183,11 @@ uint8_t DxlBus::setTorqueAll(bool on) {
   for (uint8_t i = 0; i < count_; ++i) {
     ServoProfile& p = servos_[i];
     selectProtocol(p.table_kind);
-    const bool ok = on ? dxl_.torqueOn(p.id) : dxl_.torqueOff(p.id);
+    // Dynamixel2Arduino's torqueOn/torqueOff helpers use a 100 ms default
+    // timeout. Across 18 servos, enable plus failure rollback can exceed the
+    // 2 s hardware watchdog before dxlTask reaches its scheduler yield.
+    const bool ok = dxl_.writeControlTableItem(
+        TORQUE_ENABLE, p.id, on ? 1 : 0, kWriteTimeoutMs);
     if (ok) {
       ++acked;
       p.torque_enabled = on;  // track commanded torque for allTorqueOff (lmt.6)
@@ -209,7 +240,7 @@ bool DxlBus::writeGoalPositions(const GoalTarget* targets, uint8_t count) {
 }
 
 uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
-  if (!ready_ || out == nullptr) {
+  if (!ready_ || out == nullptr || count_ == 0 || out_cap == 0) {
     return 0;
   }
   // Keep identity fresh for every entry, but PRESERVE the detail fields
@@ -221,99 +252,28 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
     out[i].id = servos_[i].id;
   }
 
-  uint8_t fresh = 0;
+  const uint8_t readable_count = (count_ < out_cap) ? count_ : out_cap;
+  if (status_rr_ >= readable_count) status_rr_ = 0;
+  const uint8_t index = status_rr_++;
+  const ServoProfile& profile = servos_[index];
+  selectProtocol(profile.table_kind);
 
-  // --- Legacy MX-28 (Protocol 1.0): the wire protocol has NO Sync Read (the
-  // library rejects it with DXL_LIB_ERROR_NOT_SUPPORTED), so present positions
-  // are refreshed with bounded individual reads instead. Round-robin capped at
-  // kLegacyReadsPerCycle so a full legacy bus cannot blow the dxlTask period:
-  // a dead/timed-out read busy-waits kReadTimeoutMs inside the library, and a
-  // long stall at dxlTask priority starves the health task's hardware WDT pet
-  // (the original all-Sync-Read code returned 0 forever on a legacy-only bus,
-  // latching a false FaultHard ~1 s after every scan; hexapod_src-2e8 HIL).
-  uint8_t legacy_idx[kMaxServos];
-  uint8_t legacy_n = 0;
-  for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
-    if (servos_[i].table_kind == TableKind::Mx28Legacy) {
-      legacy_idx[legacy_n++] = i;
-    }
-  }
-  if (legacy_n > 0) {
-    selectProtocol(TableKind::Mx28Legacy);
-    const uint16_t addr = posAddr(TableKind::Mx28Legacy);
-    const uint8_t len = posLen(TableKind::Mx28Legacy);
-    const uint8_t reads =
-        (legacy_n < kLegacyReadsPerCycle) ? legacy_n : kLegacyReadsPerCycle;
-    for (uint8_t k = 0; k < reads; ++k) {
-      if (legacy_rr_ >= legacy_n) {
-        legacy_rr_ = 0;
-      }
-      const uint8_t i = legacy_idx[legacy_rr_++];
-      uint8_t buf[4] = {0, 0, 0, 0};
-      const int32_t n = dxl_.read(servos_[i].id, addr, len, buf, sizeof(buf),
-                                  kReadTimeoutMs);
-      if (n >= static_cast<int32_t>(len)) {
-        out[i].present_position = decodePosition(TableKind::Mx28Legacy, buf);
-        out[i].ok = true;
-        ++fresh;
-        stats_.reads_ok++;
-      } else {
-        out[i].ok = false;
-        stats_.reads_fail++;
-        stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
-      }
-    }
+  uint8_t buf[4] = {0, 0, 0, 0};
+  const uint8_t len = posLen(profile.table_kind);
+  const int32_t received =
+      dxl_.read(profile.id, posAddr(profile.table_kind), len, buf, sizeof(buf),
+                kReadTimeoutMs);
+  if (received >= static_cast<int32_t>(len)) {
+    out[index].present_position = decodePosition(profile.table_kind, buf);
+    out[index].ok = true;
+    stats_.reads_ok++;
+    return 1;
   }
 
-  // --- MX(2.0): true Protocol 2.0 Sync Read (Present Position only; fits the
-  // recv buffer) in chunks of DXL_MAX_NODE (lmt.10 / audit 22l.6).
-  {
-    const TableKind kind = TableKind::Mx28V2;
-    sr_param_.addr = posAddr(kind);
-    sr_param_.length = posLen(kind);
-    uint8_t scan = 0;
-    while (scan < count_) {
-      // Fill one chunk with the next run of this-kind servos. `scan` advances
-      // over every entry (matching or not); the chunk closes at DXL_MAX_NODE or
-      // when the table is exhausted, and the outer loop resumes from `scan`.
-      sr_param_.id_count = 0;
-      while (scan < count_ && sr_param_.id_count < DXL_MAX_NODE) {
-        if (servos_[scan].table_kind == kind) {
-          sr_param_.xel[sr_param_.id_count].id = servos_[scan].id;
-          ++sr_param_.id_count;
-          if (scan < out_cap) {
-            out[scan].ok = false;  // attempted this cycle; success sets it back
-          }
-        }
-        ++scan;
-      }
-      if (sr_param_.id_count == 0) {
-        continue;  // no this-kind servos in the span just scanned
-      }
-      selectProtocol(kind);
-      if (!dxl_.syncRead(sr_param_, sr_recv_)) {
-        stats_.reads_fail++;
-        stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
-        continue;
-      }
-      // Map received status back to the matching servo index.
-      for (uint8_t r = 0; r < sr_recv_.id_count; ++r) {
-        const XelInfoForStatusInst_t& xs = sr_recv_.xel[r];
-        for (uint8_t i = 0; i < count_ && i < out_cap; ++i) {
-          if (servos_[i].id != xs.id) {
-            continue;
-          }
-          out[i].present_position = decodePosition(kind, xs.data);
-          out[i].hardware_error = xs.error;
-          out[i].ok = true;
-          ++fresh;
-          break;
-        }
-      }
-      stats_.reads_ok++;
-    }
-  }
-  return fresh;
+  out[index].ok = false;
+  stats_.reads_fail++;
+  stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+  return 0;
 }
 
 bool DxlBus::readRegister(uint8_t id, TableKind table, uint16_t addr,
@@ -370,7 +330,8 @@ bool DxlBus::setTorqueOne(uint8_t id, TableKind table, bool on) {
     return false;
   }
   selectProtocol(table);
-  const bool ok = on ? dxl_.torqueOn(id) : dxl_.torqueOff(id);
+  const bool ok = dxl_.writeControlTableItem(
+      TORQUE_ENABLE, id, on ? 1 : 0, kWriteTimeoutMs);
   if (!ok) {
     stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
     return false;

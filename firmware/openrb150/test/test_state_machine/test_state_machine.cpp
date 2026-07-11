@@ -83,6 +83,30 @@ void test_arming_checks_gate_stand_ready() {
   TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 40));
 }
 
+void test_arming_checks_timeout_reports_soft_fault() {
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  m.update(in, 0);
+  m.update(in, 10);
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 20));
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 10019));
+  TEST_ASSERT_EQUAL(State::FaultSoft, m.update(in, 10020));
+  TEST_ASSERT_EQUAL(FaultReason::ArmingTimeout, m.faultReason());
+}
+
+void test_dxl_power_allowed_during_arming_and_operation() {
+  TEST_ASSERT_FALSE(stateAllowsDxlPower(State::Disarmed));
+  TEST_ASSERT_TRUE(stateAllowsDxlPower(State::ArmingChecks));
+  TEST_ASSERT_FALSE(stateAllowsTorque(State::ArmingChecks));
+  TEST_ASSERT_TRUE(stateAllowsDxlPower(State::StandReady));
+  TEST_ASSERT_TRUE(stateAllowsDxlPower(State::RcManual));
+  TEST_ASSERT_TRUE(stateAllowsDxlPower(State::PassivePoseStream));
+  TEST_ASSERT_FALSE(stateAllowsTorque(State::PassivePoseStream));
+  TEST_ASSERT_FALSE(stateAllowsDxlPower(State::Estop));
+  TEST_ASSERT_FALSE(stateAllowsDxlPower(State::FaultHard));
+}
+
 void test_stand_ready_to_rc_manual() {
   StateMachine m = atStandReady();
   StateInputs in = healthy();
@@ -359,6 +383,8 @@ int main(int, char**) {
   RUN_TEST(test_config_not_loaded_holds_in_configload);
   RUN_TEST(test_disarmed_requires_arm_for_arming_checks);
   RUN_TEST(test_arming_checks_gate_stand_ready);
+  RUN_TEST(test_arming_checks_timeout_reports_soft_fault);
+  RUN_TEST(test_dxl_power_allowed_during_arming_and_operation);
   RUN_TEST(test_stand_ready_to_rc_manual);
   RUN_TEST(test_rc_manual_to_contact_terrain_and_back);
   RUN_TEST(test_stand_ready_to_jetson_assisted);

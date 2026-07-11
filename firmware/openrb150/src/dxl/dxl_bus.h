@@ -60,12 +60,7 @@ class DxlBus {
   // WDT pet (a 100 ms default timeout across several reads hard-reset the MCU
   // when DXL power dropped mid-stream; found on HIL, hexapod_src-2e8).
   static constexpr uint32_t kReadTimeoutMs = 20;
-
-  // Legacy Protocol 1.0 has no Sync Read, so present positions are refreshed
-  // with individual reads. Cap the reads per syncReadStatus() call so a full
-  // 18-servo legacy bus cannot blow the 20 ms dxlTask period (each read is
-  // ~3 ms at 57600 baud; a timed-out read busy-waits kReadTimeoutMs).
-  static constexpr uint8_t kLegacyReadsPerCycle = 4;
+  static constexpr uint32_t kWriteTimeoutMs = 20;
 
   explicit DxlBus(HardwareSerial& port);
 
@@ -83,6 +78,12 @@ class DxlBus {
   // table. Returns the number of servos found and stored. Requires DXL power
   // to be ON to detect anything.
   uint8_t scan(uint8_t first_id, uint8_t last_id);
+
+  // Incremental discovery used by RC arming. beginDiscovery() clears the
+  // profile table; each discoverId() call performs at most one servo ping so
+  // the high-priority DXL task returns to the scheduler between IDs.
+  void beginDiscovery();
+  bool discoverId(uint8_t id);
 
   // Read present status (torque-off safe) from a known/just-pinged servo.
   bool readStatus(uint8_t id, ServoStatus& out);
@@ -158,14 +159,11 @@ class DxlBus {
   BusStats stats_;
   uint32_t baud_ = kDefaultBaud;
   bool ready_ = false;
-  uint8_t legacy_rr_ = 0;  // round-robin cursor for legacy position reads
+  uint8_t status_rr_ = 0;  // round-robin cursor for bounded position reads
 
-  // Library scratch params for grouped Sync Write / Sync Read. Kept as members
-  // (not on the stack) because they are large and this class has a single
-  // owning task, so there is no reentrancy.
+  // Library scratch params for grouped Sync Write. Kept as a member (not on
+  // the stack) because it is large and this class has a single owning task.
   ParamForSyncWriteInst_t sw_param_;
-  ParamForSyncReadInst_t sr_param_;
-  RecvInfoFromStatusInst_t sr_recv_;
 };
 
 }  // namespace dxl

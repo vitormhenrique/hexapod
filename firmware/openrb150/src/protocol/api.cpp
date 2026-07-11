@@ -125,7 +125,15 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       payload[5] = buildStatusFlags(status);
       putU16(&payload[6], status.battery_mv);
       putU32(&payload[8], status.watchdog_missed);
-      payload_len = 12;
+      payload[12] = status.reset_cause;
+      putU32(&payload[13], status.last_reset_watchdog_missed);
+      payload[17] = status.last_reset_progress_marker;
+      putU16(&payload[18], status.control_stack_free_words);
+      putU16(&payload[20], status.dxl_stack_free_words);
+      payload[22] = status.last_reset_control_progress;
+      payload[23] = status.last_reset_safety_state;
+      putU32(&payload[24], status.dxl_power_transitions);
+      payload_len = 28;
       break;
     }
     case msg::kGetCapabilities: {

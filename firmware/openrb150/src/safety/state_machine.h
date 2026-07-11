@@ -31,6 +31,7 @@ enum class FaultReason : uint8_t {
   BatteryLow = 4,
   Watchdog = 5,
   DxlHardware = 6,
+  ArmingTimeout = 7,
 };
 
 // Tunable thresholds. Defaults are conservative; the config layer may override.
@@ -47,6 +48,8 @@ struct StateParams {
   // active maintenance session the instant DXL power is enabled (HIL bug 7).
   // A genuinely dying pack stays low, so debouncing only filters transients.
   uint16_t battery_low_debounce_ms = 250;
+  // Maximum time for torque-off DXL discovery and fresh pose collection.
+  uint16_t arming_timeout_ms = 10000;
 };
 
 // One cycle of inputs sampled from the rest of the firmware. All fields are
@@ -58,7 +61,7 @@ struct StateInputs {
   // Health.
   uint16_t battery_mv = 0;
   bool battery_valid = false;  // true only when a real pack reading exists
-  bool watchdog_fault = false;
+  bool watchdog_fault = false;  // motion-critical Control/DXL task stalled
   bool dxl_hard_fault = false;  // repeated bus failures / servo HW error
 
   // Estop / kill sources.
@@ -95,6 +98,10 @@ bool stateAllowsMotion(State s);
 // pose streaming is explicitly excluded (torque must stay off there).
 bool stateAllowsTorque(State s);
 
+// Returns true when the DXL power bus may be energized. ArmingChecks needs a
+// powered, torque-off bus for discovery and present-position reads.
+bool stateAllowsDxlPower(State s);
+
 class StateMachine {
  public:
   void configure(const StateParams& params) { params_ = params; }
@@ -120,6 +127,7 @@ class StateMachine {
   // Battery-low debounce: timestamp of the first consecutive low sample.
   bool batt_low_active_ = false;
   uint32_t batt_low_since_ms_ = 0;
+  uint32_t arming_since_ms_ = 0;
 };
 
 }  // namespace safety

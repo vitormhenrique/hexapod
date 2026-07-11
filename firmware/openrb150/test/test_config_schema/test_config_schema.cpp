@@ -32,6 +32,13 @@ void test_default_servo_map() {
     TEST_ASSERT_EQUAL_UINT8(leg * kJointsPerLeg + joint + 1, cfg.servos[i].id);
     TEST_ASSERT_EQUAL_UINT8(leg, cfg.servos[i].leg);
     TEST_ASSERT_EQUAL_UINT8(joint, cfg.servos[i].joint);
+    const int16_t expected_trim =
+      joint == static_cast<uint8_t>(JointRole::Femur)
+        ? kDefaultFemurTrimTicks
+        : (joint == static_cast<uint8_t>(JointRole::Tibia)
+             ? kDefaultTibiaTrimTicks
+             : kDefaultCoxaTrimTicks);
+    TEST_ASSERT_EQUAL_INT16(expected_trim, cfg.servos[i].trim_ticks);
     TEST_ASSERT_TRUE(cfg.servos[i].min_tick < cfg.servos[i].max_tick);
   }
 
@@ -299,7 +306,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(6689, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(52627, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {

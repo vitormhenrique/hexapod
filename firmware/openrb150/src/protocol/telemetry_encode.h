@@ -32,7 +32,8 @@ namespace protocol {
 
 // servo_status: count(1) then 14 bytes/servo: id(1), present_position(u32),
 // present_velocity(i16), present_load(i16), present_voltage_mv(u16),
-// present_temperature_c(i8), hardware_error(1), torque_enabled(1).
+// present_temperature_c(i8), status_error(1), torque_enabled(1). status_error
+// is MX(2.0) Hardware Error Status or the Protocol 1 status-packet error byte.
 // 18 servos -> 1 + 18*14 = 253 bytes.
 uint16_t encodeServoStatus(const dxl::ServoStatus* servos, uint8_t count,
                            uint8_t* out);

@@ -46,6 +46,26 @@ void test_stand_emits_all_mapped_joints_within_travel() {
   }
 }
 
+void test_default_stand_uses_natural_joint_pose() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  PipelineOutput out;
+  pipe.update(20, out);
+
+  for (uint8_t i = 0; i < out.count; ++i) {
+    const uint8_t joint = out.joints[i].joint;
+    const uint16_t expected =
+        joint == static_cast<uint8_t>(JointRole::Femur)
+            ? static_cast<uint16_t>(kServoCenterTick + kDefaultFemurTrimTicks)
+            : (joint == static_cast<uint8_t>(JointRole::Tibia)
+                   ? static_cast<uint16_t>(kServoCenterTick +
+                                           kDefaultTibiaTrimTicks)
+                   : kServoCenterTick);
+    TEST_ASSERT_UINT16_WITHIN(1, expected, out.joints[i].tick);
+  }
+}
+
 // The emitted (leg, joint, id) triples match the default servo map order
 // (id = leg*3 + joint + 1, leg-major wiring), so dxlTask can Sync Write them
 // directly.
@@ -315,6 +335,7 @@ void test_extreme_body_pose_is_reach_limited_not_unreachable() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
+  RUN_TEST(test_default_stand_uses_natural_joint_pose);
   RUN_TEST(test_joint_ids_match_default_servo_map);
   RUN_TEST(test_tripod_phase_advance_changes_goals);
   RUN_TEST(test_forward_twist_changes_goals_vs_neutral);

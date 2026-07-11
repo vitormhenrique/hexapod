@@ -28,6 +28,20 @@ CONNECT_RETRY_DELAY_S = 2.5
 REQUEST_ATTEMPTS = 3
 REQUEST_RETRY_DELAY_S = 1.0
 
+RESET_CAUSE_NAMES = {
+    0x01: "POR",
+    0x02: "BOD12",
+    0x04: "BOD33",
+    0x10: "EXT",
+    0x20: "WDT",
+    0x40: "SYST",
+}
+
+
+def _reset_cause(value: int) -> str:
+    names = [name for bit, name in RESET_CAUSE_NAMES.items() if value & bit]
+    return "+".join(names) if names else "unknown"
+
 
 def _err(msg: str) -> None:
     typer.secho(msg, fg=typer.colors.RED, err=True)
@@ -98,7 +112,17 @@ def status(
             typer.echo(
                 f"  state={tlm.SAFETY_STATE_NAMES.get(st.state, st.state)} "
                 f"uptime={st.uptime_ms} ms  dxl_power={st.dxl_power} "
-                f"battery={st.battery_mv} mV  watchdog_missed=0x{st.watchdog_missed:X}"
+                f"battery={st.battery_mv} mV  watchdog_missed=0x{st.watchdog_missed:X} "
+                f"reset_cause=0x{st.reset_cause:02X}({_reset_cause(st.reset_cause)}) "
+                f"last_reset_watchdog_missed=0x{st.last_reset_watchdog_missed:X} "
+                f"last_reset_dxl_progress={st.last_reset_progress_marker} "
+                f"last_reset_control_progress={st.last_reset_control_progress} "
+                f"last_reset_state={st.last_reset_safety_state} "
+                f"dxl_power_transitions={st.dxl_power_transitions}"
+            )
+            typer.echo(
+                f"  stack_free_words: control={st.control_stack_free_words} "
+                f"dxl={st.dxl_stack_free_words}"
             )
             typer.echo(f"  feature_bits=0x{caps.feature_bits:08X}")
             avail = [

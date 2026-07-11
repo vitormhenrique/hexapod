@@ -39,6 +39,14 @@ API_STATUS = {
     "dxl_power_control": True,
     "battery_mv": 11800,
     "watchdog_missed": 0,
+    "reset_cause": 0x20,
+    "last_reset_watchdog_missed": 0x02,
+    "last_reset_progress_marker": 51,
+    "control_stack_free_words": 123,
+    "dxl_stack_free_words": 234,
+    "last_reset_control_progress": 80,
+    "last_reset_safety_state": 5,
+    "dxl_power_transitions": 7,
 }
 
 
@@ -69,6 +77,15 @@ def _api_response(msg_id: int, seq: int) -> bytes:
             + bytes([st["state"], sflags])
             + struct.pack("<H", st["battery_mv"])
             + struct.pack("<I", st["watchdog_missed"])
+            + bytes([st["reset_cause"]])
+            + struct.pack("<I", st["last_reset_watchdog_missed"])
+            + bytes([st["last_reset_progress_marker"]])
+            + struct.pack("<H", st["control_stack_free_words"])
+            + struct.pack("<H", st["dxl_stack_free_words"])
+            + bytes(
+                [st["last_reset_control_progress"], st["last_reset_safety_state"]]
+            )
+            + struct.pack("<I", st["dxl_power_transitions"])
         )
     elif msg_id == api_mod.MSG_GET_CAPABILITIES:
         payload = bytes([0, 1, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]])

@@ -83,6 +83,7 @@ FAULT_REASON_NAMES = {
     4: "BATTERY_LOW",
     5: "WATCHDOG",
     6: "DXL_HARDWARE",
+    7: "ARMING_TIMEOUT",
 }
 
 # Command source IDs (mirror safety::CommandSource).

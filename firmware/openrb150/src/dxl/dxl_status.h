@@ -21,7 +21,9 @@ struct ServoStatus {
   int32_t present_load = 0;       // signed raw load (legacy) / 0.1% (MX 2.0)
   uint16_t present_voltage_mv = 0;  // millivolts (raw 0.1 V units * 100)
   int8_t present_temperature_c = 0;
-  uint8_t hardware_error = 0;  // MX(2.0) Hardware Error Status; 0 on legacy
+  // MX(2.0) Hardware Error Status, or Protocol 1 status-packet error bits:
+  // voltage, angle, overheat, range, checksum, overload, instruction.
+  uint8_t hardware_error = 0;
   bool torque_enabled = false;
   bool ok = false;  // true if at least the present position read succeeded
 };

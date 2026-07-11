@@ -363,7 +363,7 @@ Recommended connection assignment:
 | Function | Connection |
 | --- | --- |
 | DYNAMIXEL MX-28AT bus | `Serial1` / OpenRB DXL TTL bus |
-| ExpressLRS receiver | `Serial2`, CRSF, uninverted UART |
+| ExpressLRS receiver | `Serial3`, D14 TX / D13 RX, CRSF, uninverted UART |
 | Mac companion API | USB CDC `Serial` |
 | Jetson API | USB CDC when connected directly, or Mac-to-Jetson proxy when Jetson owns USB |
 | 6 Robotic Finger Sensor v2 boards | TCA9548A channels 0-5 |
@@ -530,7 +530,7 @@ Ownership rules:
 
 - Only `task_dxl` directly touches Dynamixel2Arduino and `Serial1`.
 - Only `task_i2c` directly touches `Wire`, TCA9548A, 24LC32, and I2C sensors.
-- Only `task_rc_crsf` directly reads CRSF bytes from `Serial2`.
+- Only `task_rc_crsf` directly reads CRSF bytes from `Serial3`.
 - Only `task_api` directly parses and writes USB CDC host frames.
 - Cross-task data moves through bounded static queues, ring buffers, event groups, or fixed-size state snapshots.
 - `task_control` must never wait on I2C, DXL, EEPROM writes, USB serial, or CRSF parsing.

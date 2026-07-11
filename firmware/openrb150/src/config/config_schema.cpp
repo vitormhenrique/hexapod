@@ -118,7 +118,13 @@ void defaultRobotConfig(RobotConfig& cfg) {
     // All legs share a +1 servo sign; hardware validation showed the right
     // legs (2, 3, 4) were mirrored the wrong way under the old -1 rule.
     s.sign = 1;
-    s.trim_ticks = 0;
+    if (joint == static_cast<uint8_t>(JointRole::Femur)) {
+      s.trim_ticks = kDefaultFemurTrimTicks;
+    } else if (joint == static_cast<uint8_t>(JointRole::Tibia)) {
+      s.trim_ticks = kDefaultTibiaTrimTicks;
+    } else {
+      s.trim_ticks = kDefaultCoxaTrimTicks;
+    }
     s.min_tick = static_cast<uint16_t>(kServoCenterTick - 1024);  // 1024
     s.max_tick = static_cast<uint16_t>(kServoCenterTick + 1024);  // 3072
   }

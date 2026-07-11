@@ -159,10 +159,17 @@ ControllerBridge::ControllerBridge() {
 void ControllerBridge::reset() {
   cmd_ = ControllerCommand();
   raw_ = ChannelPackInputs_t();
+#if defined(HEXAPOD_FORCE_CUSTOM_CHANNELPACK)
+  detected_profile_ = InputProfile::CustomControllerChannelPack;
+  profile_locked_ = true;
+#else
   detected_profile_ = InputProfile::Unknown;
   profile_locked_ = false;
+#endif
   custom_layout_streak_ = 0;
   tx_direct_layout_streak_ = 0;
+  arm_release_pending_ = false;
+  arm_release_since_ms_ = 0;
   for (uint8_t i = 0; i < 2; ++i) {
     enc_last_[i] = 0;
     enc_seen_[i] = false;
@@ -208,17 +215,22 @@ bool ControllerBridge::looksLikeCustomChannelPack(
     const uint16_t ch[CPACK_NUM_CHANNELS]) {
   // CH9: packed 2-pos switches. Only bits 0..5 (SwA,B,C,D,G,H) are used by the
   // current robot-side abstraction; bits 6..7 are reserved and must be clear.
-  const bool switches_ok = (ch[CPACK_CH_SWITCHES] & ~uint16_t(0x003F)) == 0;
+  const uint16_t switches = ChannelPack::crsfToDiscrete(
+      ch[CPACK_CH_SWITCHES], CPACK_SWITCH_FIELD_MAX);
+  const bool switches_ok = (switches & ~uint16_t(0x003F)) == 0;
 
   // CH10: 4 buttons (bits 0..3) + SwE tri (bits 4..5) + SwF tri (bits 6..7).
   // A tri field of 3 is invalid, and nothing above bit 7 may be set.
-  const uint16_t bt = ch[CPACK_CH_BTN_TOGGLE];
+  const uint16_t bt = ChannelPack::crsfToDiscrete(
+      ch[CPACK_CH_BTN_TOGGLE], CPACK_BTN_TOGGLE_FIELD_MAX);
   const bool btn_toggle_ok = (bt & ~uint16_t(0x00FF)) == 0 &&
                              (((bt >> 4) & 0x03) <= 2) &&
                              (((bt >> 6) & 0x03) <= 2);
 
   // CH11: packed nav (Nav1 bits 0..4, Nav2 bits 5..9); nothing above bit 9.
-  const bool nav_ok = (ch[CPACK_CH_NAV] & ~uint16_t(0x03FF)) == 0;
+  const uint16_t nav = ChannelPack::crsfToDiscrete(
+      ch[CPACK_CH_NAV], CPACK_NAV_FIELD_MAX);
+  const bool nav_ok = (nav & ~uint16_t(0x03FF)) == 0;
 
   // CH12..CH16 are reserved and packed near CRSF centre by the TX.
   bool reserved_ok = true;
@@ -432,6 +444,7 @@ void ControllerBridge::enterFailsafe(uint32_t now_ms) {
   cmd_.valid = false;
   cmd_.failsafe = true;
   cmd_.arm_request = false;
+  arm_release_pending_ = false;
   cmd_.estop = true;
   cmd_.twist_vx = cmd_.twist_vy = cmd_.twist_wz = 0.0f;
   cmd_.pose_x_mm = cmd_.pose_y_mm = cmd_.pose_z_mm = 0.0f;
@@ -488,7 +501,24 @@ const ControllerCommand& ControllerBridge::update(
   // Safety levels.
   const bool kill = readBool(cfg_.estop);
   cmd_.estop = kill;  // not in failsafe here
-  cmd_.arm_request = readBool(cfg_.arm) && !kill;
+  const bool arm_level = readBool(cfg_.arm);
+  if (kill) {
+    cmd_.arm_request = false;
+    arm_release_pending_ = false;
+  } else if (arm_level) {
+    cmd_.arm_request = true;
+    arm_release_pending_ = false;
+  } else if (cmd_.arm_request) {
+    if (!arm_release_pending_) {
+      arm_release_pending_ = true;
+      arm_release_since_ms_ = now_ms;
+    } else if ((now_ms - arm_release_since_ms_) >= kArmReleaseDebounceMs) {
+      cmd_.arm_request = false;
+      arm_release_pending_ = false;
+    }
+  } else {
+    arm_release_pending_ = false;
+  }
   cmd_.host_authority = readBool(cfg_.host_authority);
 
   // Feature toggle request levels.

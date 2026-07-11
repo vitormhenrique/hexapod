@@ -44,8 +44,8 @@ Sources:
 | Battery ADC (`ADC_BATTERY`, pin 33) | ✅ | ⚠️ defined, verify scaling |
 | **DYNAMIXEL bus via `Serial1`** | ✅ SERCOM2, pins 26/27 | ❌ MKR header UART (13/14) |
 | **DXL power FET `BDPIN_DXL_PWR_EN`** | ✅ pin 31 | ❌ undefined |
-| **`Serial2` (ExpressLRS/CRSF)** | ✅ SERCOM4, pins 28/29 | ❌ does not exist |
-| **`Serial3` (expansion UART)** | ✅ SERCOM5, pins 13/14 | ❌ does not exist |
+| **`Serial2` (dedicated 4-pin UART)** | ✅ SERCOM4, pins 28/29 | ❌ does not exist |
+| **`Serial3` (ExpressLRS/CRSF)** | ✅ SERCOM5, D14 TX / D13 RX | ❌ does not exist |
 | OpenRB build defines | ✅ `__OPENRB_150__` set | ❌ absent |
 
 **Always build firmware with `-e openrb150`.** If you build with `-e mkrzero`,

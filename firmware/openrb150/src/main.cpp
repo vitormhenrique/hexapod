@@ -19,6 +19,10 @@
 // ---------------------------------------------------------------------------
 
 void setup() {
+  // PM->RCAUSE identifies the previous reset (POR/BOD/EXT/WDT/SYST). Capture it
+  // before peripheral initialization so post-reset diagnostics are definitive.
+  app::setResetCause(PM->RCAUSE.reg);
+
   // Safe boot: configure pins and force DYNAMIXEL power OFF before anything.
   board::init();
 

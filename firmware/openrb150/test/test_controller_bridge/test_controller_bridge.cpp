@@ -171,6 +171,24 @@ void test_kill_switch_forces_estop_and_disarm() {
   TEST_ASSERT_FALSE(c.arm_request);
 }
 
+void test_arm_release_rejects_short_glitch_but_accepts_stable_release() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.switches[0] = true;
+  TEST_ASSERT_TRUE(feed(b, in, 10).arm_request);
+
+  in.switches[0] = false;
+  TEST_ASSERT_TRUE(feed(b, in, 20).arm_request);
+  TEST_ASSERT_TRUE(feed(b, in, 20 + kArmReleaseDebounceMs - 1).arm_request);
+
+  in.switches[0] = true;
+  TEST_ASSERT_TRUE(feed(b, in, 30 + kArmReleaseDebounceMs).arm_request);
+  in.switches[0] = false;
+  TEST_ASSERT_TRUE(feed(b, in, 40 + kArmReleaseDebounceMs).arm_request);
+  TEST_ASSERT_FALSE(
+      feed(b, in, 40 + 2 * kArmReleaseDebounceMs).arm_request);
+}
+
 void test_failsafe_on_link_down() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
@@ -376,16 +394,31 @@ void test_custom_btn4_uses_four_buttons() {
                          static_cast<uint8_t>(feed(b, in, 100).trick));
 }
 
-void test_custom_detection_rejects_reserved_switch_bits() {
-  ControllerBridge b;
+void test_custom_digital_fields_use_valid_crsf_range_and_round_trip() {
   ChannelPackInputs_t in = makeNeutral();
+  for (int i = 0; i < 6; ++i) in.switches[i] = true;
+  in.buttons[3] = true;
+  in.toggles[0] = 2;
+  in.toggles[1] = 2;
+  in.nav[0][CPACK_NAV_LEFT] = true;
+  in.nav[1][CPACK_NAV_CENTER] = true;
+
   uint16_t ch[CPACK_NUM_CHANNELS];
   ChannelPack::packInputs(&in, ch);
-  ch[CPACK_CH_SWITCHES] |= (1u << 6);  // reserved bit 6 set -> not custom
-  for (int i = 0; i < kProfileDetectFrames; ++i) b.update(ch, true, 10 + i * 10);
-  TEST_ASSERT_TRUE(b.profileLocked());
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(InputProfile::Tx16sMk3Direct),
-                         static_cast<uint8_t>(b.detectedProfile()));
+  for (int i = CPACK_CH_SWITCHES; i <= CPACK_CH_NAV; ++i) {
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT16(CPACK_CRSF_MIN, ch[i]);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT16(CPACK_CRSF_MAX, ch[i]);
+  }
+
+  ChannelPackInputs_t out = makeNeutral();
+  ChannelPack::unpackChannels(ch, &out);
+  for (int i = 0; i < 6; ++i) TEST_ASSERT_TRUE(out.switches[i]);
+  for (int i = 0; i < 3; ++i) TEST_ASSERT_FALSE(out.buttons[i]);
+  TEST_ASSERT_TRUE(out.buttons[3]);
+  TEST_ASSERT_EQUAL_UINT8(2, out.toggles[0]);
+  TEST_ASSERT_EQUAL_UINT8(2, out.toggles[1]);
+  TEST_ASSERT_TRUE(out.nav[0][CPACK_NAV_LEFT]);
+  TEST_ASSERT_TRUE(out.nav[1][CPACK_NAV_CENTER]);
 }
 
 void test_tx16s_profile_locks_after_stable_frames() {
@@ -699,6 +732,7 @@ int main(int, char**) {
   RUN_TEST(test_gait_index_from_select_toggle);
   RUN_TEST(test_arm_switch_requires_no_kill);
   RUN_TEST(test_kill_switch_forces_estop_and_disarm);
+  RUN_TEST(test_arm_release_rejects_short_glitch_but_accepts_stable_release);
   RUN_TEST(test_failsafe_on_link_down);
   RUN_TEST(test_failsafe_on_stale_timeout);
   RUN_TEST(test_shape_params_from_pots);
@@ -716,7 +750,7 @@ int main(int, char**) {
   // Input-profile detection & lock.
   RUN_TEST(test_custom_profile_locks_after_stable_frames);
   RUN_TEST(test_custom_btn4_uses_four_buttons);
-  RUN_TEST(test_custom_detection_rejects_reserved_switch_bits);
+  RUN_TEST(test_custom_digital_fields_use_valid_crsf_range_and_round_trip);
   RUN_TEST(test_tx16s_profile_locks_after_stable_frames);
   // TX16S direct decode.
   RUN_TEST(test_tx16s_gimbals_and_pots);

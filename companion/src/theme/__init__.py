@@ -146,7 +146,7 @@ QStackedWidget > QWidget {{
 }}
 #EventStrip QLabel {{
     color: {DRACULA.comment};
-    font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-family: Menlo, monospace;
     font-size: 12px;
 }}
 
@@ -340,7 +340,7 @@ QFormLayout QLabel {{ color: {DRACULA.comment}; }}
 #PageTitle {{ font-size: 24px; font-weight: 800; color: {DRACULA.foreground}; }}
 #PageSubtitle {{ color: {DRACULA.comment}; font-size: 13px; }}
 #MonoLabel {{
-    font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
+    font-family: Menlo, monospace;
     color: {DRACULA.foreground};
 }}
 """

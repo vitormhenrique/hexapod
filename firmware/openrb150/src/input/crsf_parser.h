@@ -3,8 +3,9 @@
 // ===========================================================================
 // CRSF (Crossfire / ExpressLRS) RC parser and RC/failsafe status mapping.
 //
-// The ExpressLRS receiver delivers CRSF frames on Serial2 at 420000 baud. This
-// module is split into two portable, heap-free pieces so the logic can be
+// The ExpressLRS receiver delivers CRSF frames on Serial3 (D14 TX / D13 RX) at
+// 420000 baud. This module is split into two portable, heap-free pieces so the
+// logic can be
 // unit-tested on the host (pio test -e native):
 //
 //   * Parser    - byte-wise streaming state machine that validates the CRSF
@@ -14,7 +15,7 @@
 //                 kill, and gait channels; failsafe is raised when no valid
 //                 frame has arrived within a timeout.
 //
-// Only the RC task (which owns Serial2) feeds bytes into a Parser; nothing here
+// Only the RC task (which owns Serial3) feeds bytes into a Parser; nothing here
 // touches Arduino APIs.
 // ===========================================================================
 

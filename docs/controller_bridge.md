@@ -22,7 +22,7 @@ both ends) and `lib/AlfredoCRSF/`.
 Decode path on the robot:
 
 ```
-Serial2 bytes ──► crsf::Parser ──► raw 11-bit ticks ch[16]
+Serial3 (D14 TX / D13 RX) bytes ──► crsf::Parser ──► raw 11-bit ticks ch[16]
                                         │
                                         ▼
                            controller::ControllerBridge.update(ch, link_up, now_ms)

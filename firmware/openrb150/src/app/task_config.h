@@ -7,9 +7,10 @@
 //
 // Priority ordering (higher number = higher priority) follows AGENTS.md 5.1:
 //   control / dxl  : high   (real-time motion + servo bus)
-//   rc             : medium-high (failsafe-relevant input)
+//   rc             : high (failsafe-relevant UART drain)
 //   api            : medium
-//   i2c / health   : low
+//   health         : highest (brief watchdog evaluation only)
+//   i2c            : low
 // ===========================================================================
 
 #include <stdint.h>
@@ -19,7 +20,10 @@ namespace app {
 // Stack depth in words. configMINIMAL_STACK_SIZE on this port is small; these
 // give comfortable headroom that the health task verifies via high-water marks.
 namespace stack_words {
-constexpr uint16_t kControl = 256;
+// Armed RC motion runs gait + body IK + six leg IK solves in this task. Live
+// high-water tracing showed only 75 words free with the old 256-word stack;
+// retain enough margin for deeper commanded-pose and trick paths.
+constexpr uint16_t kControl = 384;
 // dxl: Dynamixel2Arduino call chains (syncRead/readControlTableItem parsing)
 // plus the 160-byte maintenance-job result buffer run on this stack; 256 words
 // hard-faulted the MCU on the first status cycle after a real-servo scan
@@ -37,10 +41,10 @@ constexpr uint16_t kBlink = 96;   // tiny LED test task
 namespace priority {
 constexpr uint8_t kControl = 3;
 constexpr uint8_t kDxl = 3;
-constexpr uint8_t kRc = 2;
+constexpr uint8_t kRc = 3;
 constexpr uint8_t kApi = 2;
 constexpr uint8_t kI2c = 1;
-constexpr uint8_t kHealth = 1;
+constexpr uint8_t kHealth = 4;
 constexpr uint8_t kBlink = 1;
 }  // namespace priority
 

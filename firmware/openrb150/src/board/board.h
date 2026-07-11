@@ -78,6 +78,9 @@ uint8_t pinUserLed();
 bool hasDxlPowerControl();
 void setDxlPower(bool on);
 bool dxlPowerEnabled();
+// Number of actual ON/OFF state changes since boot. Redundant writes do not
+// increment it; useful for separating firmware rail cuts from bus brownouts.
+uint32_t dxlPowerTransitions();
 
 // --- Battery monitor --------------------------------------------------------
 // Raw 12-bit ADC counts at the battery sense pin (0..4095).

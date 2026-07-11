@@ -51,6 +51,9 @@ constexpr uint16_t kSchemaVersion = 2;
 // MX-28: 4096 ticks/rev, center 180deg = tick 2048.
 constexpr uint16_t kServoCenterTick = 2048;
 constexpr uint16_t kServoMaxTick = 4095;
+constexpr int16_t kDefaultCoxaTrimTicks = 0;
+constexpr int16_t kDefaultFemurTrimTicks = 171;   // +15 degrees
+constexpr int16_t kDefaultTibiaTrimTicks = -512;  // -45 degrees
 
 // ---------------------------------------------------------------------------
 // Enums.

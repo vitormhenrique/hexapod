@@ -13,6 +13,25 @@ volatile uint32_t g_beats[kTaskCount] = {0};
 uint32_t g_lastSeen[kTaskCount] = {0};
 // Bitmask of tasks that missed their heartbeat at the last evaluate().
 volatile uint32_t g_missedMask = 0;
+uint32_t g_lastResetMissedMask = 0;
+uint8_t g_lastResetProgressMarker = 0;
+uint8_t g_lastResetControlProgress = 0;
+uint8_t g_lastResetSafetyState = 0;
+
+#if defined(ARDUINO_ARCH_SAMD)
+struct RetainedWatchdogState {
+  uint32_t magic;
+  uint32_t missed_mask;
+  uint32_t missed_mask_inverse;
+  uint32_t progress_marker;
+  uint32_t progress_marker_inverse;
+  uint32_t control_progress;
+  uint32_t safety_state;
+};
+
+constexpr uint32_t kRetainedMagic = 0x57445431u;  // "WDT1"
+__attribute__((section(".noinit"))) volatile RetainedWatchdogState g_retainedState;
+#endif
 
 // Motion-critical tasks: a sustained stall of either one is a hard safety
 // failure, so the hardware WDT pet is withheld and the MCU resets. The other
@@ -80,7 +99,43 @@ void hwPet() {}
 
 }  // namespace
 
-void init() {
+void init(uint8_t reset_cause) {
+#if defined(ARDUINO_ARCH_SAMD)
+  const bool retained_valid =
+      g_retainedState.magic == kRetainedMagic &&
+      g_retainedState.missed_mask_inverse == ~g_retainedState.missed_mask &&
+      g_retainedState.progress_marker_inverse ==
+        ~g_retainedState.progress_marker;
+  g_lastResetMissedMask =
+      ((reset_cause & 0x20u) != 0 && retained_valid)
+          ? g_retainedState.missed_mask
+          : 0;
+  g_lastResetProgressMarker =
+      ((reset_cause & 0x20u) != 0 && retained_valid)
+          ? static_cast<uint8_t>(g_retainedState.progress_marker)
+          : 0;
+        g_lastResetControlProgress =
+          ((reset_cause & 0x20u) != 0 && retained_valid)
+            ? static_cast<uint8_t>(g_retainedState.control_progress)
+            : 0;
+        g_lastResetSafetyState =
+          ((reset_cause & 0x20u) != 0 && retained_valid)
+            ? static_cast<uint8_t>(g_retainedState.safety_state)
+            : 0;
+  g_retainedState.magic = kRetainedMagic;
+  g_retainedState.missed_mask = 0;
+  g_retainedState.missed_mask_inverse = ~0u;
+  g_retainedState.progress_marker = 0;
+  g_retainedState.progress_marker_inverse = ~0u;
+  g_retainedState.control_progress = 0;
+  g_retainedState.safety_state = 0;
+#else
+  (void)reset_cause;
+  g_lastResetMissedMask = 0;
+  g_lastResetProgressMarker = 0;
+  g_lastResetControlProgress = 0;
+  g_lastResetSafetyState = 0;
+#endif
   for (uint8_t i = 0; i < kTaskCount; ++i) {
     g_beats[i] = 0;
     g_lastSeen[i] = 0;
@@ -115,6 +170,10 @@ void evaluate() {
     g_lastSeen[i] = now;
   }
   g_missedMask = missed;
+#if defined(ARDUINO_ARCH_SAMD)
+  g_retainedState.missed_mask = missed;
+  g_retainedState.missed_mask_inverse = ~missed;
+#endif
 
   // Drive the hardware WDT: pet while the motion-critical tasks are live, and
   // withhold the pet when one has stalled so the WDT times out and resets the
@@ -126,6 +185,39 @@ void evaluate() {
 }
 
 uint32_t missedMask() { return g_missedMask; }
+
+uint32_t lastResetMissedMask() { return g_lastResetMissedMask; }
+
+void markProgress(uint8_t marker) {
+#if defined(ARDUINO_ARCH_SAMD)
+  g_retainedState.progress_marker = marker;
+  g_retainedState.progress_marker_inverse = ~static_cast<uint32_t>(marker);
+#else
+  (void)marker;
+#endif
+}
+
+uint8_t lastResetProgressMarker() { return g_lastResetProgressMarker; }
+
+void markControlProgress(uint8_t marker) {
+#if defined(ARDUINO_ARCH_SAMD)
+  g_retainedState.control_progress = marker;
+#else
+  (void)marker;
+#endif
+}
+
+void markSafetyState(uint8_t state) {
+#if defined(ARDUINO_ARCH_SAMD)
+  g_retainedState.safety_state = state;
+#else
+  (void)state;
+#endif
+}
+
+uint8_t lastResetControlProgress() { return g_lastResetControlProgress; }
+
+uint8_t lastResetSafetyState() { return g_lastResetSafetyState; }
 
 bool criticalStalled() { return (g_missedMask & kCriticalMask) != 0; }
 

@@ -213,6 +213,9 @@ constexpr float kTrimMaxRad = poselim::kMaxRotRad;
 constexpr uint32_t kEdgeRefractoryMs = 150;
 // No fresh frame within this window -> failsafe hold.
 constexpr uint32_t kDefaultFailsafeMs = 250;
+// SW_A must remain released for this long before disarming. Kill and link loss
+// bypass this filter and remain immediate.
+constexpr uint32_t kArmReleaseDebounceMs = 150;
 // Consecutive link-up frames that must agree on a layout before the input
 // profile is locked. Prefer stable detection over a first-frame lock so a
 // glitchy startup frame cannot pick the wrong profile.
@@ -340,6 +343,9 @@ class ControllerBridge {
   int32_t enc_last_[2];
   bool enc_seen_[2];
   float enc_accum_[2];  // 0..1 integrated trim per encoder
+
+  bool arm_release_pending_ = false;
+  uint32_t arm_release_since_ms_ = 0;
 
   // Edge state. Slots 0..kMaxTrickBindings-1 = trick bindings; the next 5 are
   // the trim nudges (pitch up/down, roll left/right, reset).

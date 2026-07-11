@@ -32,6 +32,9 @@ SCHEMA_VERSION = 2
 
 SERVO_CENTER_TICK = 2048
 SERVO_MAX_TICK = 4095
+DEFAULT_COXA_TRIM_TICKS = 0
+DEFAULT_FEMUR_TRIM_TICKS = 171
+DEFAULT_TIBIA_TRIM_TICKS = -512
 TICKS_PER_REV = 4096.0
 TICKS_PER_DEG = TICKS_PER_REV / 360.0  # ~11.3778
 RAD_TO_DEG = 180.0 / math.pi
@@ -330,7 +333,13 @@ def default_robot_config() -> RobotConfig:
                 # All legs share a +1 sign; hardware validation showed the
                 # right legs (2, 3, 4) were mirrored the wrong way under -1.
                 sign=1,
-                trim_ticks=0,
+                trim_ticks=(
+                    DEFAULT_FEMUR_TRIM_TICKS
+                    if joint == 1
+                    else DEFAULT_TIBIA_TRIM_TICKS
+                    if joint == 2
+                    else DEFAULT_COXA_TRIM_TICKS
+                ),
                 min_tick=SERVO_CENTER_TICK - 1024,  # 1024
                 max_tick=SERVO_CENTER_TICK + 1024,  # 3072
             )

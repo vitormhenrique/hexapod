@@ -60,10 +60,16 @@ Encoders integrate their relative delta into a 0..1 trim
 
 ## 2. Digital controls
 
-### 2-position switches — CH9 bitfield (safety & feature levels)
+### 2-position switches — CH9 compact mask (safety & feature levels)
 
 Read as a **level** (not an edge). Feature switches are *requests*: the control
 layer honours them only when the hardware capability is available.
+
+The custom ESP controller scales compact CH9–CH11 physical-state values across
+the valid CRSF range before sending them through ELRS. The receiver reverses
+that scaling with round-to-nearest; raw low integers and densely packed fields
+do not survive an ELRS RF link reliably. The OpenRB build explicitly selects
+this custom profile with `HEXAPOD_FORCE_CUSTOM_CHANNELPACK`.
 
 | Switch | Hexapod action |
 |--------|----------------|
@@ -74,7 +80,7 @@ layer honours them only when the hardware capability is available.
 | SW_G | Enable **passive-pose** streaming feature |
 | SW_H | Hand **motion authority to the USB host** (Mac/Jetson) |
 
-### 3-position toggles — CH10 bitfield (selectors)
+### 3-position toggles — CH10 compact state (selectors)
 
 Positions are UP = 0 / CENTER = 1 / DOWN = 2.
 
@@ -83,7 +89,7 @@ Positions are UP = 0 / CENTER = 1 / DOWN = 2.
 | SW_E | **Control-mode select**: Walk (0) / TranslateBody (1) / RotateBody (2) |
 | SW_F | **Gait-family select**: `gait_index` 0 / 1 / 2 |
 
-### Push buttons — CH10 bitfield (trick triggers, rising edge)
+### Push buttons — CH10 compact state (trick triggers, rising edge)
 
 Buttons fire a one-shot trick on the **rising edge** (debounced with a 150 ms
 refractory window). The choreography itself lives in the control-task trick
@@ -96,7 +102,7 @@ engine; the bridge only emits the trigger.
 | BTN 3 | **Wave** |
 | BTN 4 | **Crouch toggle** |
 
-### 5-way nav clusters — CH11 bitfield
+### 5-way nav clusters — CH11 compact state
 
 **NAV1 → persistent operator pose trim** (edge-nudged, fixed `1°` step per press,
 clamped to `±25°`). This biases the robot's attitude on top of the gimbal pose.

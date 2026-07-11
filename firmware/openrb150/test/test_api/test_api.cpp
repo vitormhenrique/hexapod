@@ -41,6 +41,14 @@ api::StatusSnapshot makeStatus() {
   st.dxl_power_control = true;
   st.battery_mv = 11800;
   st.watchdog_missed = 0;
+  st.reset_cause = 0x20;
+  st.last_reset_watchdog_missed = 0x02;
+  st.last_reset_progress_marker = 51;
+  st.control_stack_free_words = 123;
+  st.dxl_stack_free_words = 234;
+  st.last_reset_control_progress = 80;
+  st.last_reset_safety_state = 5;
+  st.dxl_power_transitions = 7;
   return st;
 }
 
@@ -108,7 +116,7 @@ void test_api_get_status() {
   size_t len = 0;
   TEST_ASSERT_EQUAL(DecodeStatus::Ok,
                     runRequest(api::msg::kGetStatus, 3, &h, p, &len));
-  TEST_ASSERT_EQUAL_UINT(12, len);
+  TEST_ASSERT_EQUAL_UINT(28, len);
   const uint32_t uptime = p[0] | (p[1] << 8) | (p[2] << 16) |
                           (static_cast<uint32_t>(p[3]) << 24);
   TEST_ASSERT_EQUAL_UINT32(123456, uptime);
@@ -119,6 +127,22 @@ void test_api_get_status() {
   const uint32_t missed = p[8] | (p[9] << 8) | (p[10] << 16) |
                           (static_cast<uint32_t>(p[11]) << 24);
   TEST_ASSERT_EQUAL_UINT32(0, missed);
+  TEST_ASSERT_EQUAL_HEX8(0x20, p[12]);
+  TEST_ASSERT_EQUAL_HEX32(0x02, static_cast<uint32_t>(p[13]) |
+                                   (static_cast<uint32_t>(p[14]) << 8) |
+                                   (static_cast<uint32_t>(p[15]) << 16) |
+                                   (static_cast<uint32_t>(p[16]) << 24));
+  TEST_ASSERT_EQUAL_UINT8(51, p[17]);
+  TEST_ASSERT_EQUAL_UINT16(123, static_cast<uint16_t>(p[18]) |
+                                   (static_cast<uint16_t>(p[19]) << 8));
+  TEST_ASSERT_EQUAL_UINT16(234, static_cast<uint16_t>(p[20]) |
+                                   (static_cast<uint16_t>(p[21]) << 8));
+  TEST_ASSERT_EQUAL_UINT8(80, p[22]);
+  TEST_ASSERT_EQUAL_UINT8(5, p[23]);
+  TEST_ASSERT_EQUAL_UINT32(7, static_cast<uint32_t>(p[24]) |
+                                 (static_cast<uint32_t>(p[25]) << 8) |
+                                 (static_cast<uint32_t>(p[26]) << 16) |
+                                 (static_cast<uint32_t>(p[27]) << 24));
 }
 
 void test_api_get_capabilities() {

@@ -14,7 +14,12 @@
 // gait in Phase 2) its body moves into a dedicated app/*_task module.
 // ===========================================================================
 
+#include <stdint.h>
+
 namespace app {
+
+// Preserve the SAMD21 PM->RCAUSE value sampled before board initialization.
+void setResetCause(uint8_t cause);
 
 // Create all tasks and start the scheduler. Call once at the end of setup().
 // Does NOT return on success (the scheduler takes over the CPU).

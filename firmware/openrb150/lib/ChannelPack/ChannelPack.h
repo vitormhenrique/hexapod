@@ -10,9 +10,9 @@
  *   CH1-4:  Gimbal axes (LEFT_X, LEFT_Y, RIGHT_X, RIGHT_Y) - proportional
  *   CH5-6:  Potentiometers (POT_1, POT_2) - proportional
  *   CH7-8:  Encoder positions (wrapped 11-bit)
- *   CH9:    8x 2-pos switches (SW_A-H) - bitfield
- *   CH10:   3 buttons + 2 three-pos toggles - bitfield
- *   CH11:   10 nav switch buttons (2x 5-way) - bitfield
+ *   CH9:    6x 2-pos switches - scaled 6-bit mask
+ *   CH10:   4 buttons + 2 three-pos toggles - scaled physical-state index
+ *   CH11:   10 nav switch buttons (2x 5-way) - scaled physical-state index
  *   CH12-16: Reserved (center)
  */
 
@@ -22,6 +22,13 @@
 #define CPACK_CRSF_MIN  191   // 1000us equivalent
 #define CPACK_CRSF_MID  992   // 1500us equivalent
 #define CPACK_CRSF_MAX  1792  // 2000us equivalent
+
+// Packed digital fields must also stay inside the valid CRSF channel range.
+// ELRS clamps raw channel values below CPACK_CRSF_MIN, which would otherwise
+// collapse small bitfields (for example CH9 values 0..63) to the same value.
+#define CPACK_SWITCH_FIELD_MAX     63u  // 6 independent switches
+#define CPACK_BTN_TOGGLE_FIELD_MAX 44u  // 9 toggle pairs x 5 button states
+#define CPACK_NAV_FIELD_MAX        35u  // 6 NAV1 states x 6 NAV2 states
 
 // Channel assignments (0-based)
 #define CPACK_CH_LEFT_X      0
@@ -84,6 +91,23 @@ inline uint16_t encoderToCrsf(int32_t pos) {
     return (uint16_t)(((pos % 2048) + 2048) % 2048);
 }
 
+// Map a discrete packed value across the valid CRSF range. The inverse uses
+// round-to-nearest so small RF quantization errors do not change the bitfield.
+inline uint16_t discreteToCrsf(uint16_t val, uint16_t field_max) {
+    if (val > field_max) val = field_max;
+    const uint32_t span = CPACK_CRSF_MAX - CPACK_CRSF_MIN;
+    return (uint16_t)(CPACK_CRSF_MIN +
+        ((uint32_t)val * span + field_max / 2u) / field_max);
+}
+
+inline uint16_t crsfToDiscrete(uint16_t val, uint16_t field_max) {
+    if (val < CPACK_CRSF_MIN) val = CPACK_CRSF_MIN;
+    if (val > CPACK_CRSF_MAX) val = CPACK_CRSF_MAX;
+    const uint32_t span = CPACK_CRSF_MAX - CPACK_CRSF_MIN;
+    return (uint16_t)(((uint32_t)(val - CPACK_CRSF_MIN) * field_max +
+                       span / 2u) / span);
+}
+
 // Pack 8 switches into 11-bit value (bits 0-7)
 inline uint16_t packSwitches(const bool sw[8]) {
     uint16_t val = 0;
@@ -107,6 +131,21 @@ inline uint16_t packButtonsToggles(const bool btn[4], const uint8_t tog[2]) {
     return val;
 }
 
+// Compact the physically valid controls for RF transport. A momentary button
+// is none (0) or BTN_1..BTN_4 (1..4); each toggle pair has 3 x 3 states.
+inline uint16_t packButtonToggleState(const bool btn[4], const uint8_t tog[2]) {
+    uint8_t button_state = 0;
+    for (int i = 0; i < 4; i++) {
+        if (btn[i]) {
+            button_state = (uint8_t)(i + 1);
+            break;
+        }
+    }
+    const uint8_t toggle0 = tog[0] <= 2 ? tog[0] : 2;
+    const uint8_t toggle1 = tog[1] <= 2 ? tog[1] : 2;
+    return (uint16_t)(((toggle0 * 3u + toggle1) * 5u) + button_state);
+}
+
 // Pack 10 nav switches (2x5-way) into 11-bit value
 // Bits 0-4: NAV1 (U,D,L,R,C)
 // Bits 5-9: NAV2 (U,D,L,R,C)
@@ -119,6 +158,18 @@ inline uint16_t packNavSwitches(const bool nav[2][5]) {
     return val;
 }
 
+
+inline uint8_t packNavState(const bool nav[5]) {
+    for (int i = 0; i < 5; i++) {
+        if (nav[i]) return (uint8_t)(i + 1);
+    }
+    return 0;
+}
+
+inline uint16_t packNavStates(const bool nav[2][5]) {
+    return (uint16_t)(packNavState(nav[0]) * 6u + packNavState(nav[1]));
+}
+
 // Pack all inputs into 16-channel array (CRSF 11-bit values)
 inline void packInputs(const ChannelPackInputs_t* in, uint16_t ch[CPACK_NUM_CHANNELS]) {
     ch[CPACK_CH_LEFT_X]     = gimbalToCrsf(in->gimbal[0]);
@@ -129,9 +180,14 @@ inline void packInputs(const ChannelPackInputs_t* in, uint16_t ch[CPACK_NUM_CHAN
     ch[CPACK_CH_POT2]       = potToCrsf(in->pot[1]);
     ch[CPACK_CH_ENC1]       = encoderToCrsf(in->encoder[0]);
     ch[CPACK_CH_ENC2]       = encoderToCrsf(in->encoder[1]);
-    ch[CPACK_CH_SWITCHES]   = packSwitches(in->switches);
-    ch[CPACK_CH_BTN_TOGGLE] = packButtonsToggles(in->buttons, in->toggles);
-    ch[CPACK_CH_NAV]        = packNavSwitches(in->nav);
+    ch[CPACK_CH_SWITCHES] = discreteToCrsf(
+        packSwitches(in->switches) & CPACK_SWITCH_FIELD_MAX,
+        CPACK_SWITCH_FIELD_MAX);
+    ch[CPACK_CH_BTN_TOGGLE] = discreteToCrsf(
+        packButtonToggleState(in->buttons, in->toggles),
+        CPACK_BTN_TOGGLE_FIELD_MAX);
+    ch[CPACK_CH_NAV] = discreteToCrsf(
+        packNavStates(in->nav), CPACK_NAV_FIELD_MAX);
     for (int i = 11; i < CPACK_NUM_CHANNELS; i++) {
         ch[i] = CPACK_CRSF_MID;
     }
@@ -167,10 +223,31 @@ inline void unpackButtonsToggles(uint16_t val, bool btn[4], uint8_t tog[2]) {
     tog[1] = (val >> 6) & 0x03;
 }
 
+inline void unpackButtonToggleState(uint16_t val, bool btn[4], uint8_t tog[2]) {
+    if (val > CPACK_BTN_TOGGLE_FIELD_MAX) val = CPACK_BTN_TOGGLE_FIELD_MAX;
+    const uint8_t button_state = (uint8_t)(val % 5u);
+    const uint8_t toggle_state = (uint8_t)(val / 5u);
+    for (int i = 0; i < 4; i++) btn[i] = button_state == (uint8_t)(i + 1);
+    tog[0] = (uint8_t)(toggle_state / 3u);
+    tog[1] = (uint8_t)(toggle_state % 3u);
+}
+
 inline void unpackNavSwitches(uint16_t val, bool nav[2][5]) {
     for (int i = 0; i < 5; i++) {
         nav[0][i] = (val >> i) & 1;
         nav[1][i] = (val >> (i + 5)) & 1;
+    }
+}
+
+inline void unpackNavStates(uint16_t val, bool nav[2][5]) {
+    if (val > CPACK_NAV_FIELD_MAX) val = CPACK_NAV_FIELD_MAX;
+    const uint8_t state[2] = {
+        (uint8_t)(val / 6u), (uint8_t)(val % 6u)
+    };
+    for (int n = 0; n < 2; n++) {
+        for (int i = 0; i < 5; i++) {
+            nav[n][i] = state[n] == (uint8_t)(i + 1);
+        }
     }
 }
 
@@ -184,9 +261,15 @@ inline void unpackChannels(const uint16_t ch[CPACK_NUM_CHANNELS], ChannelPackInp
     out->pot[1]    = crsfToPot(ch[CPACK_CH_POT2]);
     out->encoder[0] = crsfToEncoder(ch[CPACK_CH_ENC1]);
     out->encoder[1] = crsfToEncoder(ch[CPACK_CH_ENC2]);
-    unpackSwitches(ch[CPACK_CH_SWITCHES], out->switches);
-    unpackButtonsToggles(ch[CPACK_CH_BTN_TOGGLE], out->buttons, out->toggles);
-    unpackNavSwitches(ch[CPACK_CH_NAV], out->nav);
+    unpackSwitches(
+        crsfToDiscrete(ch[CPACK_CH_SWITCHES], CPACK_SWITCH_FIELD_MAX),
+        out->switches);
+    unpackButtonToggleState(
+        crsfToDiscrete(ch[CPACK_CH_BTN_TOGGLE],
+                       CPACK_BTN_TOGGLE_FIELD_MAX),
+        out->buttons, out->toggles);
+    unpackNavStates(
+        crsfToDiscrete(ch[CPACK_CH_NAV], CPACK_NAV_FIELD_MAX), out->nav);
 }
 
 } // namespace ChannelPack

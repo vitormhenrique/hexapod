@@ -49,6 +49,7 @@ volatile uint32_t g_loops[watchdog::kTaskCount] = {0};
 
 // Static description of this firmware build, reported by HELLO/GET_CAPABILITIES.
 protocol::api::DeviceInfo g_deviceInfo;
+uint8_t g_resetCause = 0;
 
 // Single owner of the DYNAMIXEL TTL bus (Serial1). Only dxlTask touches this,
 // satisfying the AGENTS.md rule that one task owns Dynamixel2Arduino/Serial1.
@@ -58,8 +59,12 @@ dxl::DxlBus g_dxlBus(Serial1);
 // by telemetry/safety consumers. Single writer (dxlTask); readers take a copy.
 dxl::ServoStatus g_servoStatus[dxl::DxlBus::kMaxServos];
 volatile uint8_t g_servoStatusCount = 0;
+volatile bool g_configuredServoCoverage = false;
+volatile uint32_t g_poseKnownMask = 0;
+constexpr uint32_t kAllServoPosesKnown =
+  (1u << config::kNumServos) - 1u;
 
-// CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial2).
+// CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial3).
 crsf::Parser g_crsfParser;
 crsf::RcStatus g_rcStatus;
 
@@ -251,7 +256,7 @@ volatile bool g_dxlTorqueOff = true;
 // false; only meaningful once a maintenance scan has populated the servo table.
 volatile bool g_dxlHardFault = false;
 
-// CRSF runs at 420000 baud on the OpenRB-150 4-pin UART (Serial2).
+// CRSF runs at 420000 baud on the OpenRB-150 D14 TX / D13 RX UART (Serial3).
 constexpr uint32_t kCrsfBaud = 420000;
 
 // Single owner of the root I2C bus (Wire): TCA9548A mux, 24LC32 EEPROM, and the
@@ -729,6 +734,53 @@ void deriveRcStatus(const controller::ControllerCommand& cc,
   rc.ever_seen = cc.ever_seen;
 }
 
+bool configuredServoCoverageFromBus() {
+  if (g_dxlBus.servoCount() < config::kNumServos) return false;
+  const config::RobotConfig& cfg = g_configApi.config();
+  for (uint8_t i = 0; i < config::kNumServos; ++i) {
+    if (g_dxlBus.profileById(cfg.servos[i].id) == nullptr) return false;
+  }
+  return true;
+}
+
+uint32_t configuredPoseMaskFromStatus() {
+  uint32_t mask = 0;
+  const config::RobotConfig& cfg = g_configApi.config();
+  for (uint8_t i = 0; i < config::kNumServos; ++i) {
+    for (uint8_t s = 0; s < g_servoStatusCount; ++s) {
+      if (g_servoStatus[s].id == cfg.servos[i].id && g_servoStatus[s].ok) {
+        mask |= (1u << i);
+        break;
+      }
+    }
+  }
+  return mask;
+}
+
+void publishServoReadiness() {
+  g_configuredServoCoverage = configuredServoCoverageFromBus();
+  g_poseKnownMask = configuredPoseMaskFromStatus();
+}
+
+bool buildConfiguredHoldTargets(dxl::GoalTarget* hold) {
+  if (hold == nullptr || configuredPoseMaskFromStatus() != kAllServoPosesKnown) {
+    return false;
+  }
+  const config::RobotConfig& cfg = g_configApi.config();
+  for (uint8_t i = 0; i < config::kNumServos; ++i) {
+    for (uint8_t s = 0; s < g_servoStatusCount; ++s) {
+      if (g_servoStatus[s].id != cfg.servos[i].id) continue;
+      int32_t present = g_servoStatus[s].present_position;
+      if (present < 0) present = 0;
+      if (present > 0xFFFF) present = 0xFFFF;
+      hold[i].id = cfg.servos[i].id;
+      hold[i].tick = static_cast<uint16_t>(present);
+      break;
+    }
+  }
+  return true;
+}
+
 void controlTask(void*) {
   TickType_t next = xTaskGetTickCount();
   g_stateMachine.reset();
@@ -800,7 +852,7 @@ void controlTask(void*) {
     // HIL-calibrated (board.h kBatteryDividerRatio); an uncalibrated ratio
     // shifts both bounds together.
     si.battery_valid = batt_mv > 6000;  // below this = no pack sense (USB bench)
-    si.watchdog_fault = watchdog::missedMask() != 0;
+    si.watchdog_fault = watchdog::criticalStalled();
     si.dxl_hard_fault = g_dxlHardFault;  // servo HW error / dead bus (lmt.5)
     si.host_estop = g_arbiter.hostEstop() || g_controlApi.estopActive();
     si.rc_kill = g_rcStatus.kill;
@@ -814,8 +866,8 @@ void controlTask(void*) {
     // reading (a present-but-low pack already E-stops in the FSM), the full
     // servo set scanned, fresh present-position reads for every joint (so we
     // know the pose before energising), and no active hard fault.
-    const bool servo_coverage = g_dxlBus.servoCount() >= config::kNumServos;
-    const bool pose_known = g_servoStatusCount >= config::kNumServos;
+    const bool servo_coverage = g_configuredServoCoverage;
+    const bool pose_known = g_poseKnownMask == kAllServoPosesKnown;
     si.arming_checks_pass = g_configReady && si.battery_valid && servo_coverage &&
                             pose_known && !si.dxl_hard_fault;
     si.host_disarm = g_controlApi.disarmRequested();
@@ -856,6 +908,7 @@ void controlTask(void*) {
     }
     const safety::State state = g_stateMachine.update(si, now_ms);
     g_safetyState = static_cast<uint8_t>(state);
+    watchdog::markSafetyState(g_safetyState);
     g_faultReason = static_cast<uint8_t>(g_stateMachine.faultReason());
     // Force-revoke the maintenance lock once the robot is in a fault/E-stop
     // state so a stale Mac client cannot retain bench authority across a fault.
@@ -1094,7 +1147,9 @@ void controlTask(void*) {
         g_pipeline.resetPhase();
       }
       gait::PipelineOutput goals;
+      watchdog::markControlProgress(80);
       g_pipeline.update(period_ms::kControl, goals);
+      watchdog::markControlProgress(81);
       // Publish for dxlTask under a zero-wait lock: if dxlTask momentarily holds
       // it, skip this frame (keep the previous) rather than block controlTask.
       if (g_goalMutex != nullptr && xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
@@ -1130,6 +1185,17 @@ void controlTask(void*) {
     // be honoured when it is safe (AGENTS.md 1.3). Engines that are not yet
     // wired report NotImplemented so the host gets an honest reason.
     updateFeatureFlags(now_ms);
+    watchdog::markControlProgress(0);
+
+    // If gait/IK work exceeded the 10 ms period, rebase before delaying.
+    // Without this guard vTaskDelayUntil() returns immediately forever once
+    // `next` falls behind, leaving priority-3 control continuously runnable
+    // and starving lower-priority tasks.
+    const TickType_t now_ticks = xTaskGetTickCount();
+    if (static_cast<int32_t>(now_ticks - next) >=
+        static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kControl))) {
+      next = now_ticks;
+    }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kControl));
   }
 }
@@ -1472,6 +1538,14 @@ void runQueuedDxlJob() {
   g_dxlJobApi.queue().complete(job_id, code, data, len);
 }
 
+void clearServoStatusSnapshot() {
+  g_servoStatusCount = 0;
+  g_poseKnownMask = 0;
+  for (uint8_t i = 0; i < dxl::DxlBus::kMaxServos; ++i) {
+    g_servoStatus[i] = dxl::ServoStatus{};
+  }
+}
+
 void dxlTask(void*) {
   // Bring up the DXL UART once. This only initializes Serial1; it does NOT
   // enable DXL power (board HAL owns that) or servo torque, so it is safe at
@@ -1479,34 +1553,89 @@ void dxlTask(void*) {
   g_dxlBus.begin();
   TickType_t next = xTaskGetTickCount();
   bool prev_authorized = false;
+  bool arming_discovery_started = false;
+  bool arming_discovery_finished = false;
+  uint8_t arming_discovery_index = 0;
+  uint32_t arming_power_on_ms = 0;
+  constexpr uint16_t kServoBootDelayMs = 500;
   // Sustained dead-bus window before declaring a hard bus fault (lmt.5).
   constexpr uint16_t kDxlBusFailLimit = 50;  // ~1 s at the 50 Hz dxl period
   for (;;) {
     tick(watchdog::TaskId::Dxl);
+
+    const uint32_t now_ms =
+        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    const safety::State live_state =
+        static_cast<safety::State>(g_safetyState);
+    const bool arming = live_state == safety::State::ArmingChecks;
+
+    // RC arming owns a bounded torque-off bring-up sequence. Power the bus,
+    // wait for the servos to boot, discover exactly the configured IDs once,
+    // then let the normal status reader populate fresh present positions. The
+    // safety FSM remains in ArmingChecks until all 18 IDs and poses are known.
+    if (arming) {
+      if (!board::dxlPowerEnabled()) {
+        watchdog::markProgress(10);
+        board::setDxlPower(true);
+        arming_power_on_ms = now_ms;
+        arming_discovery_started = false;
+        arming_discovery_finished = false;
+        arming_discovery_index = 0;
+        clearServoStatusSnapshot();
+      }
+      if ((now_ms - arming_power_on_ms) >= kServoBootDelayMs) {
+        if (!arming_discovery_started) {
+          if (configuredServoCoverageFromBus()) {
+            arming_discovery_finished = true;
+          } else {
+            g_dxlBus.beginDiscovery();
+            g_configuredServoCoverage = false;
+            arming_discovery_index = 0;
+            arming_discovery_started = true;
+            arming_discovery_finished = false;
+            clearServoStatusSnapshot();
+          }
+        }
+        if (arming_discovery_started && !arming_discovery_finished) {
+          const config::RobotConfig& cfg = g_configApi.config();
+          watchdog::markProgress(11);
+          g_dxlBus.discoverId(cfg.servos[arming_discovery_index].id);
+          ++arming_discovery_index;
+          if (arming_discovery_index >= config::kNumServos) {
+            arming_discovery_finished = true;
+          }
+          publishServoReadiness();
+        }
+        if (!arming_discovery_started) {
+          publishServoReadiness();
+        }
+      }
+    } else {
+      arming_discovery_started = false;
+      arming_discovery_finished = false;
+      arming_discovery_index = 0;
+    }
 
     // Execute at most one queued DXL maintenance job per cycle. dxlTask is the
     // sole owner of the bus, so all scan/ping/torque/profile work funnels here;
     // apiTask only enqueues (gated on MacMaintenance + lock) and polls the
     // result. Running one job per loop keeps the present-position streaming
     // below responsive and bounds the per-cycle bus time.
+    watchdog::markProgress(20);
     runQueuedDxlJob();
+    publishServoReadiness();
 
-    // Safety force-off (4sa.1): DXL power may only be energized during
-    // MacMaintenance (the sole state in which the power-enable command is
-    // accepted) or PassivePoseStream (torque-off present-position streaming,
-    // AGENTS.md 5.5 / hexapod_src-nkb -- the FSM enters it directly from
-    // maintenance with torque confirmed off, and goal writes are gated off, so
-    // an energized-but-undriven bus is safe there). The instant the robot
-    // leaves those states -- lock release or expiry, disarm, RC kill / host
-    // estop, or a fault -- cut DXL power so every servo is de-energized.
+    // Safety force-off (4sa.1): retain DXL power only while the state policy
+    // allows it. ArmingChecks uses a powered torque-off bus for discovery;
+    // StandReady and motion states retain power; maintenance/passive keep their
+    // existing behavior. Disarm, RC kill / host estop, or a fault cuts power.
     // board:: caches the FET state, so this is at most one digitalWrite per
     // transition; it is a no-op on builds without a software power FET
     // (board::dxlPowerEnabled() stays false there).
     if (board::dxlPowerEnabled() &&
-        g_safetyState != static_cast<uint8_t>(safety::State::MacMaintenance) &&
-        g_safetyState !=
-            static_cast<uint8_t>(safety::State::PassivePoseStream)) {
+        !safety::stateAllowsDxlPower(live_state)) {
       board::setDxlPower(false);
+      clearServoStatusSnapshot();
     }
 
     // Enforce the safety gate at the bus level: the instant motion is no longer
@@ -1518,7 +1647,9 @@ void dxlTask(void*) {
     const bool authorized = g_motionGate;
     const bool have_servos = g_dxlBus.servoCount() > 0;
     static bool torque_seed_pending = false;
+    static bool torque_enable_fault = false;
     if (!authorized && prev_authorized && have_servos) {
+      watchdog::markProgress(40);
       g_dxlBus.setTorqueAll(false);
     }
     if (!authorized) {
@@ -1544,22 +1675,20 @@ void dxlTask(void*) {
     }
     if (authorized && torque_seed_pending && have_servos) {
       static dxl::GoalTarget hold[config::kNumServos];
-      uint8_t hn = 0;
-      for (uint8_t s = 0; s < g_servoStatusCount && hn < config::kNumServos;
-           ++s) {
-        if (!g_servoStatus[s].ok) continue;  // no fresh present read yet
-        int32_t pp = g_servoStatus[s].present_position;
-        if (pp < 0) pp = 0;
-        hold[hn].id = g_servoStatus[s].id;
-        hold[hn].tick = static_cast<uint16_t>(pp);
-        ++hn;
+      watchdog::markProgress(50);
+      if (buildConfiguredHoldTargets(hold) &&
+          g_dxlBus.writeGoalPositions(hold, config::kNumServos)) {
+        watchdog::markProgress(51);
+        const uint8_t acked = g_dxlBus.setTorqueAll(true);
+        if (acked == config::kNumServos) {
+          torque_seed_pending = false;
+          torque_enable_fault = false;
+        } else {
+          watchdog::markProgress(52);
+          g_dxlBus.setTorqueAll(false);
+          torque_enable_fault = true;
+        }
       }
-      if (hn > 0) {
-        g_dxlBus.writeGoalPositions(hold, hn);  // goal := present (no motion)
-        g_dxlBus.setTorqueAll(true);            // now safe to hold the pose
-        torque_seed_pending = false;
-      }
-      // else: present snapshot not ready; leave torque off and retry next cycle.
     }
     prev_authorized = authorized;
     // Publish torque-off confirmation for the safety FSM (passive pose gating).
@@ -1578,7 +1707,8 @@ void dxlTask(void*) {
     // holding it longer than kGoalReadWaitMs, which never happens in practice)
     // the servos hold their previous goal. Writing every cycle (not just on
     // goal change) also keeps any per-servo bus watchdog fed.
-    if (authorized && have_servos && g_goalValid && g_goalMutex != nullptr) {
+    if (authorized && !torque_seed_pending && have_servos && g_goalValid &&
+        g_goalMutex != nullptr) {
       static dxl::GoalTarget targets[config::kNumServos];
       uint8_t count = 0;
       // Bounded wait (not zero) to acquire the frame: controlTask publishes at
@@ -1598,6 +1728,7 @@ void dxlTask(void*) {
         xSemaphoreGive(g_goalMutex);
       }
       if (count > 0) {
+        watchdog::markProgress(60);
         g_dxlBus.writeGoalPositions(targets, count);
       }
     }
@@ -1610,28 +1741,17 @@ void dxlTask(void*) {
     // FaultHard power force-cut raced these reads, hexapod_src-2e8). Never
     // enables torque or writes goals; the goal Sync-Write path runs above.
     static uint16_t consec_zero_reads = 0;  // dead-bus counter (lmt.5)
-    // Dead-bus read backoff: on a powered bus where every present-position
-    // read timed out (servos still booting after a power-on, or a genuinely
-    // dead bus), each read busy-waits its full kReadTimeoutMs at dxlTask
-    // priority -- an 18-servo batch burns ~360 ms per cycle and starves
-    // apiTask (priority 2), stalling heartbeats/commands for seconds. After an
-    // all-timeout batch, skip the read path for a few cycles so lower-priority
-    // tasks get real CPU windows; skipped cycles still count toward the
-    // dead-bus fault window so lmt.5 timing is unchanged.
-    static uint8_t read_backoff = 0;
-    constexpr uint8_t kReadBackoffCycles = 24;  // ~0.5 s at the 50 Hz period
-    if (g_dxlBus.servoCount() > 0 && board::dxlPowerEnabled()) {
-      if (read_backoff > 0) {
-        --read_backoff;
-        if (consec_zero_reads < 0xFFFF) ++consec_zero_reads;
-      } else {
+    const bool arming_reads_ready =
+        !arming || (arming_discovery_finished && g_configuredServoCoverage);
+    if (g_dxlBus.servoCount() > 0 && board::dxlPowerEnabled() &&
+        arming_reads_ready) {
+      watchdog::markProgress(70);
       const uint8_t n =
           g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos);
       const uint8_t cnt = g_dxlBus.servoCount();
       // The snapshot covers the whole servo table (per-entry .ok marks
-      // validity); syncReadStatus refreshes legacy servos round-robin, so a
-      // single call may touch only a subset. Any fresh read publishes the
-      // full table to the telemetry encoders.
+      // validity); syncReadStatus refreshes exactly one servo round-robin.
+      // Any fresh read publishes the full table to the telemetry encoders.
       if (n > 0) {
         g_servoStatusCount = cnt;
       }
@@ -1643,12 +1763,13 @@ void dxlTask(void*) {
       // these fields between cycles, so the servo_status stream converges over
       // servoCount() cycles. Read-only and torque-off-safe; bounded to one
       // servo per cycle and to DxlBus::kReadTimeoutMs per register read.
-      // Skipped while the bus is not answering at all (n == 0): it would only
-      // add another busy-wait timeout on a dead bus.
+      // Skipped when this cycle's position transaction failed (n == 0): it
+      // would only add more timeout work on a potentially dead bus.
       static uint8_t rr_servo = 0;
-      if (n > 0) {
+      if (n > 0 && !arming) {
         if (rr_servo >= cnt) rr_servo = 0;
         const uint8_t rr_id = g_dxlBus.profile(rr_servo).id;
+        watchdog::markProgress(71);
         g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
         g_servoStatus[rr_servo].id = rr_id;  // readStatus does not set id
         ++rr_servo;
@@ -1656,14 +1777,12 @@ void dxlTask(void*) {
 
       // Hard-fault detection (lmt.5): publish g_dxlHardFault for the safety FSM.
       // A servo hardware-error bit (MX 2.0 Hardware Error Status; converges via
-      // the round-robin read) is an immediate hard fault. A powered bus that
-      // stops answering every present-position read for a sustained window
-      // (kDxlBusFailLimit cycles) is treated as a hard bus failure. Level-
-      // triggered so that once the servo is rebooted / the bus is restored the
-      // condition clears and the FSM can release FaultHard after CLEAR_FAULT.
+      // the detail read) is an immediate hard fault. A powered bus that fails
+      // kDxlBusFailLimit consecutive bounded position transactions is a hard
+      // bus failure; intermittent per-servo failures keep arming checks from
+      // passing but do not falsely classify the entire bus as dead.
       if (n == 0) {
         if (consec_zero_reads < 0xFFFF) ++consec_zero_reads;
-        read_backoff = kReadBackoffCycles;
       } else {
         consec_zero_reads = 0;
       }
@@ -1674,16 +1793,18 @@ void dxlTask(void*) {
           break;
         }
       }
-      g_dxlHardFault = hw_error || (consec_zero_reads >= kDxlBusFailLimit);
-      }
+      g_dxlHardFault = torque_enable_fault || hw_error ||
+                       (consec_zero_reads >= kDxlBusFailLimit);
     } else {
       // No scanned servos or DXL power is off: there is no powered bus to
       // fault on (FaultHard itself force-cuts power above, so keeping the
       // fault asserted here would deadlock CLEAR_FAULT recovery).
       consec_zero_reads = 0;
-      read_backoff = 0;
-      g_dxlHardFault = false;
+      if (!board::dxlPowerEnabled()) torque_enable_fault = false;
+      g_dxlHardFault = torque_enable_fault;
     }
+    publishServoReadiness();
+    watchdog::markProgress(0);
 
     // Overrun guard: bus reads on a powered-but-unresponsive bus busy-wait
     // their timeouts inside the library, and a cycle that overruns the period
@@ -1706,9 +1827,9 @@ void dxlTask(void*) {
 void rcTask(void*) {
   crsf::initRcStatus(g_rcStatus);
   g_bridge.reset();
-#if defined(PIN_SERIAL2_RX)
-  // Serial2 is the ExpressLRS CRSF receiver link; rcTask owns it exclusively.
-  Serial2.begin(kCrsfBaud);
+#if defined(PIN_SERIAL3_RX)
+  // Serial3 is the ExpressLRS CRSF receiver link; rcTask owns it exclusively.
+  Serial3.begin(kCrsfBaud);
 #endif
   TickType_t next = xTaskGetTickCount();
   for (;;) {
@@ -1717,9 +1838,9 @@ void rcTask(void*) {
         static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
     crsf::ChannelData frame;
     bool fresh = false;
-#if defined(PIN_SERIAL2_RX)
-    while (Serial2.available() > 0) {
-      const uint8_t b = static_cast<uint8_t>(Serial2.read());
+#if defined(PIN_SERIAL3_RX)
+    while (Serial3.available() > 0) {
+      const uint8_t b = static_cast<uint8_t>(Serial3.read());
       if (g_crsfParser.push(b, frame)) {
         // Feed the raw 11-bit ChannelPack ticks to the bridge decoder.
         g_bridge.update(frame.channels, /*link_up=*/true, now_ms);
@@ -1840,6 +1961,18 @@ void apiTask(void*) {
       st.dxl_power_control = board::hasDxlPowerControl();
       st.battery_mv = g_batteryMv;  // snapshot; ADC is controlTask-only
       st.watchdog_missed = watchdog::missedMask();
+      st.reset_cause = g_resetCause;
+      st.last_reset_watchdog_missed = watchdog::lastResetMissedMask();
+      st.last_reset_progress_marker = watchdog::lastResetProgressMarker();
+      st.control_stack_free_words = static_cast<uint16_t>(
+          uxTaskGetStackHighWaterMark(
+              g_handles[static_cast<uint8_t>(watchdog::TaskId::Control)]));
+      st.dxl_stack_free_words = static_cast<uint16_t>(
+          uxTaskGetStackHighWaterMark(
+              g_handles[static_cast<uint8_t>(watchdog::TaskId::Dxl)]));
+      st.last_reset_control_progress = watchdog::lastResetControlProgress();
+      st.last_reset_safety_state = watchdog::lastResetSafetyState();
+      st.dxl_power_transitions = board::dxlPowerTransitions();
 
       // Give the maintenance lock the current time + live state so ENTER can
       // gate on a safe state and TTL/heartbeat use the same clock as the
@@ -2214,8 +2347,10 @@ void healthTask(void*) {
 
 }  // namespace
 
+void setResetCause(uint8_t cause) { g_resetCause = cause; }
+
 void start() {
-  watchdog::init();
+  watchdog::init(g_resetCause);
   initDeviceInfo();
 
   // Sync primitives for the apiTask <-> i2cTask config commit hand-off. Created

@@ -6,8 +6,8 @@ ESP32-S3 controller (TX) and a custom robot receiver (RX).
 `ChannelPack.h` is a single, dependency-free header. It packs **every input on the
 controller** into the 16 channels of a standard CRSF `RC_CHANNELS_PACKED` (0x16)
 frame, and unpacks them on the receiver side. Because the controller has far more
-than 16 physical inputs, related digital inputs are **bit-packed** into shared
-channels (switches, buttons, toggles, nav clusters).
+than 16 physical inputs, related digital inputs are encoded as compact physical
+states in shared channels (switches, buttons, toggles, nav clusters).
 
 > Copy this header verbatim into your receiver firmware so both ends agree on the
 > exact channel map and bit layout. **If the two copies ever diverge, the link
@@ -83,14 +83,16 @@ matching **0-based** array indices used by the library.
 | CH6 | `CPACK_CH_POT2`     (5) | Potentiometer 2 | proportional | `potToCrsf` |
 | CH7 | `CPACK_CH_ENC1`     (6) | Encoder 1 position | wrapped 11-bit | `encoderToCrsf` |
 | CH8 | `CPACK_CH_ENC2`     (7) | Encoder 2 position | wrapped 11-bit | `encoderToCrsf` |
-| CH9 | `CPACK_CH_SWITCHES` (8) | 6 × 2-pos switches | **bitfield** | `packSwitches` |
-| CH10 | `CPACK_CH_BTN_TOGGLE` (9) | 4 buttons + 2 × 3-pos toggles | **bitfield** | `packButtonsToggles` |
-| CH11 | `CPACK_CH_NAV`      (10) | 2 × 5-way nav switches | **bitfield** | `packNavSwitches` |
+| CH9 | `CPACK_CH_SWITCHES` (8) | 6 × 2-pos switches | **scaled 6-bit mask** | `packSwitches` + `discreteToCrsf` |
+| CH10 | `CPACK_CH_BTN_TOGGLE` (9) | 4 buttons + 2 × 3-pos toggles | **scaled state index** | `packButtonToggleState` + `discreteToCrsf` |
+| CH11 | `CPACK_CH_NAV`      (10) | 2 × 5-way nav switches | **scaled state index** | `packNavStates` + `discreteToCrsf` |
 | CH12–CH16 | 11–15 | Reserved | centered | constant `992` |
 
-> **Critical:** CH9–CH11 carry **raw integer bitfields**, not stick positions.
-> Read them as raw 11-bit values and decode the bits — never scale them to µs or
-> apply a deadzone.
+> **Critical:** CH9–CH11 carry discrete integers encoded across the valid CRSF
+> range by `discreteToCrsf()`. ELRS clamps raw values below `CPACK_CRSF_MIN` and
+> may quantize channel values, so sending small integers directly would lose
+> controls. Decode with `crsfToDiscrete()` before interpreting the state; never
+> treat these channels as sticks or apply a deadzone.
 
 ---
 
@@ -135,9 +137,11 @@ Encoders are **relative**: track deltas frame-to-frame and handle the wrap at
 
 ---
 
-## 5. Bitfield channel layouts
+## 5. Digital channel layouts
 
-All bitfields are LSB-first within the channel's 11 bits.
+On the RF wire, `packInputs()` scales each discrete state into `191..1792`;
+`unpackChannels()` reverses that scaling with round-to-nearest. The possible
+decoded values are `0..63` for CH9, `0..44` for CH10, and `0..35` for CH11.
 
 ### CH9 — `CPACK_CH_SWITCHES` (`packSwitches` / `unpackSwitches`)
 
@@ -154,33 +158,29 @@ All bitfields are LSB-first within the channel's 11 bits.
 > `unpackSwitches()` fills a `bool[8]` array. Indices 0–5 are the switches above;
 > indices 6–7 are reserved.
 
-### CH10 — `CPACK_CH_BTN_TOGGLE` (`packButtonsToggles` / `unpackButtonsToggles`)
+### CH10 — `CPACK_CH_BTN_TOGGLE` (`packButtonToggleState` / `unpackButtonToggleState`)
 
-| Bit(s) | Input | Values |
-|-------:|-------|--------|
-| 0 | `BTN_1` | 0 = released, 1 = pressed |
-| 1 | `BTN_2` | 0 = released, 1 = pressed |
-| 2 | `BTN_3` | 0 = released, 1 = pressed |
-| 3 | `BTN_4` | 0 = released, 1 = pressed |
-| 4–5 | `SW_E` (3-pos) | 0 = UP, 1 = CENTER, 2 = DOWN |
-| 6–7 | `SW_F` (3-pos) | 0 = UP, 1 = CENTER, 2 = DOWN |
+Each toggle uses `UP = 0`, `CENTER = 1`, `DOWN = 2`. The button state is `0`
+for none or `1..4` for `BTN_1..BTN_4`:
 
-3-position toggle values follow `Toggle3PosState_t`: `UP = 0`, `CENTER = 1`, `DOWN = 2`.
+```text
+state = ((SW_E * 3 + SW_F) * 5) + button
+```
 
-### CH11 — `CPACK_CH_NAV` (`packNavSwitches` / `unpackNavSwitches`)
+This produces 45 valid states (`0..44`) with wide spacing after CRSF scaling.
+If multiple momentary buttons are held, the lowest-numbered button is sent.
 
-The two 5-way nav switches. Direction order matches the `CPACK_NAV_*` indices.
+### CH11 — `CPACK_CH_NAV` (`packNavStates` / `unpackNavStates`)
 
-| Bit | Input | | Bit | Input |
-|----:|-------|---|----:|-------|
-| 0 | `NAV1` UP     | | 5 | `NAV2` UP |
-| 1 | `NAV1` DOWN   | | 6 | `NAV2` DOWN |
-| 2 | `NAV1` LEFT   | | 7 | `NAV2` LEFT |
-| 3 | `NAV1` RIGHT  | | 8 | `NAV2` RIGHT |
-| 4 | `NAV1` CENTER | | 9 | `NAV2` CENTER |
+Each nav cluster is `0` for no press or `1..5` for Up, Down, Left, Right,
+Center. The combined state is:
 
-> `unpackNavSwitches()` fills `bool nav[2][5]`: `nav[0]` = NAV1, `nav[1]` = NAV2,
-> indexed by `CPACK_NAV_UP/DOWN/LEFT/RIGHT/CENTER` (0…4).
+```text
+state = NAV1 * 6 + NAV2
+```
+
+This produces 36 valid states (`0..35`). If a nav cluster reports multiple
+directions, the first direction in Up/Down/Left/Right/Center order is sent.
 
 ---
 
@@ -208,8 +208,8 @@ typedef struct {
 | `uint16_t gimbalToCrsf(int16_t)` / `potToCrsf(int16_t)` | Proportional → CRSF. |
 | `uint16_t encoderToCrsf(int32_t)` | Encoder → wrapped 11-bit. |
 | `uint16_t packSwitches(const bool[8])` | Switch bitfield. |
-| `uint16_t packButtonsToggles(const bool[4], const uint8_t[2])` | Buttons + toggles bitfield. |
-| `uint16_t packNavSwitches(const bool[2][5])` | Nav bitfield. |
+| `uint16_t packButtonToggleState(const bool[4], const uint8_t[2])` | Compact buttons + toggles state. |
+| `uint16_t packNavStates(const bool[2][5])` | Compact nav-cluster state. |
 
 ### 6.3 RX side (receiver)
 
@@ -220,8 +220,8 @@ typedef struct {
 | `int16_t crsfToPot(uint16_t)` | CRSF → `0..1000`. |
 | `int32_t crsfToEncoder(uint16_t)` | CRSF → `0..2047`. |
 | `void unpackSwitches(uint16_t, bool[8])` | Decode CH9. |
-| `void unpackButtonsToggles(uint16_t, bool[4], uint8_t[2])` | Decode CH10. |
-| `void unpackNavSwitches(uint16_t, bool[2][5])` | Decode CH11. |
+| `void unpackButtonToggleState(uint16_t, bool[4], uint8_t[2])` | Decode CH10. |
+| `void unpackNavStates(uint16_t, bool[2][5])` | Decode CH11. |
 
 In almost all cases you only need `unpackChannels()`; the per-field helpers exist
 if you want to decode a single channel.

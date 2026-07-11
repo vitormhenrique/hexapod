@@ -243,6 +243,26 @@ def test_api_parse_status():
     assert st.dxl_power_control == want["dxl_power_control"]
     assert st.battery_mv == want["battery_mv"]
     assert st.watchdog_missed == want["watchdog_missed"]
+    assert st.reset_cause == want["reset_cause"]
+    assert st.last_reset_watchdog_missed == want["last_reset_watchdog_missed"]
+    assert st.last_reset_progress_marker == want["last_reset_progress_marker"]
+    assert st.control_stack_free_words == want["control_stack_free_words"]
+    assert st.dxl_stack_free_words == want["dxl_stack_free_words"]
+    assert st.last_reset_control_progress == want["last_reset_control_progress"]
+    assert st.last_reset_safety_state == want["last_reset_safety_state"]
+    assert st.dxl_power_transitions == want["dxl_power_transitions"]
+
+
+def test_api_parse_legacy_status_defaults_reset_cause():
+    st = api.parse_status(bytes.fromhex("40e201000202182e00000000"))
+    assert st.reset_cause == 0
+    assert st.last_reset_watchdog_missed == 0
+    assert st.last_reset_progress_marker == 0
+    assert st.control_stack_free_words == 0
+    assert st.dxl_stack_free_words == 0
+    assert st.last_reset_control_progress == 0
+    assert st.last_reset_safety_state == 0
+    assert st.dxl_power_transitions == 0
 
 
 def test_api_parse_capabilities():

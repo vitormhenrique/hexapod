@@ -4,7 +4,7 @@ Deterministic safety + motion controller for the hexapod, running on a ROBOTIS
 **OpenRB-150** (Microchip SAMD21G18A, Cortex-M0+ @ 48 MHz, 256 KB flash,
 32 KB SRAM). Built with **PlatformIO**.
 
-> Before touching DYNAMIXEL / Serial2 / DXL-power code, read
+> Before touching DYNAMIXEL / Serial3 / DXL-power code, read
 > [doc/mkrzero-vs-openrb150.md](doc/mkrzero-vs-openrb150.md). This repo ships a
 > custom OpenRB-150 board + variant so peripheral pins map to the real hardware.
 
@@ -12,7 +12,7 @@ Deterministic safety + motion controller for the hexapod, running on a ROBOTIS
 
 | Env | Board | Use |
 | --- | --- | --- |
-| `openrb150` (default) | custom `boards/openrb150.json` + `variants/OpenRB-150` | **All real firmware work.** Correct pin map: `Serial1`=DXL bus, `Serial2`=CRSF, DXL power FET, LEDs, battery ADC. |
+| `openrb150` (default) | custom `boards/openrb150.json` + `variants/OpenRB-150` | **All real firmware work.** Correct pin map: `Serial1`=DXL bus, `Serial3`=CRSF on D14 TX / D13 RX, DXL power FET, LEDs, battery ADC. |
 | `mkrzero` | stock MKR Zero | Toolchain-only fallback. WRONG serial / DXL-power pins. |
 | `native` | host (no board) | **Host unit tests only.** Builds the portable `src/` logic (protocol, IK, gait, config, safety) against Unity on the host; run with `pio test -e native`. |
 

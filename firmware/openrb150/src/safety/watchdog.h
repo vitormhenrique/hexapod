@@ -37,7 +37,7 @@ enum class TaskId : uint8_t {
 constexpr uint8_t kTaskCount = static_cast<uint8_t>(TaskId::Count);
 
 // Reset counters/state. Call once before the scheduler starts.
-void init();
+void init(uint8_t reset_cause = 0);
 
 // Task heartbeat. Each task calls this every iteration. Single producer per id.
 void checkIn(TaskId id);
@@ -52,6 +52,20 @@ void evaluate();
 // Bitmask of tasks that missed their heartbeat at the last evaluate().
 // Bit position == TaskId value. 0 means all tasks are live.
 uint32_t missedMask();
+
+// Validated missed-task mask retained from the evaluation that preceded the
+// last hardware-watchdog reset. Zero also covers a health-task/CPU stall that
+// prevented evaluate() from recording a critical task.
+uint32_t lastResetMissedMask();
+
+// Record a coarse high-priority operation phase in retained SRAM. This is
+// diagnostic only; zero means no marked operation was in progress.
+void markProgress(uint8_t marker);
+uint8_t lastResetProgressMarker();
+void markControlProgress(uint8_t marker);
+void markSafetyState(uint8_t state);
+uint8_t lastResetControlProgress();
+uint8_t lastResetSafetyState();
 
 // True when a motion-critical task (Control or Dxl) missed its heartbeat at the
 // last evaluate() -- the condition under which evaluate() withholds the WDT pet

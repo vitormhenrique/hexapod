@@ -319,6 +319,14 @@ class StatusInfo:
     dxl_power_control: bool
     battery_mv: int
     watchdog_missed: int
+    reset_cause: int = 0
+    last_reset_watchdog_missed: int = 0
+    last_reset_progress_marker: int = 0
+    control_stack_free_words: int = 0
+    dxl_stack_free_words: int = 0
+    last_reset_control_progress: int = 0
+    last_reset_safety_state: int = 0
+    dxl_power_transitions: int = 0
 
 
 @dataclass
@@ -398,6 +406,22 @@ def parse_status(payload: bytes) -> StatusInfo:
     flags = payload[5]
     (battery_mv,) = struct.unpack("<H", payload[6:8])
     (watchdog_missed,) = struct.unpack("<I", payload[8:12])
+    reset_cause = payload[12] if len(payload) > 12 else 0
+    last_reset_watchdog_missed = (
+        struct.unpack("<I", payload[13:17])[0] if len(payload) >= 17 else 0
+    )
+    last_reset_progress_marker = payload[17] if len(payload) >= 18 else 0
+    control_stack_free_words = (
+        struct.unpack("<H", payload[18:20])[0] if len(payload) >= 20 else 0
+    )
+    dxl_stack_free_words = (
+        struct.unpack("<H", payload[20:22])[0] if len(payload) >= 22 else 0
+    )
+    last_reset_control_progress = payload[22] if len(payload) >= 23 else 0
+    last_reset_safety_state = payload[23] if len(payload) >= 24 else 0
+    dxl_power_transitions = (
+        struct.unpack("<I", payload[24:28])[0] if len(payload) >= 28 else 0
+    )
     return StatusInfo(
         uptime_ms=uptime_ms,
         state=state,
@@ -405,6 +429,14 @@ def parse_status(payload: bytes) -> StatusInfo:
         dxl_power_control=bool(flags & 0x02),
         battery_mv=battery_mv,
         watchdog_missed=watchdog_missed,
+        reset_cause=reset_cause,
+        last_reset_watchdog_missed=last_reset_watchdog_missed,
+        last_reset_progress_marker=last_reset_progress_marker,
+        control_stack_free_words=control_stack_free_words,
+        dxl_stack_free_words=dxl_stack_free_words,
+        last_reset_control_progress=last_reset_control_progress,
+        last_reset_safety_state=last_reset_safety_state,
+        dxl_power_transitions=dxl_power_transitions,
     )
 
 

@@ -46,12 +46,18 @@ bool stateAllowsTorque(State s) {
   return stateAllowsMotion(s);
 }
 
+bool stateAllowsDxlPower(State s) {
+  return s == State::ArmingChecks || s == State::PassivePoseStream ||
+         stateAllowsTorque(s);
+}
+
 void StateMachine::reset() {
   state_ = State::Boot;
   reason_ = FaultReason::None;
   clear_fault_requested_ = false;
   batt_low_active_ = false;
   batt_low_since_ms_ = 0;
+  arming_since_ms_ = 0;
 }
 
 State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
@@ -170,6 +176,8 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
         state_ = State::MacMaintenance;
       } else if (in.rc_armed) {
         state_ = State::ArmingChecks;
+        reason_ = FaultReason::None;
+        arming_since_ms_ = now_ms;
       }
       break;
 
@@ -178,6 +186,9 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
         state_ = State::Disarmed;
       } else if (in.arming_checks_pass) {
         state_ = State::StandReady;
+      } else if ((now_ms - arming_since_ms_) >= params_.arming_timeout_ms) {
+        state_ = State::FaultSoft;
+        reason_ = FaultReason::ArmingTimeout;
       }
       break;
 
