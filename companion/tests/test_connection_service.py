@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from hexapod_protocol import api
+from hexapod_protocol import api, telemetry as tlm
 
 pytest.importorskip("PySide6")
 
@@ -189,6 +189,81 @@ def test_gait_test_stop_requires_all_torque_off_acknowledgements(qtbot) -> None:
     qtbot.waitUntil(lambda: not service.gait_test_busy, timeout=2000)
     assert service.gait_test_active
     assert errors and "torque off not confirmed" in errors[-1]
+
+
+def test_passive_enter_requires_all_torque_off_acknowledgements(
+    qtbot, monkeypatch
+) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.passive_calls = 0
+
+        def dxl_power(self, _on):
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([1, 1])
+            )
+
+        def dxl_scan(self, _first, _last):
+            records = b"".join(
+                bytes([sid, 29, 0, 1, 2, 1]) for sid in range(1, 19)
+            )
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([18]) + records
+            )
+
+        def dxl_torque(self, _on):
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([0, 17])
+            )
+
+        def passive_enter(self):
+            self.passive_calls += 1
+            return api.PassiveResult(api.PASSIVE_OK, 9)
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    service._acquire_maint_lock = lambda _c: True  # type: ignore[method-assign]
+    service._wait_state = lambda *_a, **_k: True  # type: ignore[method-assign]
+    monkeypatch.setattr(services_mod.time, "sleep", lambda _s: None)
+    errors = []
+    service.error.connect(errors.append)
+
+    service.passive_enter()
+    qtbot.waitUntil(lambda: bool(errors), timeout=2000)
+    assert "torque off not confirmed" in errors[-1]
+    assert client.passive_calls == 0
+
+
+def test_passive_enter_refreshes_idempotently_when_already_active(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def passive_enter(self):
+            self.calls.append(("enter",))
+            return api.PassiveResult(api.PASSIVE_OK, 9)
+
+        def subscribe(self, stream_id, rate):
+            self.calls.append(("subscribe", stream_id, rate))
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    service._robot_state = 9
+
+    with qtbot.waitSignal(service.passive_result, timeout=2000):
+        service.passive_enter()
+    qtbot.waitUntil(lambda: len(client.calls) == 2, timeout=2000)
+    assert client.calls == [
+        ("enter",),
+        ("subscribe", int(tlm.StreamId.JOINT_STATE), 50),
+    ]
 
 
 def test_dxl_get_param_emits_decoded_result(qtbot) -> None:

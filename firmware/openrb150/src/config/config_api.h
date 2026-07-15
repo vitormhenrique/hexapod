@@ -60,6 +60,7 @@ enum class CfgResult : uint8_t {
   ValidationFailed = 1,
   Volatile = 2,      // persistent store unavailable (commit rejected)
   CommitFailed = 3,  // store write transaction failed
+  Rejected = 4,      // maintenance lock / torque-off policy not satisfied
 };
 
 // Error byte returned (with the protocol error flag) for malformed requests.
@@ -67,6 +68,7 @@ enum class CfgError : uint8_t {
   None = 0,
   BadRequest = 1,  // request payload too short
   BadRange = 2,    // offset/len outside the config payload window
+  Rejected = 3,    // staging requires a maintenance lock
 };
 
 // Abstract persistence sink. Decouples ConfigApi from Wire/EEPROM so it is
@@ -104,6 +106,14 @@ class ConfigApi {
               uint8_t* out, uint16_t out_cap, uint16_t* out_len,
               uint8_t* out_flags);
 
+  // Publish the current safety policy before handling host commands. Staging
+  // requires a live maintenance lock; applying a config also requires every
+  // servo torque confirmed off because it replaces active geometry/limits.
+  void setMutationPolicy(bool staging_allowed, bool apply_allowed) {
+    staging_allowed_ = staging_allowed;
+    apply_allowed_ = apply_allowed;
+  }
+
   // Last known-good config (committed or adopted). Exposed for the firmware to
   // consume the active servo map / geometry / gait defaults.
   const RobotConfig& config() const { return shadow_; }
@@ -125,6 +135,8 @@ class ConfigApi {
   uint8_t staging_[kConfigPayloadSize];   // editable serialized RAM shadow
   uint16_t staging_len_ = kConfigPayloadSize;
   uint32_t shadow_rev_ = 0;               // bumped whenever shadow_ changes
+  bool staging_allowed_ = false;
+  bool apply_allowed_ = false;
 };
 
 }  // namespace config

@@ -8,7 +8,7 @@
 // low-authority bench control (MacMaintenance). The lock is a token + TTL:
 //
 //   ENTER_MAINTENANCE (0x50): grant a fresh nonzero token when the robot is in
-//                             a safe entry state (Disarmed / StandReady) and no
+//                             a safe entry state (Disarmed) and no
 //                             other valid lock is held. Response carries token.
 //   EXIT_MAINTENANCE  (0x51): release the lock if the request token matches.
 //   MAINT_HEARTBEAT   (0x52): refresh the lock TTL (token must match + valid).
@@ -52,7 +52,6 @@ enum class MaintResult : uint8_t {
 // may be acquired. Kept as numerics so this layer stays free of safety headers.
 namespace maintstate {
 constexpr uint8_t kDisarmed = 2;
-constexpr uint8_t kStandReady = 4;
 constexpr uint8_t kMacMaintenance = 8;
 }  // namespace maintstate
 
@@ -106,7 +105,6 @@ class MaintenanceApi {
  private:
   bool canEnter() const {
     return live_state_ == maintstate::kDisarmed ||
-           live_state_ == maintstate::kStandReady ||
            live_state_ == maintstate::kMacMaintenance;
   }
   // Common short responses: [result, state] (+ optional trailing token).

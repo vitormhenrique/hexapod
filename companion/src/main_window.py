@@ -139,7 +139,7 @@ class MainWindow(QMainWindow):
     def _on_status(self, st) -> None:
         self.safety_bar.mode.set(
             tlm.SAFETY_STATE_NAMES.get(st.state, str(st.state)),
-            "ok" if st.state in (2, 4, 5) else "warn",
+            "ok" if st.state in tlm.NOMINAL_SAFETY_STATES else "warn",
         )
         self.safety_bar.battery.set(
             f"{st.battery_mv / 1000:.1f} V",

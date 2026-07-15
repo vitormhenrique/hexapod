@@ -58,22 +58,35 @@ def stream_id_from_name(name: str) -> StreamId:
         raise ValueError(f"unknown stream '{name}'") from exc
 
 
-# Safety state IDs (mirror src/safety/system_state.h).
-SAFETY_STATE_NAMES = {
-    0: "BOOT",
-    1: "CONFIG_LOAD",
-    2: "DISARMED",
-    3: "ARMING_CHECKS",
-    4: "STAND_READY",
-    5: "RC_MANUAL",
-    6: "CONTACT_TERRAIN",
-    7: "JETSON_ASSISTED",
-    8: "MAC_MAINTENANCE",
-    9: "PASSIVE_POSE_STREAM",
-    10: "FAULT_SOFT",
-    11: "FAULT_HARD",
-    12: "ESTOP",
-}
+class SafetyState(IntEnum):
+    """Safety state IDs mirrored from firmware ``safety::State``."""
+
+    BOOT = 0
+    CONFIG_LOAD = 1
+    DISARMED = 2
+    ARMING_CHECKS = 3
+    STAND_READY = 4
+    RC_MANUAL = 5
+    CONTACT_TERRAIN = 6
+    JETSON_ASSISTED = 7
+    MAC_MAINTENANCE = 8
+    PASSIVE_POSE_STREAM = 9
+    FAULT_SOFT = 10
+    FAULT_HARD = 11
+    ESTOP = 12
+
+
+SAFETY_STATE_NAMES = {int(state): state.name for state in SafetyState}
+
+NOMINAL_SAFETY_STATES = frozenset(
+    (
+        SafetyState.DISARMED,
+        SafetyState.STAND_READY,
+        SafetyState.RC_MANUAL,
+        SafetyState.CONTACT_TERRAIN,
+        SafetyState.JETSON_ASSISTED,
+    )
+)
 
 FAULT_REASON_NAMES = {
     0: "NONE",
@@ -86,8 +99,31 @@ FAULT_REASON_NAMES = {
     7: "ARMING_TIMEOUT",
 }
 
-# Command source IDs (mirror safety::CommandSource).
-COMMAND_SOURCE_NAMES = {0: "NONE", 1: "RC", 2: "JETSON", 3: "MAC_MAINTENANCE"}
+class CommandSource(IntEnum):
+    """Command-source IDs mirrored from firmware ``safety::CommandSource``."""
+
+    NONE = 0
+    RC = 1
+    JETSON = 2
+    MAC_MAINTENANCE = 3
+
+
+COMMAND_SOURCE_NAMES = {int(source): source.name for source in CommandSource}
+
+
+class ControllerMode(IntEnum):
+    """Controller bridge modes mirrored from firmware ``ControlMode``."""
+
+    WALK = 0
+    TRANSLATE_BODY = 1
+    ROTATE_BODY = 2
+
+
+CONTROLLER_MODE_NAMES = {
+    ControllerMode.WALK: "Walk",
+    ControllerMode.TRANSLATE_BODY: "Translate body",
+    ControllerMode.ROTATE_BODY: "Rotate body",
+}
 
 # Per-foot contact state IDs (mirror sensors::ContactState).
 CONTACT_STATE_NAMES = {

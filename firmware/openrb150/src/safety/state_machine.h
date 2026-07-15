@@ -128,6 +128,7 @@ class StateMachine {
   bool batt_low_active_ = false;
   uint32_t batt_low_since_ms_ = 0;
   uint32_t arming_since_ms_ = 0;
+  bool arm_release_required_ = true;
 };
 
 }  // namespace safety

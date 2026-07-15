@@ -112,6 +112,12 @@ bool ConfigApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
     }
 
     case cfgmsg::kSetBlock: {
+      if (!staging_allowed_) {
+        out[0] = static_cast<uint8_t>(CfgError::Rejected);
+        *out_len = 1;
+        *out_flags = kErrorFlag;
+        return true;
+      }
       if (req_len < 4) {
         out[0] = static_cast<uint8_t>(CfgError::BadRequest);
         *out_len = 1;
@@ -145,6 +151,11 @@ bool ConfigApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
     }
 
     case cfgmsg::kCommit: {
+      if (!apply_allowed_) {
+        out[0] = static_cast<uint8_t>(CfgResult::Rejected);
+        *out_len = 1;
+        return true;
+      }
       RobotConfig tmp;
       CfgResult result;
       if (!stagedValid(tmp)) {
@@ -164,6 +175,11 @@ bool ConfigApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
     }
 
     case cfgmsg::kResetDefaults: {
+      if (!apply_allowed_) {
+        out[0] = static_cast<uint8_t>(CfgResult::Rejected);
+        *out_len = 1;
+        return true;
+      }
       resetToDefaults();
       out[0] = static_cast<uint8_t>(CfgResult::Ok);
       *out_len = 1;

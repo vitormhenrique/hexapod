@@ -28,6 +28,12 @@
 
 namespace dxl {
 
+// One table-agnostic goal-position command for the sync-write path.
+struct GoalTarget {
+  uint8_t id = 0;
+  uint16_t tick = 2048;
+};
+
 // Goal Position register address per control table.
 constexpr uint16_t kGoalAddrLegacy = 30;
 constexpr uint16_t kGoalAddrV2 = 116;

@@ -33,12 +33,13 @@ StateMachine atStandReady() {
   StateMachine m = makeMachine();
   StateInputs in = healthy();
   in.rc_ever_seen = true;
-  in.rc_armed = true;
   in.arming_checks_pass = true;
   m.update(in, 0);  // Boot -> ConfigLoad
   m.update(in, 10); // ConfigLoad -> Disarmed
-  m.update(in, 20); // Disarmed -> ArmingChecks
-  m.update(in, 30); // ArmingChecks -> StandReady
+  m.update(in, 20); // observe released arm switch
+  in.rc_armed = true;
+  m.update(in, 30); // Disarmed -> ArmingChecks
+  m.update(in, 40); // ArmingChecks -> StandReady
   return m;
 }
 
@@ -74,25 +75,78 @@ void test_disarmed_requires_arm_for_arming_checks() {
 void test_arming_checks_gate_stand_ready() {
   StateMachine m = makeMachine();
   StateInputs in = healthy();
-  in.rc_armed = true;
   m.update(in, 0);
   m.update(in, 10);
-  m.update(in, 20);  // ArmingChecks
-  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 30));  // checks not passed
+  m.update(in, 20);  // observe released arm switch
+  in.rc_armed = true;
+  m.update(in, 30);  // ArmingChecks
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 40));  // checks not passed
   in.arming_checks_pass = true;
-  TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 40));
+  TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 50));
 }
 
 void test_arming_checks_timeout_reports_soft_fault() {
   StateMachine m = makeMachine();
   StateInputs in = healthy();
-  in.rc_armed = true;
   m.update(in, 0);
   m.update(in, 10);
-  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 20));
-  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 10019));
-  TEST_ASSERT_EQUAL(State::FaultSoft, m.update(in, 10020));
+  m.update(in, 20);  // observe released arm switch
+  in.rc_armed = true;
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 30));
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 10029));
+  TEST_ASSERT_EQUAL(State::FaultSoft, m.update(in, 10030));
   TEST_ASSERT_EQUAL(FaultReason::ArmingTimeout, m.faultReason());
+}
+
+void test_low_battery_cannot_pass_arming_during_estop_debounce() {
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  in.arming_checks_pass = true;
+  m.update(in, 0);
+  m.update(in, 10);
+  m.update(in, 20);  // observe released arm switch
+  in.rc_armed = true;
+  in.battery_mv = 9000;
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 30));
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 279));
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 280));
+  TEST_ASSERT_EQUAL(FaultReason::BatteryLow, m.faultReason());
+}
+
+void test_arm_must_be_released_after_boot_and_estop() {
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  in.rc_ever_seen = true;
+  in.rc_armed = true;
+  m.update(in, 0);   // Boot -> ConfigLoad
+  m.update(in, 10);  // ConfigLoad -> Disarmed
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 20));
+  in.rc_armed = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 30));
+  in.rc_armed = true;
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 40));
+
+  in.rc_kill = true;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 50));
+  in.rc_kill = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 60));
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 70));
+  in.rc_armed = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 80));
+  in.rc_armed = true;
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 90));
+}
+
+void test_contact_terrain_requires_rc_command_source() {
+  StateMachine m = atStandReady();
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  in.command_source = static_cast<uint8_t>(CommandSource::Rc);
+  in.contact_enabled = true;
+  in.contact_confident = true;
+  TEST_ASSERT_EQUAL(State::ContactTerrain, m.update(in, 50));
+  in.command_source = static_cast<uint8_t>(CommandSource::None);
+  TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 60));
 }
 
 void test_dxl_power_allowed_during_arming_and_operation() {
@@ -115,6 +169,16 @@ void test_stand_ready_to_rc_manual() {
   in.command_source = static_cast<uint8_t>(CommandSource::Rc);
   TEST_ASSERT_EQUAL(State::RcManual, m.update(in, 50));
   TEST_ASSERT_TRUE(stateAllowsMotion(State::RcManual));
+}
+
+void test_stand_ready_rejects_maintenance_takeover_while_armed() {
+  StateMachine m = atStandReady();
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  in.maintenance_request = true;
+  in.mac_lock_held = true;
+  in.command_source = static_cast<uint8_t>(CommandSource::MacMaintenance);
+  TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 50));
 }
 
 void test_rc_manual_to_contact_terrain_and_back() {
@@ -370,6 +434,32 @@ void test_maintenance_to_passive_handoff() {
   TEST_ASSERT_EQUAL(State::MacMaintenance, m.update(in, 60));
 }
 
+void test_host_disarm_blocks_all_mode_entry_requests() {
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  m.update(in, 0);
+  m.update(in, 10);  // Disarmed
+  in.host_disarm = true;
+  in.rc_armed = true;
+  in.maintenance_request = true;
+  in.mac_lock_held = true;
+  in.passive_request = true;
+  in.torque_off = true;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 20));
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 30));
+
+  // Releasing host disarm must not bypass the physical arm-release gate.
+  in.host_disarm = false;
+  in.maintenance_request = false;
+  in.mac_lock_held = false;
+  in.passive_request = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 40));
+  in.rc_armed = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 50));
+  in.rc_armed = true;
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 60));
+}
+
 void test_torque_gate_excludes_disarmed_and_estop() {
   TEST_ASSERT_FALSE(stateAllowsTorque(State::Disarmed));
   TEST_ASSERT_FALSE(stateAllowsTorque(State::Estop));
@@ -384,9 +474,13 @@ int main(int, char**) {
   RUN_TEST(test_disarmed_requires_arm_for_arming_checks);
   RUN_TEST(test_arming_checks_gate_stand_ready);
   RUN_TEST(test_arming_checks_timeout_reports_soft_fault);
+  RUN_TEST(test_low_battery_cannot_pass_arming_during_estop_debounce);
+  RUN_TEST(test_arm_must_be_released_after_boot_and_estop);
   RUN_TEST(test_dxl_power_allowed_during_arming_and_operation);
   RUN_TEST(test_stand_ready_to_rc_manual);
+  RUN_TEST(test_stand_ready_rejects_maintenance_takeover_while_armed);
   RUN_TEST(test_rc_manual_to_contact_terrain_and_back);
+  RUN_TEST(test_contact_terrain_requires_rc_command_source);
   RUN_TEST(test_stand_ready_to_jetson_assisted);
   RUN_TEST(test_disarm_returns_from_motion);
   RUN_TEST(test_kill_forces_estop_and_recovers);
@@ -403,6 +497,7 @@ int main(int, char**) {
   RUN_TEST(test_passive_pose_requires_torque_off);
   RUN_TEST(test_maintenance_requires_lock);
   RUN_TEST(test_maintenance_to_passive_handoff);
+  RUN_TEST(test_host_disarm_blocks_all_mode_entry_requests);
   RUN_TEST(test_torque_gate_excludes_disarmed_and_estop);
   return UNITY_END();
 }

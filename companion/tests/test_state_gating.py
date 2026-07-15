@@ -242,7 +242,7 @@ def test_passive_page_enter_exit_follow_state(qtbot) -> None:
     assert page.enter_btn.isEnabled()  # unknown state: allowed
     assert not page.exit_btn.isEnabled()
     svc.state_changed.emit(9)
-    assert not page.enter_btn.isEnabled()
+    assert page.enter_btn.isEnabled()  # firmware ENTER is idempotent in passive
     assert page.exit_btn.isEnabled()
     svc.state_changed.emit(2)
     assert page.enter_btn.isEnabled()

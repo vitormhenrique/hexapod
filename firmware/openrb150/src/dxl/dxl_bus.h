@@ -28,13 +28,6 @@
 
 namespace dxl {
 
-// One goal-position command for the sync-write path.
-struct GoalTarget {
-  uint8_t id = 0;
-  uint16_t tick = 2048;
-};
-
-
 // Aggregate bus health counters (reported via telemetry/diagnostics later).
 struct BusStats {
   uint32_t scans = 0;

@@ -41,11 +41,13 @@ CFG_OK = 0
 CFG_VALIDATION_FAILED = 1
 CFG_VOLATILE = 2
 CFG_COMMIT_FAILED = 3
+CFG_REJECTED = 4
 
 # Config error byte returned with the protocol error flag (mirrors CfgError).
 CFG_ERR_NONE = 0
 CFG_ERR_BAD_REQUEST = 1
 CFG_ERR_BAD_RANGE = 2
+CFG_ERR_REJECTED = 3
 
 # Safety control command group (mirrors src/protocol/control_api.h, 0x30..0x33).
 MSG_ESTOP = 0x30

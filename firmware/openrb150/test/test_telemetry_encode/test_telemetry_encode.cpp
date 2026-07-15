@@ -110,14 +110,16 @@ void test_joint_state_maps_and_skips_unmapped() {
 
   TEST_ASSERT_EQUAL_UINT16(1 + 2 * 4, n);  // 200 skipped
   TEST_ASSERT_EQUAL_UINT8(2, out[0]);
-  // joint 0 = leg 0 / coxa, center tick -> 0 centideg
+  // Angles must use the configured inverse map, including mechanical trim.
   TEST_ASSERT_EQUAL_UINT8(0, out[1]);
   TEST_ASSERT_EQUAL_UINT8(0, out[2]);
-  TEST_ASSERT_EQUAL_INT16(0, rdI16(out, 3));
+  TEST_ASSERT_EQUAL_INT16(
+      expectCentideg(map.tickToAngle(0, 0, kServoCenterTick)), rdI16(out, 3));
   // joint 1 = leg 5 / tibia
   TEST_ASSERT_EQUAL_UINT8(5, out[5]);
   TEST_ASSERT_EQUAL_UINT8(2, out[6]);
-  TEST_ASSERT_EQUAL_INT16(0, rdI16(out, 7));
+  TEST_ASSERT_EQUAL_INT16(
+      expectCentideg(map.tickToAngle(5, 2, kServoCenterTick)), rdI16(out, 7));
 }
 
 void test_joint_state_clamps_tick_range() {

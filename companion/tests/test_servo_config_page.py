@@ -153,3 +153,22 @@ def test_actions_safe_when_disconnected(qtbot) -> None:
     service.validate_config()
     service.commit_config()
     assert any("config" in e for e in errors)
+
+
+def test_config_mutation_controls_require_maintenance_lock(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+        assert not button.isEnabled()
+
+    service.connected.emit(True)
+    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+        assert not button.isEnabled()
+        assert button.toolTip()
+
+    service.maint_lock_changed.emit(True, 42)
+    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+        assert button.isEnabled()
+
+    service.maint_lock_changed.emit(False, 0)
+    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+        assert not button.isEnabled()

@@ -21,12 +21,9 @@ from diagnostics import print_exception
 from transport import list_serial_ports, open_serial
 from transport.protocol_client import ProtocolClient
 
-# Firmware safety-state ids used by the passive-pose bench orchestration
-# (safety/system_state.h): the bus must be powered under MacMaintenance before
-# the FSM hands off to PassivePoseStream (AGENTS.md 5.5, hexapod_src-nkb).
-_STATE_DISARMED = 2
-_STATE_MAC_MAINTENANCE = 8
-_STATE_PASSIVE = 9
+_STATE_DISARMED = tlm.SafetyState.DISARMED
+_STATE_MAC_MAINTENANCE = tlm.SafetyState.MAC_MAINTENANCE
+_STATE_PASSIVE = tlm.SafetyState.PASSIVE_POSE_STREAM
 
 
 class ConnectionService(QObject):
@@ -409,6 +406,21 @@ class ConnectionService(QObject):
             return
 
         def worker() -> None:
+            # PASSIVE_ENTER is idempotent in firmware. On reconnect while the
+            # robot is already passive there is no maintenance lock to acquire;
+            # just refresh the request and subscription.
+            if self._robot_state == _STATE_PASSIVE:
+                res = client.passive_enter()
+                if res is None or not res.ok:
+                    self.error.emit("passive enter: firmware rejected refresh")
+                    if res is not None:
+                        self.passive_result.emit("enter", res)
+                    return
+                self.passive_result.emit("enter", res)
+                client.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+                self.event.emit("commit", "passive streaming already active")
+                return
+
             # 1) Maintenance lock (skip if already held) so DXL power + scan are
             #    accepted by the firmware safety gate.
             had_lock = bool(self._maint_token)
@@ -442,16 +454,29 @@ class ConnectionService(QObject):
                     return  # disconnected mid-flow
                 scan = client.dxl_scan(1, 18)
                 servos = scan.servos() if scan and scan.done else []
-                if servos:
+                if len(servos) == 18:
                     break
-            if not servos:
-                self.error.emit("passive enter: no servos found on scan")
+            if len(servos) != 18:
+                self.error.emit(
+                    f"passive enter: expected 18 servos, found {len(servos)}"
+                )
                 return
             self.event.emit("commit", f"passive: {len(servos)} servos scanned")
 
             # 4) Torque off: passive mode requires all torque disabled, and the
             #    FSM only enters PassivePoseStream once torque is confirmed off.
-            client.dxl_torque(False)
+            torque = client.dxl_torque(False)
+            torque_off = (
+                torque is not None
+                and torque.done
+                and torque.code == api.DXL_CODE_OK
+                and len(torque.data) >= 2
+                and torque.data[0] == 0
+                and torque.data[1] == 18
+            )
+            if not torque_off:
+                self.error.emit("passive enter: torque off not confirmed by all servos")
+                return
 
             # 5) Request passive streaming.
             res = client.passive_enter()

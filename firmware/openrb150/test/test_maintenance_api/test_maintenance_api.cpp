@@ -113,6 +113,20 @@ void test_enter_rejected_in_unsafe_state() {
   TEST_ASSERT_FALSE(m.lockHeld(1000));
 }
 
+void test_enter_rejected_while_rc_is_armed_in_stand_ready() {
+  MaintenanceApi m;
+  m.reset();
+  m.setNow(1000);
+  m.setLiveState(4);  // StandReady still has the RC arm switch high.
+  Header h;
+  uint8_t pl[kMaxPayload];
+  size_t n = 0;
+  runMaint(m, maintmsg::kEnter, 1, nullptr, 0, &h, pl, &n);
+  TEST_ASSERT_EQUAL_UINT(2, n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintResult::Rejected), pl[0]);
+  TEST_ASSERT_FALSE(m.lockHeld(1000));
+}
+
 void test_enter_busy_when_already_held() {
   MaintenanceApi m;
   m.reset();
@@ -256,6 +270,7 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_enter_grants_token_in_safe_state);
   RUN_TEST(test_enter_rejected_in_unsafe_state);
+  RUN_TEST(test_enter_rejected_while_rc_is_armed_in_stand_ready);
   RUN_TEST(test_enter_busy_when_already_held);
   RUN_TEST(test_heartbeat_refreshes_ttl);
   RUN_TEST(test_heartbeat_bad_token);

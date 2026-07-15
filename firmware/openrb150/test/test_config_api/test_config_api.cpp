@@ -67,6 +67,7 @@ struct Resp {
   uint8_t buf[256];
 };
 Resp call(ConfigApi& api, uint8_t msg_id, const uint8_t* req, uint16_t req_len) {
+  api.setMutationPolicy(true, true);
   Resp r{};
   r.handled = api.handle(msg_id, req, req_len, r.buf, sizeof(r.buf), &r.len,
                          &r.flags);
@@ -76,6 +77,39 @@ Resp call(ConfigApi& api, uint8_t msg_id, const uint8_t* req, uint16_t req_len) 
 constexpr uint8_t kErrorFlag = 0x02;
 
 }  // namespace
+
+void test_mutations_default_to_locked_and_apply_requires_torque_policy() {
+  FakeEeprom mem;
+  ConfigStore store(mem);
+  StorePersistence persist(store, true);
+  ConfigApi api(persist);
+
+  const uint8_t set_req[] = {0, 0, 1, 0, 0};
+  Resp set_locked{};
+  set_locked.handled = api.handle(
+    cfgmsg::kSetBlock, set_req, sizeof(set_req), set_locked.buf,
+    sizeof(set_locked.buf), &set_locked.len, &set_locked.flags);
+  TEST_ASSERT_TRUE(set_locked.handled);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CfgError::Rejected),
+              set_locked.buf[0]);
+  TEST_ASSERT_TRUE(set_locked.flags & kErrorFlag);
+
+  Resp commit_locked{};
+  commit_locked.handled = api.handle(
+    cfgmsg::kCommit, nullptr, 0, commit_locked.buf, sizeof(commit_locked.buf),
+    &commit_locked.len, &commit_locked.flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CfgResult::Rejected),
+              commit_locked.buf[0]);
+
+  api.setMutationPolicy(true, false);
+  Resp reset_torque_on{};
+  reset_torque_on.handled = api.handle(
+    cfgmsg::kResetDefaults, nullptr, 0, reset_torque_on.buf,
+    sizeof(reset_torque_on.buf), &reset_torque_on.len,
+    &reset_torque_on.flags);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CfgResult::Rejected),
+              reset_torque_on.buf[0]);
+}
 
 void test_get_summary_reports_schema_and_persistent() {
   FakeEeprom mem;
@@ -448,6 +482,7 @@ void test_default_config_enables_sensor_polling_bit() {
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_mutations_default_to_locked_and_apply_requires_torque_policy);
   RUN_TEST(test_get_summary_reports_schema_and_persistent);
   RUN_TEST(test_get_summary_volatile_clears_persistent_bit);
   RUN_TEST(test_block_round_trip_reads_back_full_payload);

@@ -297,7 +297,7 @@ class OverviewPage(BasePage):
     def _on_status(self, st) -> None:
         self.badges["state"].set(
             tlm.SAFETY_STATE_NAMES.get(st.state, str(st.state)),
-            "ok" if st.state in (2, 4, 5) else "warn",
+            "ok" if st.state in tlm.NOMINAL_SAFETY_STATES else "warn",
         )
         self.badges["battery"].set(
             f"{st.battery_mv} mV", "ok" if st.battery_mv > 10000 else "warn"
@@ -320,7 +320,7 @@ class OverviewPage(BasePage):
             )
             self.badges["state"].set(
                 tlm.SAFETY_STATE_NAMES.get(record.state, str(record.state)),
-                "ok" if record.state in (2, 4, 5) else "warn",
+                "ok" if record.state in tlm.NOMINAL_SAFETY_STATES else "warn",
             )
             self.badges["fault"].set(
                 tlm.FAULT_REASON_NAMES.get(
@@ -703,7 +703,7 @@ class ModeSafetyPage(BasePage):
         state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
         verdict = "ok" if res.ok else f"rejected ({res.result})"
         text = f"{kind}: {verdict} — state {state}"
-        if kind == "arm" and res.ok and res.state == 2:  # still DISARMED
+        if kind == "arm" and res.ok and res.state == tlm.SafetyState.DISARMED:
             text += (
                 " — host arm only releases the disarm latch; walking requires "
                 "the RC arm switch. For bench servo control use Enter "
@@ -729,11 +729,10 @@ class ModeSafetyPage(BasePage):
     def _apply_gates(self) -> None:
         """Enable only the controls that make sense right now.
 
-        Gating mirrors the firmware safety machine (DISARMED=2,
-        STAND_READY=4, MAC_MAINTENANCE=8, PASSIVE_POSE_STREAM=9) so the UI
-        does not offer actions the firmware would reject. E-stop is never
-        gated. State -1 (unknown, before the first status poll) keeps entry
-        actions enabled — the firmware still validates every request.
+        Gating mirrors the firmware safety machine so the UI does not offer
+        actions the firmware would reject. E-stop is never gated. State -1
+        (unknown before the first status poll) keeps entry actions enabled; the
+        firmware still validates every request.
         """
         con = self._connected
         st = self._state
@@ -747,28 +746,42 @@ class ModeSafetyPage(BasePage):
             gate(btn, con, "Connect to the robot first.")
         gate(
             self.arm_btn,
-            con and st != 9,
+            con and st != tlm.SafetyState.PASSIVE_POSE_STREAM,
             "Connect first; exit passive pose before arming.",
         )
         gate(
             self.clear_btn,
-            con and st in (-1, 10, 11, 12),
+            con
+            and st
+            in (
+                -1,
+                tlm.SafetyState.FAULT_SOFT,
+                tlm.SafetyState.FAULT_HARD,
+                tlm.SafetyState.ESTOP,
+            ),
             "No latched fault/E-stop to clear.",
         )
         gate(
             self.enter_maint_btn,
-            con and not held and st in (-1, 2, 4),
-            "Requires connection and a Disarmed / Stand Ready robot.",
+            con and not held and st in (-1, tlm.SafetyState.DISARMED),
+            "Requires connection and a Disarmed robot.",
         )
         gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
         gate(
             self.enter_passive_btn,
-            con and st in (-1, 2, 8),
-            "Requires connection and a Disarmed or Maintenance robot.",
+            con
+            and st
+            in (
+                -1,
+                tlm.SafetyState.DISARMED,
+                tlm.SafetyState.MAC_MAINTENANCE,
+                tlm.SafetyState.PASSIVE_POSE_STREAM,
+            ),
+            "Requires a Disarmed, Maintenance, or Passive robot.",
         )
         gate(
             self.exit_passive_btn,
-            con and st == 9,
+            con and st == tlm.SafetyState.PASSIVE_POSE_STREAM,
             "The robot is not in passive pose mode.",
         )
         for btn in self._bench_buttons:
@@ -1505,8 +1518,8 @@ class LegLabPage(BasePage):
 
         gate(
             self.enter_maint_btn,
-            con and not held and self._state in (-1, 2, 4),
-            "Requires connection and a Disarmed / Stand Ready robot.",
+            con and not held and self._state in (-1, tlm.SafetyState.DISARMED),
+            "Requires connection and a Disarmed robot.",
         )
         gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
         gate(
@@ -1644,6 +1657,8 @@ class ServoConfigPage(BasePage):
         self._cfg = cfg
         self._loaded = None  # last config read from the robot / reset (the base)
         self._edited = None  # config last sent to the staging buffer
+        self._connected = False
+        self._lock_held = False
 
         self.content.addWidget(self._summary_box())
         self.content.addWidget(self._servo_table())
@@ -1655,6 +1670,8 @@ class ServoConfigPage(BasePage):
         self.service.config_summary.connect(self._on_config_summary)
         self.service.config_staged.connect(self._on_config_staged)
         self.service.config_result.connect(self._on_config_result)
+        self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self._apply_gates()
 
     # --- groups -----------------------------------------------------------
 
@@ -1677,10 +1694,10 @@ class ServoConfigPage(BasePage):
         load = QPushButton("Load from robot")
         load.setProperty("accent", True)
         load.clicked.connect(self.service.load_config)
-        reset = QPushButton("Reset to defaults")
-        reset.clicked.connect(self._reset_defaults)
+        self.reset_btn = QPushButton("Reset to defaults")
+        self.reset_btn.clicked.connect(self._reset_defaults)
         row.addWidget(load)
-        row.addWidget(reset)
+        row.addWidget(self.reset_btn)
         row.addStretch(1)
         form.addRow("", self._wrap(row))
         return box
@@ -1710,18 +1727,18 @@ class ServoConfigPage(BasePage):
         grid.setVerticalSpacing(12)
         diff = QPushButton("Diff vs loaded")
         diff.clicked.connect(self._show_diff)
-        stage = QPushButton("Stage to robot")
-        stage.setProperty("accent", True)
-        stage.clicked.connect(self._stage)
+        self.stage_btn = QPushButton("Stage to robot")
+        self.stage_btn.setProperty("accent", True)
+        self.stage_btn.clicked.connect(self._stage)
         validate = QPushButton("Validate staged")
         validate.clicked.connect(self.service.validate_config)
-        commit = QPushButton("Commit to EEPROM")
-        commit.clicked.connect(self._commit)
+        self.commit_btn = QPushButton("Commit to EEPROM")
+        self.commit_btn.clicked.connect(self._commit)
         export = QPushButton("Export JSON\u2026")
         export.clicked.connect(self._export)
         importb = QPushButton("Import JSON\u2026")
         importb.clicked.connect(self._import)
-        buttons = [diff, stage, validate, commit, export, importb]
+        buttons = [diff, self.stage_btn, validate, self.commit_btn, export, importb]
         for i, btn in enumerate(buttons):
             btn.setCursor(Qt.PointingHandCursor)
             grid.addWidget(btn, i // 3, i % 3)
@@ -1855,7 +1872,8 @@ class ServoConfigPage(BasePage):
         if self._confirm(
             "Commit config to EEPROM",
             "Persist the staged config to the 24LC32 EEPROM? The firmware "
-            "rejects a commit while walking or if the staged config is invalid.",
+            "requires Maintenance with all servo torque off and rejects an "
+            "invalid staged config.",
         ):
             self.action_lbl.setText("committing\u2026")
             self.service.commit_config()
@@ -1919,6 +1937,7 @@ class ServoConfigPage(BasePage):
     # --- reactions --------------------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
         if connected:
             self.service.load_config()
         else:
@@ -1927,6 +1946,18 @@ class ServoConfigPage(BasePage):
             self.schema_lbl.setText("--")
             self.persist_lbl.setText("--")
             self.action_lbl.setText("Load the config to begin.")
+        self._apply_gates()
+
+    def _on_lock_changed(self, held: bool, _token: int) -> None:
+        self._lock_held = held
+        self._apply_gates()
+
+    def _apply_gates(self) -> None:
+        allowed = self._connected and self._lock_held
+        why = "Enter Maintenance first; Commit/Reset also require torque off."
+        for button in (self.reset_btn, self.stage_btn, self.commit_btn):
+            button.setEnabled(allowed)
+            button.setToolTip("" if allowed else why)
 
     def _on_config_loaded(self, config) -> None:
         if config is None:
@@ -3031,7 +3062,7 @@ class PassivePosePage(BasePage):
 
     def _on_state_changed(self, state: int) -> None:
         self._state = state
-        if state == 9:
+        if state == tlm.SafetyState.PASSIVE_POSE_STREAM:
             self.mode_badge.set("passive (torque off)", "warn")
         elif self._connected:
             self.mode_badge.set(
@@ -3043,14 +3074,19 @@ class PassivePosePage(BasePage):
         """Enter needs a Disarmed/Maintenance robot; Exit only in passive."""
         con = self._connected
         st = self._state
-        enter_ok = con and st in (-1, 2, 8)
+        enter_ok = con and st in (
+            -1,
+            tlm.SafetyState.DISARMED,
+            tlm.SafetyState.MAC_MAINTENANCE,
+            tlm.SafetyState.PASSIVE_POSE_STREAM,
+        )
         self.enter_btn.setEnabled(enter_ok)
         self.enter_btn.setToolTip(
             ""
             if enter_ok
-            else "Requires connection and a Disarmed or Maintenance robot."
+            else "Requires a Disarmed, Maintenance, or Passive robot."
         )
-        exit_ok = con and st == 9
+        exit_ok = con and st == tlm.SafetyState.PASSIVE_POSE_STREAM
         self.exit_btn.setEnabled(exit_ok)
         self.exit_btn.setToolTip(
             "" if exit_ok else "The robot is not in passive pose mode."
@@ -3097,7 +3133,7 @@ class PassivePosePage(BasePage):
 class RcTroubleshootingPage(BasePage):
     title = "RC Troubleshooting"
     subtitle = "Live ControllerBridge intent and decoded physical controls."
-    MODE_NAMES = {0: "Walk", 1: "Translate body", 2: "Rotate body"}
+    MODE_NAMES = tlm.CONTROLLER_MODE_NAMES
     TRICK_NAMES = {
         0: "None",
         1: "Stand up",

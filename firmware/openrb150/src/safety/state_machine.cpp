@@ -58,13 +58,24 @@ void StateMachine::reset() {
   batt_low_active_ = false;
   batt_low_since_ms_ = 0;
   arming_since_ms_ = 0;
+  arm_release_required_ = true;
 }
 
 State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
+  // Arming is edge-qualified: after boot, any operational state, or a fault /
+  // E-stop, the operator must return the physical arm switch low before a new
+  // arm request is accepted. This prevents a held switch from automatically
+  // restarting arming after CLEAR_FAULT or an E-stop source disappears.
+  if (state_ != State::Boot && state_ != State::ConfigLoad &&
+      state_ != State::Disarmed && in.rc_armed) {
+    arm_release_required_ = true;
+  }
+
   // --- 1. Latched hard fault: repeated bus failures / servo HW errors. -----
   // Requires both an explicit operator clear request and the condition to be
   // gone before it releases back to Disarmed.
   if (in.dxl_hard_fault) {
+    arm_release_required_ = true;
     state_ = State::FaultHard;
     reason_ = FaultReason::DxlHardware;
     clear_fault_requested_ = false;
@@ -126,6 +137,7 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
     estop_reason = FaultReason::RcLinkLost;
   }
   if (estop_reason != FaultReason::None) {
+    arm_release_required_ = true;
     state_ = State::Estop;
     reason_ = estop_reason;
     return state_;
@@ -152,6 +164,7 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
       case State::JetsonAssisted:
       case State::MacMaintenance:
       case State::PassivePoseStream:
+        arm_release_required_ = true;
         state_ = State::Disarmed;
         reason_ = FaultReason::None;
         return state_;
@@ -170,11 +183,14 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
       break;
 
     case State::Disarmed:
-      if (in.passive_request && in.torque_off) {
+      if (!in.rc_armed) arm_release_required_ = false;
+      if (in.host_disarm) {
+        break;
+      } else if (in.passive_request && in.torque_off) {
         state_ = State::PassivePoseStream;
       } else if (in.maintenance_request && in.mac_lock_held) {
         state_ = State::MacMaintenance;
-      } else if (in.rc_armed) {
+      } else if (in.rc_armed && !arm_release_required_) {
         state_ = State::ArmingChecks;
         reason_ = FaultReason::None;
         arming_since_ms_ = now_ms;
@@ -184,9 +200,11 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
     case State::ArmingChecks:
       if (!in.rc_armed) {
         state_ = State::Disarmed;
-      } else if (in.arming_checks_pass) {
+      } else if (in.arming_checks_pass && in.battery_valid &&
+                 in.battery_mv >= params_.battery_min_mv) {
         state_ = State::StandReady;
       } else if ((now_ms - arming_since_ms_) >= params_.arming_timeout_ms) {
+        arm_release_required_ = true;
         state_ = State::FaultSoft;
         reason_ = FaultReason::ArmingTimeout;
       }
@@ -195,8 +213,6 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
     case State::StandReady:
       if (!in.rc_armed) {
         state_ = State::Disarmed;
-      } else if (in.maintenance_request && in.mac_lock_held) {
-        state_ = State::MacMaintenance;
       } else if (in.jetson_fresh && in.rc_autonomy &&
                  srcIs(in.command_source, CommandSource::Jetson)) {
         state_ = State::JetsonAssisted;
@@ -214,21 +230,23 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
       } else if (in.jetson_fresh && in.rc_autonomy &&
                  srcIs(in.command_source, CommandSource::Jetson)) {
         state_ = State::JetsonAssisted;
-      } else if (in.contact_enabled && in.contact_confident) {
-        state_ = State::ContactTerrain;
       } else if (!srcIs(in.command_source, CommandSource::Rc)) {
         state_ = State::StandReady;
+      } else if (in.contact_enabled && in.contact_confident) {
+        state_ = State::ContactTerrain;
       }
       break;
 
     case State::ContactTerrain:
       if (!in.rc_armed) {
         state_ = State::Disarmed;
-      } else if (!(in.contact_enabled && in.contact_confident)) {
-        state_ = State::RcManual;  // lost contact confidence: nominal gait
       } else if (in.jetson_fresh && in.rc_autonomy &&
                  srcIs(in.command_source, CommandSource::Jetson)) {
         state_ = State::JetsonAssisted;
+      } else if (!srcIs(in.command_source, CommandSource::Rc)) {
+        state_ = State::StandReady;
+      } else if (!(in.contact_enabled && in.contact_confident)) {
+        state_ = State::RcManual;  // lost contact confidence: nominal gait
       }
       break;
 

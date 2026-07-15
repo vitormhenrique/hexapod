@@ -21,7 +21,41 @@ from hexapod_protocol import (
     encode_frame,
     version_compatible,
 )
-from hexapod_protocol import api
+from hexapod_protocol import api, telemetry as tlm
+
+
+def test_firmware_state_and_mode_enum_parity():
+    assert [(state.name, int(state)) for state in tlm.SafetyState] == [
+        ("BOOT", 0),
+        ("CONFIG_LOAD", 1),
+        ("DISARMED", 2),
+        ("ARMING_CHECKS", 3),
+        ("STAND_READY", 4),
+        ("RC_MANUAL", 5),
+        ("CONTACT_TERRAIN", 6),
+        ("JETSON_ASSISTED", 7),
+        ("MAC_MAINTENANCE", 8),
+        ("PASSIVE_POSE_STREAM", 9),
+        ("FAULT_SOFT", 10),
+        ("FAULT_HARD", 11),
+        ("ESTOP", 12),
+    ]
+    assert list(tlm.CommandSource) == [
+        tlm.CommandSource.NONE,
+        tlm.CommandSource.RC,
+        tlm.CommandSource.JETSON,
+        tlm.CommandSource.MAC_MAINTENANCE,
+    ]
+    assert [int(source) for source in tlm.CommandSource] == [0, 1, 2, 3]
+    assert [int(mode) for mode in tlm.ControllerMode] == [0, 1, 2]
+    assert [
+        api.GAIT_STAND,
+        api.GAIT_SIT,
+        api.GAIT_TRIPOD,
+        api.GAIT_RIPPLE,
+        api.GAIT_WAVE,
+        api.GAIT_CRAWL,
+    ] == list(range(6))
 
 VECTORS = json.loads((Path(__file__).parent / "vectors" / "frames.json").read_text())
 

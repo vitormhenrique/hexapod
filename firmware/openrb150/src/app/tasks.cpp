@@ -8,6 +8,7 @@
 #include "../config/config_api.h"
 #include "../config/eeprom_24lc32.h"
 #include "../dxl/dxl_bus.h"
+#include "../dxl/hold_targets.h"
 #include "../dxl/dxl_params.h"
 #include "../dxl/servo_map.h"
 #include "../gait/gait_pipeline.h"
@@ -61,6 +62,7 @@ dxl::ServoStatus g_servoStatus[dxl::DxlBus::kMaxServos];
 volatile uint8_t g_servoStatusCount = 0;
 volatile bool g_configuredServoCoverage = false;
 volatile uint32_t g_poseKnownMask = 0;
+volatile uint32_t g_servoReadinessConfigRev = 0;
 constexpr uint32_t kAllServoPosesKnown =
   (1u << config::kNumServos) - 1u;
 
@@ -760,22 +762,58 @@ uint32_t configuredPoseMaskFromStatus() {
 void publishServoReadiness() {
   g_configuredServoCoverage = configuredServoCoverageFromBus();
   g_poseKnownMask = configuredPoseMaskFromStatus();
+  // Publish the revision last. controlTask only consumes the readiness values
+  // when this tag matches the active config, so evidence from an old servo map
+  // cannot authorize a newly committed map.
+  g_servoReadinessConfigRev = g_configApi.revision();
 }
 
 bool buildConfiguredHoldTargets(dxl::GoalTarget* hold) {
-  if (hold == nullptr || configuredPoseMaskFromStatus() != kAllServoPosesKnown) {
+  if (configuredPoseMaskFromStatus() != kAllServoPosesKnown) {
     return false;
   }
   const config::RobotConfig& cfg = g_configApi.config();
+  uint8_t ids[config::kNumServos];
   for (uint8_t i = 0; i < config::kNumServos; ++i) {
-    for (uint8_t s = 0; s < g_servoStatusCount; ++s) {
-      if (g_servoStatus[s].id != cfg.servos[i].id) continue;
-      int32_t present = g_servoStatus[s].present_position;
-      if (present < 0) present = 0;
-      if (present > 0xFFFF) present = 0xFFFF;
-      hold[i].id = cfg.servos[i].id;
-      hold[i].tick = static_cast<uint16_t>(present);
-      break;
+    ids[i] = cfg.servos[i].id;
+  }
+  return dxl::buildHoldTargets(ids, config::kNumServos, g_servoStatus,
+                               g_servoStatusCount, hold,
+                               config::kNumServos);
+}
+
+bool buildDiscoveredHoldTargets(dxl::GoalTarget* hold, uint8_t& count) {
+  count = g_dxlBus.servoCount();
+  if (count == 0 || count > dxl::DxlBus::kMaxServos) return false;
+  uint8_t ids[dxl::DxlBus::kMaxServos];
+  for (uint8_t i = 0; i < count; ++i) {
+    ids[i] = g_dxlBus.profile(i).id;
+  }
+  return dxl::buildHoldTargets(ids, count, g_servoStatus,
+                               g_servoStatusCount, hold,
+                               dxl::DxlBus::kMaxServos);
+}
+
+bool refreshDiscoveredPositions() {
+  const uint8_t count = g_dxlBus.servoCount();
+  if (count == 0) return false;
+  for (uint8_t i = 0; i < count; ++i) {
+    if (g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos) != 1) {
+      return false;
+    }
+  }
+  g_servoStatusCount = count;
+  publishServoReadiness();
+  return true;
+}
+
+bool verifyDiscoveredTorqueOff() {
+  const uint8_t count = g_dxlBus.servoCount();
+  for (uint8_t i = 0; i < count; ++i) {
+    const dxl::ServoProfile& profile = g_dxlBus.profile(i);
+    bool on = true;
+    if (!g_dxlBus.torqueState(profile.id, profile.table_kind, on) || on) {
+      return false;
     }
   }
   return true;
@@ -810,6 +848,14 @@ void controlTask(void*) {
     rc_in.kill = g_rcStatus.kill;
     rc_in.armed = g_rcStatus.armed;
     rc_in.autonomy_enabled = g_rcStatus.autonomy;
+    // A host force-disarm is latched until SET_ARMING(arm) releases it. Revoke
+    // any bench-mode intents at their owners so they cannot re-enter
+    // maintenance/passive from Disarmed on the next control cycle.
+    const bool host_disarm = g_controlApi.disarmRequested();
+    if (host_disarm) {
+      g_maintApi.revoke();
+      g_passiveApi.clear();
+    }
     // Mirror the live USB MaintenanceApi lock (the real ENTER/EXIT/HEARTBEAT
     // owner) into the arbiter so a held bench lock actually grants
     // MacMaintenance motion authority (hexapod_src-0y9: previously only the
@@ -866,11 +912,14 @@ void controlTask(void*) {
     // reading (a present-but-low pack already E-stops in the FSM), the full
     // servo set scanned, fresh present-position reads for every joint (so we
     // know the pose before energising), and no active hard fault.
-    const bool servo_coverage = g_configuredServoCoverage;
-    const bool pose_known = g_poseKnownMask == kAllServoPosesKnown;
+    const bool readiness_current =
+      g_servoReadinessConfigRev == g_configApi.revision();
+    const bool servo_coverage = readiness_current && g_configuredServoCoverage;
+    const bool pose_known =
+      readiness_current && g_poseKnownMask == kAllServoPosesKnown;
     si.arming_checks_pass = g_configReady && si.battery_valid && servo_coverage &&
                             pose_known && !si.dxl_hard_fault;
-    si.host_disarm = g_controlApi.disarmRequested();
+    si.host_disarm = host_disarm;
     si.command_source = g_commandSource;
     si.jetson_fresh = g_arbiter.jetsonFresh(now_ms);
     si.rc_autonomy = g_rcStatus.autonomy;
@@ -1350,24 +1399,34 @@ void runQueuedDxlJob() {
     }
     case protocol::dxljob::Type::Torque: {
       const bool on = (job.arg0 != 0);
+      const uint8_t servo_count = g_dxlBus.servoCount();
+      uint8_t acked = 0;
       if (on) {
-        // Seed goal := present for every servo with a fresh status read before
-        // enabling torque, so no servo snaps to a stale Goal Position register
-        // (same lmt.4 contract as the arming seed-then-enable path).
-        dxl::GoalTarget hold[config::kNumServos];
-        uint8_t hn = 0;
-        for (uint8_t s = 0; s < g_servoStatusCount && hn < config::kNumServos;
-             ++s) {
-          if (!g_servoStatus[s].ok) continue;
-          int32_t pp = g_servoStatus[s].present_position;
-          if (pp < 0) pp = 0;
-          hold[hn].id = g_servoStatus[s].id;
-          hold[hn].tick = static_cast<uint16_t>(pp);
-          ++hn;
+        // Torque-on is all-or-nothing: every discovered servo must have a
+        // fresh, valid present position and receive Goal := Present before any
+        // servo is energised. A partial snapshot must never enable the rest
+        // against stale Goal Position registers.
+        dxl::GoalTarget hold[dxl::DxlBus::kMaxServos];
+        uint8_t hold_count = 0;
+        if (!refreshDiscoveredPositions() ||
+          !buildDiscoveredHoldTargets(hold, hold_count) ||
+            !g_dxlBus.writeGoalPositions(hold, hold_count)) {
+          code = protocol::dxljob::Code::BusError;
+          data[len++] = 1;
+          data[len++] = 0;
+          break;
         }
-        if (hn > 0) g_dxlBus.writeGoalPositions(hold, hn);
+        acked = g_dxlBus.setTorqueAll(true);
+        if (acked != servo_count) {
+          g_dxlBus.setTorqueAll(false);
+          code = protocol::dxljob::Code::BusError;
+        }
+      } else {
+        acked = g_dxlBus.setTorqueAll(false);
+        if (acked != servo_count || !verifyDiscoveredTorqueOff()) {
+          code = protocol::dxljob::Code::BusError;
+        }
       }
-      const uint8_t acked = g_dxlBus.setTorqueAll(on);
       data[len++] = on ? 1 : 0;
       data[len++] = acked;
       break;
@@ -1701,13 +1760,14 @@ void dxlTask(void*) {
     }
     prev_authorized = authorized;
     // Publish torque-off confirmation for the safety FSM (passive pose gating).
-    // Derive it from the real per-servo torque cache (lmt.6) rather than motion
-    // authorisation: a maintenance DXL_TORQUE-on while motion is unauthorised
-    // must NOT report torque off. allTorqueOff() reflects every torque write
-    // this task issued (arming seed-enable, falling-edge disable, maintenance
-    // torque jobs, EEPROM-write torque-off), so passive entry sees the truth.
-    // !have_servos keeps it true before any scan (nothing is driven).
-    g_dxlTorqueOff = !have_servos || g_dxlBus.allTorqueOff();
+    // Power-off is inherently safe. While powered, require every configured
+    // servo to be discovered as well as every discovered torque cache to be
+    // OFF; an incomplete scan cannot prove that an unlisted powered servo is
+    // limp. A maintenance DXL_TORQUE-on while motion is unauthorised therefore
+    // never falsely opens passive entry.
+    g_dxlTorqueOff = dxl::torqueOffConfirmed(
+      board::dxlPowerEnabled(), g_configuredServoCoverage,
+      have_servos && g_dxlBus.allTorqueOff());
 
     // Goal Sync-Write path (lmt.2): while motion is authorised and torque is on,
     // push the latest goal frame published by controlTask (gait -> body IK ->
@@ -1988,6 +2048,13 @@ void apiTask(void*) {
       // control task.
       g_maintApi.setNow(st.uptime_ms);
       g_maintApi.setLiveState(g_safetyState);
+
+        const bool config_lock =
+          g_safetyState ==
+            static_cast<uint8_t>(safety::State::MacMaintenance) &&
+          g_maintApi.lockHeld(st.uptime_ms);
+        g_configApi.setMutationPolicy(config_lock,
+                      config_lock && g_dxlTorqueOff);
 
       // Refresh the passive handler's live state so PASSIVE_ENTER gates on the
       // current safety state (control task also keeps this current each cycle).
