@@ -811,6 +811,233 @@ def dxl_limits(
         client.stop()
 
 
+# --- rc / ExpressLRS link diagnostics -------------------------------------
+
+rc_app = typer.Typer(help="RC / ExpressLRS link diagnostics (read-only).")
+app.add_typer(rc_app, name="rc")
+
+# CRSF mid tick (992 ~ 1500 us). CH12-16 are intentionally parked here by the
+# ChannelPack, so they are excluded from the "frozen channel" check.
+_RC_CRSF_MID = 992
+# A channel whose tick range stays within this many ticks over the whole
+# capture is treated as "not moving" (i.e. not being transmitted / stuck).
+_RC_FROZEN_SPAN = 4
+
+# ChannelPack wire layout (1-based CH numbers). Mirrors ChannelPack.h so the
+# raw-tick view is self-describing.
+_RC_CHANNEL_LABELS = [
+    "LX gimbal",
+    "LY gimbal",
+    "RX gimbal",
+    "RY gimbal",
+    "Pot1 + SW_A (arm)",
+    "Pot2",
+    "Encoder1",
+    "Encoder2",
+    "SW_B/C/D/G/H",
+    "Buttons + SW_E/F",
+    "NAV1 + NAV2",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+    "reserved",
+]
+# CH1-11 (0-based 0..10) carry live controller payload; CH12-16 are parked.
+_RC_PAYLOAD_CHANNELS = list(range(11))
+# CH9-11 only arrive over the air in a 16-channel switch mode. In "8ch" mode
+# the ES24TX drops them, so they freeze at their last/centre value.
+_RC_UPPER_CHANNELS = (8, 9, 10)
+
+
+def _rc_switch_summary(ctrl) -> str:
+    """One-line decoded switch/button/nav view from controller_state.raw."""
+    raw = ctrl.raw
+    sw_names = ["A", "B", "C", "D", "G", "H"]
+    on = [n for n, v in zip(sw_names, raw.switches[:6]) if v]
+    btns = [str(i + 1) for i, v in enumerate(raw.buttons) if v]
+    tog = f"E={raw.toggles[0]} F={raw.toggles[1]}"
+    return (
+        f"switches[{','.join(on) if on else '-'}] "
+        f"buttons[{','.join(btns) if btns else '-'}] {tog}"
+    )
+
+
+@rc_app.command("channels")
+def rc_channels(
+    seconds: float = typer.Option(
+        3.0, "--seconds", "-s", help="Capture window; toggle every control during it."
+    ),
+    rate: int = typer.Option(20, "--rate", "-r", help="Requested telemetry rate (Hz)."),
+    port: Optional[str] = _PORT,
+    baud: int = _BAUD,
+) -> None:
+    """Stream raw CRSF ticks + decoded switches to find dead/clamped channels.
+
+    Toggle every switch, button, and stick on the controller during the capture
+    window. Any payload channel (CH1-11) that never moves is not reaching the
+    robot. The usual cause is the ES24TX being in "8ch" switch mode, which only
+    transmits CH1-8 and freezes CH9-16 (SW_B/C/D/G/H, buttons, toggles, nav).
+    Fix: set Switch Mode to "16ch Rate/2" (use the "Full Res" variant when
+    the transmitter offers it) and keep Packet Rate at "100Hz Full".
+    """
+    client = _connect(port, baud)
+    latest: dict[str, object] = {"diag": None, "ctrl": None}
+    seen = {"diag": 0, "ctrl": 0}
+    mins: list[Optional[int]] = [None] * 16
+    maxs: list[Optional[int]] = [None] * 16
+    diag_id = int(tlm.StreamId.RC_DIAGNOSTICS)
+    ctrl_id = int(tlm.StreamId.CONTROLLER_STATE)
+
+    def on_tel(stream_id: int, record: object, header) -> None:
+        if stream_id == diag_id:
+            latest["diag"] = record
+            seen["diag"] += 1
+            for i, t in enumerate(record.raw_ticks[:16]):
+                mins[i] = t if mins[i] is None else min(mins[i], t)
+                maxs[i] = t if maxs[i] is None else max(maxs[i], t)
+        elif stream_id == ctrl_id:
+            latest["ctrl"] = record
+            seen["ctrl"] += 1
+
+    client.on_telemetry(on_tel)
+    try:
+        for sid in (diag_id, ctrl_id):
+            res = client.subscribe(sid, rate)
+            if not (res and res.ok):
+                _err(f"subscribe failed for {tlm.STREAM_NAMES[tlm.StreamId(sid)]}: {res}")
+        typer.secho(
+            f"Capturing {seconds:g}s — move every stick/switch now...",
+            fg=typer.colors.BLUE,
+        )
+        time.sleep(seconds)
+    finally:
+        for sid in (diag_id, ctrl_id):
+            client.unsubscribe(sid)
+        client.stop()
+
+    diag = latest["diag"]
+    if diag is None or seen["diag"] == 0:
+        _err(
+            "No rc_diagnostics frames received. Check the USB link and that the "
+            "firmware publishes stream 11 (rc_diagnostics)."
+        )
+        raise typer.Exit(code=1)
+
+    if diag.failsafe or not diag.ever_seen:
+        typer.secho(
+            "RC link is in failsafe (no valid CRSF frames). Power on the "
+            "controller and check the ELRS bind before reading channels.",
+            fg=typer.colors.YELLOW,
+        )
+
+    typer.echo(f"raw_ticks over {seconds:g}s (frames={seen['diag']}):")
+    typer.echo("  ch   tick    span  moved  meaning")
+    frozen_payload: list[int] = []
+    for i in range(16):
+        lo, hi = mins[i], maxs[i]
+        tick = diag.raw_ticks[i] if i < len(diag.raw_ticks) else 0
+        span = (hi - lo) if lo is not None and hi is not None else 0
+        moved = span > _RC_FROZEN_SPAN
+        if i in _RC_PAYLOAD_CHANNELS and not moved:
+            frozen_payload.append(i)
+        mark = "yes" if moved else "  -"
+        color = None if moved or i not in _RC_PAYLOAD_CHANNELS else typer.colors.YELLOW
+        typer.secho(
+            f"  CH{i + 1:<2} {tick:>5}  {span:>6}   {mark}   {_RC_CHANNEL_LABELS[i]}",
+            fg=color,
+        )
+
+    ctrl = latest["ctrl"]
+    if ctrl is not None:
+        typer.echo(f"decoded: {_rc_switch_summary(ctrl)}")
+
+    upper_frozen = [i for i in frozen_payload if i in _RC_UPPER_CHANNELS]
+    lower_moved = any(
+        i not in _RC_UPPER_CHANNELS
+        and mins[i] is not None
+        and (maxs[i] - mins[i]) > _RC_FROZEN_SPAN
+        for i in _RC_PAYLOAD_CHANNELS
+    )
+    if len(upper_frozen) == len(_RC_UPPER_CHANNELS) and lower_moved:
+        typer.secho(
+            "\nDiagnosis: CH9-11 are frozen while lower channels move — the TX is "
+            "dropping the upper channels. Set the ES24TX Switch Mode to "
+            '"16ch Rate/2" (or "16ch Rate/2 Full Res" when available) with '
+            'Packet Rate "100Hz Full".',
+            fg=typer.colors.RED,
+        )
+    elif frozen_payload:
+        names = ", ".join(f"CH{i + 1}" for i in frozen_payload)
+        typer.secho(
+            f"\n{names} did not move during capture — either not toggled, or not "
+            "being transmitted. Re-run and exercise those inputs to confirm.",
+            fg=typer.colors.YELLOW,
+        )
+    else:
+        typer.secho(
+            "\nAll payload channels (CH1-11) moved — the link is streaming every "
+            "channel.",
+            fg=typer.colors.GREEN,
+        )
+
+
+@rc_app.command("link")
+def rc_link(
+    seconds: float = typer.Option(2.0, "--seconds", "-s"),
+    rate: int = typer.Option(10, "--rate", "-r"),
+    port: Optional[str] = _PORT,
+    baud: int = _BAUD,
+) -> None:
+    """Print CRSF link statistics + frame health (RSSI, LQ, SNR, CRC errors)."""
+    client = _connect(port, baud)
+    latest: dict[str, object] = {"diag": None}
+    diag_id = int(tlm.StreamId.RC_DIAGNOSTICS)
+
+    def on_tel(stream_id: int, record: object, header) -> None:
+        if stream_id == diag_id:
+            latest["diag"] = record
+
+    client.on_telemetry(on_tel)
+    try:
+        res = client.subscribe(diag_id, rate)
+        if not (res and res.ok):
+            _err(f"subscribe failed for rc_diagnostics: {res}")
+            raise typer.Exit(code=1)
+        time.sleep(seconds)
+    finally:
+        client.unsubscribe(diag_id)
+        client.stop()
+
+    diag = latest["diag"]
+    if diag is None:
+        _err("No rc_diagnostics frames received.")
+        raise typer.Exit(code=1)
+
+    age = "never" if diag.last_frame_age_ms == 0xFFFF else f"{diag.last_frame_age_ms} ms"
+    typer.echo(
+        f"ever_seen={diag.ever_seen} failsafe={diag.failsafe} "
+        f"last_frame_age={age}"
+    )
+    typer.echo(
+        f"frames_decoded={diag.frames_decoded} crc_errors={diag.crc_errors} "
+        f"link_stats_count={diag.link_stats_count}"
+    )
+    if diag.link_stats_valid:
+        ls = diag.link_stats
+        typer.echo(
+            f"uplink   rssi={ls.up_rssi_dbm} dBm lq={ls.up_link_quality}% "
+            f"snr={ls.up_snr} dB ant={ls.active_antenna} rf_mode={ls.rf_mode} "
+            f"tx_power_idx={ls.up_tx_power}"
+        )
+        typer.echo(
+            f"downlink rssi={ls.down_rssi_dbm} dBm lq={ls.down_link_quality}% "
+            f"snr={ls.down_snr} dB"
+        )
+    else:
+        typer.secho("no LINK_STATISTICS frames yet.", fg=typer.colors.YELLOW)
+
+
 def main() -> None:
     app()
 

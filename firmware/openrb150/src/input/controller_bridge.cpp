@@ -213,11 +213,12 @@ bool ControllerBridge::nearCrsfMid(uint16_t v) {
 
 bool ControllerBridge::looksLikeCustomChannelPack(
     const uint16_t ch[CPACK_NUM_CHANNELS]) {
-  // CH9: packed 2-pos switches. Only bits 0..5 (SwA,B,C,D,G,H) are used by the
-  // current robot-side abstraction; bits 6..7 are reserved and must be clear.
+  // CH9: packed 2-pos switches B,C,D,G,H. SW_A shares guarded low/high bands
+  // with Pot 1 on full-resolution CH5 so Wide-mode quantization cannot erase
+  // the safety-critical arm request.
   const uint16_t switches = ChannelPack::crsfToDiscrete(
       ch[CPACK_CH_SWITCHES], CPACK_SWITCH_FIELD_MAX);
-  const bool switches_ok = (switches & ~uint16_t(0x003F)) == 0;
+  const bool switches_ok = (switches & ~uint16_t(0x001F)) == 0;
 
   // CH10: 4 buttons (bits 0..3) + SwE tri (bits 4..5) + SwF tri (bits 6..7).
   // A tri field of 3 is invalid, and nothing above bit 7 may be set.

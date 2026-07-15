@@ -3096,56 +3096,59 @@ class PassivePosePage(BasePage):
 
 class RcTroubleshootingPage(BasePage):
     title = "RC Troubleshooting"
-    subtitle = (
-        "Raw and parsed remote-control data from the receiver: CRSF link "
-        "health, frame counters, per-channel raw ticks, and decoded switches."
-    )
-
-    NUM_CH = 16
-    # CRSF channel map (firmware crsf_parser.h): 0-7 are named, 8-15 are AUX5+.
-    CHANNEL_FUNCTIONS = [
-        "Roll (lateral)",
-        "Pitch (forward)",
-        "Throttle (speed)",
-        "Yaw",
-        "Arm (AUX1)",
-        "Kill (AUX2)",
-        "Gait (AUX3)",
-        "Autonomy (AUX4)",
-        "AUX5",
-        "AUX6",
-        "AUX7",
-        "AUX8",
-        "AUX9",
-        "AUX10",
-        "AUX11",
-        "AUX12",
-    ]
-    # CRSF TX power-table index -> human label (up_tx_power is an index, not mW).
-    TX_POWER_MW = {
-        0: "0 mW",
-        1: "10 mW",
-        2: "25 mW",
-        3: "100 mW",
-        4: "500 mW",
-        5: "1 W",
-        6: "2 W",
-        7: "250 mW",
-        8: "50 mW",
+    subtitle = "Live ControllerBridge intent and decoded physical controls."
+    MODE_NAMES = {0: "Walk", 1: "Translate body", 2: "Rotate body"}
+    TRICK_NAMES = {
+        0: "None",
+        1: "Stand up",
+        2: "Sit down",
+        3: "Wave",
+        4: "Crouch toggle",
+        5: "Twirl",
+        6: "Stretch",
+        7: "Lean/look",
+        8: "Dance loop",
     }
-    CHANNEL_COLUMNS = ["Ch", "Function", "Raw tick", "Microseconds", "Norm [-1,1]"]
+    RAW_INPUTS = [
+        ("gimbal_lx", "Gimbal", "Left X"),
+        ("gimbal_ly", "Gimbal", "Left Y"),
+        ("gimbal_rx", "Gimbal", "Right X"),
+        ("gimbal_ry", "Gimbal", "Right Y"),
+        ("pot1", "Shape", "POT1 / speed"),
+        ("pot2", "Shape", "POT2 / body height"),
+        ("enc1", "Shape", "ENC1 / stride"),
+        ("enc2", "Shape", "ENC2 / step height"),
+        ("sw_a", "2-position", "SW_A / arm"),
+        ("sw_b", "2-position", "SW_B / estop"),
+        ("sw_c", "2-position", "SW_C / foot contact"),
+        ("sw_d", "2-position", "SW_D / terrain leveling"),
+        ("sw_g", "2-position", "SW_G / passive pose"),
+        ("sw_h", "2-position", "SW_H / host authority"),
+        ("sw_e", "3-position", "SW_E / control mode"),
+        ("sw_f", "3-position", "SW_F / gait"),
+        ("btn1", "Button", "BTN_1 / stand up"),
+        ("btn2", "Button", "BTN_2 / sit down"),
+        ("btn3", "Button", "BTN_3 / wave"),
+        ("btn4", "Button", "BTN_4 / crouch"),
+        ("nav1_u", "NAV1 trim", "Up / pitch +"),
+        ("nav1_d", "NAV1 trim", "Down / pitch -"),
+        ("nav1_l", "NAV1 trim", "Left / roll +"),
+        ("nav1_r", "NAV1 trim", "Right / roll -"),
+        ("nav1_c", "NAV1 trim", "Center / reset"),
+        ("nav2_u", "NAV2 trick", "Up / twirl"),
+        ("nav2_d", "NAV2 trick", "Down / stretch"),
+        ("nav2_l", "NAV2 trick", "Left / lean/look"),
+        ("nav2_r", "NAV2 trick", "Right / unbound"),
+        ("nav2_c", "NAV2 trick", "Center / dance"),
+    ]
 
     def build(self) -> None:
-        self.content.addWidget(self._link_group())
-        self.content.addWidget(self._frames_group())
-        self.content.addWidget(self._switches_group())
-        self.content.addWidget(self._channel_group())
+        self.content.addWidget(self._bridge_group())
+        self.content.addWidget(self._command_group())
+        self.content.addWidget(self._raw_inputs_group())
 
         self.banner = self.add_telemetry_banner(
-            [
-                (tlm.StreamId.RC_INPUT, "rc_input"),
-                (tlm.StreamId.RC_DIAGNOSTICS, "rc_diagnostics"),
-            ]
+            [(tlm.StreamId.CONTROLLER_STATE, "controller_state")]
         )
 
         self.service.connected.connect(self._on_connected)
@@ -3167,193 +3170,174 @@ class RcTroubleshootingPage(BasePage):
             grid.setColumnStretch(c, 1)
         return cards
 
-    def _link_group(self) -> QGroupBox:
-        box = QGroupBox("Radio link health (CRSF link statistics)")
-        self.link = self._grid_of_cards(
+    def _bridge_group(self) -> QGroupBox:
+        box = QGroupBox("ControllerBridge decoded intent")
+        self.bridge = self._grid_of_cards(
             box,
             [
-                ("rssi", "Uplink RSSI"),
-                ("lq", "Uplink link quality"),
-                ("snr", "Uplink SNR"),
-                ("antenna", "Active antenna"),
-                ("tx", "Uplink TX power"),
-                ("rf", "RF mode"),
-                ("down_rssi", "Downlink RSSI"),
-                ("down_lq", "Downlink LQ"),
-            ],
-        )
-        return box
-
-    def _frames_group(self) -> QGroupBox:
-        box = QGroupBox("Frame health")
-        self.frame = self._grid_of_cards(
-            box,
-            [
-                ("link", "Link"),
-                ("frames", "Frames decoded"),
-                ("crc", "CRC errors"),
-                ("age", "Last frame age"),
-                ("lscount", "Link-stat frames"),
-            ],
-            per_row=5,
-        )
-        return box
-
-    def _switches_group(self) -> QGroupBox:
-        box = QGroupBox("Decoded switches (parsed RC input)")
-        self.sw = self._grid_of_cards(
-            box,
-            [
-                ("armed", "Armed"),
-                ("kill", "Kill switch"),
+                ("valid", "Command valid"),
                 ("failsafe", "Failsafe"),
-                ("autonomy", "Autonomy"),
+                ("seen", "Controller seen"),
+                ("arm", "SW_A arm request"),
+                ("estop", "SW_B estop"),
+                ("host", "SW_H host authority"),
+                ("mode", "SW_E control mode"),
                 ("gait", "Gait index"),
+                ("trick", "Trick trigger"),
+                ("contact", "SW_C foot contact"),
+                ("leveling", "SW_D leveling"),
+                ("passive", "SW_G passive pose"),
             ],
-            per_row=5,
+            per_row=4,
         )
         return box
 
-    def _channel_group(self) -> QGroupBox:
-        box = QGroupBox("Channels — raw ticks && parsed values")
+    def _command_group(self) -> QGroupBox:
+        box = QGroupBox("ControllerBridge command values")
+        self.command = self._grid_of_cards(
+            box,
+            [
+                ("twist", "Walk twist (vx, vy, wz)"),
+                ("pose_xyz", "Body translation (x, y, z)"),
+                ("pose_rpy", "Body rotation (roll, pitch, yaw)"),
+                ("trim", "Persistent trim (roll, pitch)"),
+                ("speed", "Speed"),
+                ("height", "Body height"),
+                ("stride", "Stride"),
+                ("step", "Step height"),
+            ],
+            per_row=4,
+        )
+        return box
+
+    def _raw_inputs_group(self) -> QGroupBox:
+        box = QGroupBox("ControllerBridge raw ChannelPack inputs")
         lay = QVBoxLayout(box)
-        self.table = QTableWidget(self.NUM_CH, len(self.CHANNEL_COLUMNS))
-        self.table.setHorizontalHeaderLabels(self.CHANNEL_COLUMNS)
-        self.table.verticalHeader().setVisible(False)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        for ch in range(self.NUM_CH):
-            self.table.setItem(ch, 0, QTableWidgetItem(str(ch)))
-            self.table.setItem(ch, 1, QTableWidgetItem(self.CHANNEL_FUNCTIONS[ch]))
-            for col in range(2, len(self.CHANNEL_COLUMNS)):
-                self.table.setItem(ch, col, QTableWidgetItem("--"))
-        self.table.setMinimumHeight(430)
-        lay.addWidget(self.table)
-        hint = QLabel(
-            "Raw ticks are the receiver's 11-bit CRSF values; microseconds and "
-            "normalized values are the firmware's parsed channels."
-        )
-        hint.setStyleSheet(f"color: {DRACULA.comment};")
-        hint.setWordWrap(True)
-        lay.addWidget(hint)
+        self.raw_table = QTableWidget(len(self.RAW_INPUTS), 3)
+        self.raw_table.setHorizontalHeaderLabels(["Group", "Physical input", "Value"])
+        self.raw_table.verticalHeader().setVisible(False)
+        self.raw_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.raw_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.raw_rows = {}
+        for row, (key, group, name) in enumerate(self.RAW_INPUTS):
+            self.raw_rows[key] = row
+            self.raw_table.setItem(row, 0, QTableWidgetItem(group))
+            self.raw_table.setItem(row, 1, QTableWidgetItem(name))
+            self.raw_table.setItem(row, 2, QTableWidgetItem("--"))
+        self.raw_table.setMinimumHeight(620)
+        lay.addWidget(self.raw_table)
         return box
-
-    # --- level helpers ----------------------------------------------------
-
-    @staticmethod
-    def _rssi_level(dbm: int) -> str:
-        if dbm >= -70:
-            return "ok"
-        if dbm >= -95:
-            return "warn"
-        return "error"
-
-    @staticmethod
-    def _lq_level(pct: int) -> str:
-        if pct >= 90:
-            return "ok"
-        if pct >= 50:
-            return "warn"
-        return "error"
 
     # --- telemetry --------------------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
         if connected:
-            self.service.subscribe(int(tlm.StreamId.RC_INPUT), 20)
-            self.service.subscribe(int(tlm.StreamId.RC_DIAGNOSTICS), 20)
+            self.service.subscribe(int(tlm.StreamId.CONTROLLER_STATE), 20)
         else:
-            for card in (*self.link.values(), *self.frame.values(), *self.sw.values()):
+            for card in (
+                *self.bridge.values(),
+                *self.command.values(),
+            ):
                 card.set("--", "idle")
-            for ch in range(self.NUM_CH):
-                for col in range(2, len(self.CHANNEL_COLUMNS)):
-                    self.table.item(ch, col).setText("--")
+            for row in self.raw_rows.values():
+                self.raw_table.item(row, 2).setText("--")
 
     def _on_telemetry(self, stream_id: int, record) -> None:
-        if stream_id == int(tlm.StreamId.RC_DIAGNOSTICS):
-            self._apply_diagnostics(record)
-        elif stream_id == int(tlm.StreamId.RC_INPUT):
-            self._apply_input(record)
+        if stream_id == int(tlm.StreamId.CONTROLLER_STATE):
+            self._apply_controller(record)
 
-    def _apply_diagnostics(self, rec) -> None:
-        # Frame-health counters are always valid.
-        self.frame["frames"].set(str(rec.frames_decoded), "info")
-        self.frame["crc"].set(str(rec.crc_errors), "warn" if rec.crc_errors else "ok")
-        self.frame["lscount"].set(str(rec.link_stats_count), "info")
-        if not rec.ever_seen:
-            self.frame["link"].set("no signal", "error")
-            self.frame["age"].set("never", "error")
-        elif rec.last_frame_age_ms >= 0xFFFF:
-            self.frame["link"].set("lost", "error")
-            self.frame["age"].set("never", "error")
-        else:
-            alive = not rec.failsafe
-            self.frame["link"].set(
-                "alive" if alive else "failsafe", "ok" if alive else "error"
-            )
-            self.frame["age"].set(
-                f"{rec.last_frame_age_ms} ms",
-                "ok" if rec.last_frame_age_ms < 500 else "warn",
-            )
-
-        # Link statistics are only meaningful once a 0x14 frame has arrived.
-        if rec.link_stats_valid:
-            ls = rec.link_stats
-            self.link["rssi"].set(
-                f"{ls.up_rssi_dbm} dBm", self._rssi_level(ls.up_rssi_dbm)
-            )
-            self.link["lq"].set(
-                f"{ls.up_link_quality}%", self._lq_level(ls.up_link_quality)
-            )
-            self.link["snr"].set(f"{ls.up_snr} dB", "info")
-            self.link["antenna"].set(str(ls.active_antenna), "info")
-            self.link["tx"].set(
-                self.TX_POWER_MW.get(ls.up_tx_power, f"idx {ls.up_tx_power}"), "info"
-            )
-            self.link["rf"].set(f"mode {ls.rf_mode}", "info")
-            self.link["down_rssi"].set(
-                f"{ls.down_rssi_dbm} dBm", self._rssi_level(ls.down_rssi_dbm)
-            )
-            self.link["down_lq"].set(
-                f"{ls.down_link_quality}%", self._lq_level(ls.down_link_quality)
-            )
-        else:
-            for key in (
-                "rssi",
-                "lq",
-                "snr",
-                "antenna",
-                "tx",
-                "rf",
-                "down_rssi",
-                "down_lq",
-            ):
-                self.link[key].set("--", "idle")
-
-        # Raw ticks column.
-        for ch in range(min(self.NUM_CH, len(rec.raw_ticks))):
-            self.table.item(ch, 2).setText(str(rec.raw_ticks[ch]))
-
-    def _apply_input(self, rec) -> None:
-        self.sw["armed"].set(
-            "ARMED" if rec.armed else "disarmed", "ok" if rec.armed else "idle"
+    def _apply_controller(self, rec) -> None:
+        self.bridge["valid"].set(
+            "valid" if rec.valid else "invalid", "ok" if rec.valid else "error"
         )
-        self.sw["kill"].set(
-            "KILL" if rec.kill else "clear", "error" if rec.kill else "ok"
+        self.bridge["failsafe"].set(
+            "FAILSAFE" if rec.failsafe else "clear",
+            "error" if rec.failsafe else "ok",
         )
-        self.sw["failsafe"].set(
-            "FAILSAFE" if rec.failsafe else "ok", "error" if rec.failsafe else "ok"
+        self.bridge["seen"].set(
+            "seen" if rec.ever_seen else "never", "ok" if rec.ever_seen else "warn"
         )
-        self.sw["autonomy"].set(
-            "on" if rec.autonomy else "off", "active" if rec.autonomy else "idle"
+        self.bridge["arm"].set(
+            "REQUESTED" if rec.arm_request else "off",
+            "active" if rec.arm_request else "idle",
         )
-        self.sw["gait"].set(str(rec.gait_index), "info")
+        self.bridge["estop"].set(
+            "ESTOP" if rec.estop else "clear", "error" if rec.estop else "ok"
+        )
+        self.bridge["host"].set(
+            "requested" if rec.host_authority else "off",
+            "active" if rec.host_authority else "idle",
+        )
+        self.bridge["mode"].set(self.MODE_NAMES.get(rec.mode, f"Unknown ({rec.mode})"), "info")
+        self.bridge["gait"].set(str(rec.gait_index), "info")
+        self.bridge["trick"].set(self.TRICK_NAMES.get(rec.trick, f"Unknown ({rec.trick})"), "info")
+        self._set_request("contact", rec.feat_foot_contact)
+        self._set_request("leveling", rec.feat_terrain_leveling)
+        self._set_request("passive", rec.feat_passive_pose)
 
-        for ch in range(min(self.NUM_CH, len(rec.channels_us))):
-            us = rec.channels_us[ch]
-            self.table.item(ch, 3).setText(f"{us} µs")
-            norm = max(-1.0, min(1.0, (us - 1500) / 500.0))
-            self.table.item(ch, 4).setText(f"{norm:+.2f}")
+        self.command["twist"].set(
+            f"{rec.twist_vx:+.2f}, {rec.twist_vy:+.2f}, {rec.twist_wz:+.2f}", "info"
+        )
+        self.command["pose_xyz"].set(
+            f"{rec.pose_x_mm:+.0f}, {rec.pose_y_mm:+.0f}, {rec.pose_z_mm:+.0f} mm",
+            "info",
+        )
+        self.command["pose_rpy"].set(
+            f"{rec.pose_roll:+.3f}, {rec.pose_pitch:+.3f}, {rec.pose_yaw:+.3f} rad",
+            "info",
+        )
+        self.command["trim"].set(
+            f"{rec.trim_roll:+.3f}, {rec.trim_pitch:+.3f} rad", "info"
+        )
+        self.command["speed"].set(f"{rec.speed:.3f}", "info")
+        self.command["height"].set(f"{rec.body_height:.3f}", "info")
+        self.command["stride"].set(f"{rec.stride:.3f}", "info")
+        self.command["step"].set(f"{rec.step_height:.3f}", "info")
+
+        raw = rec.raw
+        values = {
+            "gimbal_lx": raw.gimbal[0],
+            "gimbal_ly": raw.gimbal[1],
+            "gimbal_rx": raw.gimbal[2],
+            "gimbal_ry": raw.gimbal[3],
+            "pot1": raw.pot[0],
+            "pot2": raw.pot[1],
+            "enc1": raw.encoder[0],
+            "enc2": raw.encoder[1],
+            "sw_a": raw.switches[0],
+            "sw_b": raw.switches[1],
+            "sw_c": raw.switches[2],
+            "sw_d": raw.switches[3],
+            "sw_g": raw.switches[4],
+            "sw_h": raw.switches[5],
+            "sw_e": raw.toggles[0],
+            "sw_f": raw.toggles[1],
+            "btn1": raw.buttons[0],
+            "btn2": raw.buttons[1],
+            "btn3": raw.buttons[2],
+            "btn4": raw.buttons[3],
+        }
+        nav_names = ("u", "d", "l", "r", "c")
+        for nav_index in range(2):
+            for direction, active in zip(nav_names, raw.nav[nav_index]):
+                values[f"nav{nav_index + 1}_{direction}"] = active
+        for key, value in values.items():
+            self.raw_table.item(self.raw_rows[key], 2).setText(
+                self._raw_value(key, value)
+            )
+
+    def _set_request(self, key: str, enabled: bool) -> None:
+        self.bridge[key].set(
+            "requested" if enabled else "off", "active" if enabled else "idle"
+        )
+
+    @staticmethod
+    def _raw_value(key: str, value) -> str:
+        if key in ("sw_e", "sw_f"):
+            return {0: "UP", 1: "CENTER", 2: "DOWN"}.get(value, f"INVALID ({value})")
+        if isinstance(value, bool):
+            return "ON" if value else "off"
+        return str(value)
 
 
 class DiagnosticsPage(BasePage):

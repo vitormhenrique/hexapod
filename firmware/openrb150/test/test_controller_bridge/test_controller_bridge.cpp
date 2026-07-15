@@ -161,6 +161,29 @@ void test_arm_switch_requires_no_kill() {
   TEST_ASSERT_FALSE(c.estop);
 }
 
+void test_arm_switch_uses_guarded_pot_channel_band() {
+  ChannelPackInputs_t in = makeNeutral();
+  in.pot[0] = 500;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+
+  ChannelPack::packInputs(&in, ch);
+  TEST_ASSERT_TRUE(ch[CPACK_CH_POT1] < CPACK_CRSF_MID);
+  ControllerBridge off_bridge;
+  const ControllerCommand& off = feedCh(off_bridge, ch, 10);
+  TEST_ASSERT_FALSE(off.arm_request);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, off.speed);
+
+  in.switches[0] = true;
+  ChannelPack::packInputs(&in, ch);
+  TEST_ASSERT_EQUAL_UINT16(CPACK_CRSF_MIN, ch[CPACK_CH_SWITCHES]);
+  TEST_ASSERT_TRUE(ch[CPACK_CH_POT1] > CPACK_CRSF_MID);
+  --ch[CPACK_CH_POT1];
+  ControllerBridge arm_bridge;
+  const ControllerCommand& armed = feedCh(arm_bridge, ch, 10);
+  TEST_ASSERT_TRUE(armed.arm_request);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, armed.speed);
+}
+
 void test_kill_switch_forces_estop_and_disarm() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
@@ -731,6 +754,7 @@ int main(int, char**) {
   RUN_TEST(test_rotate_body_mode_clamped_to_envelope);
   RUN_TEST(test_gait_index_from_select_toggle);
   RUN_TEST(test_arm_switch_requires_no_kill);
+  RUN_TEST(test_arm_switch_uses_guarded_pot_channel_band);
   RUN_TEST(test_kill_switch_forces_estop_and_disarm);
   RUN_TEST(test_arm_release_rejects_short_glitch_but_accepts_stable_release);
   RUN_TEST(test_failsafe_on_link_down);

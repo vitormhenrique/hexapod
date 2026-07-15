@@ -54,9 +54,9 @@ All inputs the controller exposes, and where each lands in the CRSF frame.
 | Group | Inputs | Count | Source hardware | Channel(s) |
 |-------|--------|-------|-----------------|------------|
 | Gimbals | `LEFT_X`, `LEFT_Y`, `RIGHT_X`, `RIGHT_Y` | 4 | ADS1115 ADC (proportional) | CH1–CH4 |
-| Potentiometers | `POT_1`, `POT_2` | 2 | ADS1115 ADC (proportional) | CH5–CH6 |
+| Potentiometers | `POT_1`, `POT_2` | 2 | ADS1115 ADC (proportional) | CH5–CH6; CH5 also carries SW_A |
 | Rotary encoders | `ENC1`, `ENC2` | 2 | MCP23017 (quadrature) | CH7–CH8 |
-| 2-position switches | `SW_A`, `SW_B`, `SW_C`, `SW_D`, `SW_G`, `SW_H` | 6 | MCP23017 | CH9 (bitfield) |
+| 2-position switches | `SW_A`, `SW_B`, `SW_C`, `SW_D`, `SW_G`, `SW_H` | 6 | MCP23017 | CH5 guarded arm band + CH9 5-bit state |
 | 3-position toggles | `SW_E`, `SW_F` | 2 | MCP23017 (2 pins each) | CH10 (bitfield) |
 | Push buttons | `BTN_1`…`BTN_4` | 4 | MCP23017 | CH10 (bitfield) |
 | 5-way nav switch 1 | `NAV1` U/D/L/R/C | 5 | MCP23017 | CH11 (bitfield) |
@@ -79,11 +79,11 @@ matching **0-based** array indices used by the library.
 | CH2 | `CPACK_CH_LEFT_Y`   (1) | Gimbal Left Y  | proportional | `gimbalToCrsf` |
 | CH3 | `CPACK_CH_RIGHT_X`  (2) | Gimbal Right X | proportional | `gimbalToCrsf` |
 | CH4 | `CPACK_CH_RIGHT_Y`  (3) | Gimbal Right Y | proportional | `gimbalToCrsf` |
-| CH5 | `CPACK_CH_POT1`     (4) | Potentiometer 1 | proportional | `potToCrsf` |
+| CH5 | `CPACK_CH_POT1`     (4) | Potentiometer 1 + SW_A | guarded low/high bands | `armPotToCrsf` |
 | CH6 | `CPACK_CH_POT2`     (5) | Potentiometer 2 | proportional | `potToCrsf` |
 | CH7 | `CPACK_CH_ENC1`     (6) | Encoder 1 position | wrapped 11-bit | `encoderToCrsf` |
 | CH8 | `CPACK_CH_ENC2`     (7) | Encoder 2 position | wrapped 11-bit | `encoderToCrsf` |
-| CH9 | `CPACK_CH_SWITCHES` (8) | 6 × 2-pos switches | **scaled 6-bit mask** | `packSwitches` + `discreteToCrsf` |
+| CH9 | `CPACK_CH_SWITCHES` (8) | SW_B/C/D/G/H | **scaled 5-bit mask** | `packAuxSwitches` + `discreteToCrsf` |
 | CH10 | `CPACK_CH_BTN_TOGGLE` (9) | 4 buttons + 2 × 3-pos toggles | **scaled state index** | `packButtonToggleState` + `discreteToCrsf` |
 | CH11 | `CPACK_CH_NAV`      (10) | 2 × 5-way nav switches | **scaled state index** | `packNavStates` + `discreteToCrsf` |
 | CH12–CH16 | 11–15 | Reserved | centered | constant `992` |
@@ -93,6 +93,12 @@ matching **0-based** array indices used by the library.
 > may quantize channel values, so sending small integers directly would lose
 > controls. Decode with `crsfToDiscrete()` before interpreting the state; never
 > treat these channels as sticks or apply a deadzone.
+
+SW_A is carried in guarded low/high bands alongside Potentiometer 1 on CH5,
+which the hardware link carries at full resolution. The pot retains 512 steps;
+the unused middle half of the channel separates arm OFF from ON. CH9 then has
+exactly 32 states, matching the measured Wide-mode resolution while preserving
+every combination of SW_B/C/D/G/H.
 
 ---
 
@@ -141,22 +147,20 @@ Encoders are **relative**: track deltas frame-to-frame and handle the wrap at
 
 On the RF wire, `packInputs()` scales each discrete state into `191..1792`;
 `unpackChannels()` reverses that scaling with round-to-nearest. The possible
-decoded values are `0..63` for CH9, `0..44` for CH10, and `0..35` for CH11.
+decoded values are `0..31` for CH9, `0..44` for CH10, and `0..35` for CH11.
 
-### CH9 — `CPACK_CH_SWITCHES` (`packSwitches` / `unpackSwitches`)
+### CH9 — `CPACK_CH_SWITCHES` (`packAuxSwitches` / `unpackAuxSwitches`)
 
 | Bit | Input | Values |
 |----:|-------|--------|
-| 0 | `SW_A` | 0 = off, 1 = on |
-| 1 | `SW_B` | 0 = off, 1 = on |
-| 2 | `SW_C` | 0 = off, 1 = on |
-| 3 | `SW_D` | 0 = off, 1 = on |
-| 4 | `SW_G` | 0 = off, 1 = on |
-| 5 | `SW_H` | 0 = off, 1 = on |
-| 6–7 | reserved | always 0 |
+| 0 | `SW_B` | 0 = off, 1 = on |
+| 1 | `SW_C` | 0 = off, 1 = on |
+| 2 | `SW_D` | 0 = off, 1 = on |
+| 3 | `SW_G` | 0 = off, 1 = on |
+| 4 | `SW_H` | 0 = off, 1 = on |
 
-> `unpackSwitches()` fills a `bool[8]` array. Indices 0–5 are the switches above;
-> indices 6–7 are reserved.
+`unpackAuxSwitches()` restores these controls to `switches[1]..switches[5]`;
+`switches[0]` (SW_A) is decoded separately from CH5.
 
 ### CH10 — `CPACK_CH_BTN_TOGGLE` (`packButtonToggleState` / `unpackButtonToggleState`)
 
@@ -206,8 +210,9 @@ typedef struct {
 |----------|---------|
 | `void packInputs(const ChannelPackInputs_t* in, uint16_t ch[16])` | Pack all inputs into 16 channels; CH12–16 set to `CPACK_CRSF_MID`. |
 | `uint16_t gimbalToCrsf(int16_t)` / `potToCrsf(int16_t)` | Proportional → CRSF. |
+| `uint16_t armPotToCrsf(int16_t, bool)` | Pack Pot 1 and SW_A into guarded CH5 bands. |
 | `uint16_t encoderToCrsf(int32_t)` | Encoder → wrapped 11-bit. |
-| `uint16_t packSwitches(const bool[8])` | Switch bitfield. |
+| `uint16_t packAuxSwitches(const bool[8])` | Pack SW_B/C/D/G/H for CH9. |
 | `uint16_t packButtonToggleState(const bool[4], const uint8_t[2])` | Compact buttons + toggles state. |
 | `uint16_t packNavStates(const bool[2][5])` | Compact nav-cluster state. |
 
@@ -218,8 +223,9 @@ typedef struct {
 | `void unpackChannels(const uint16_t ch[16], ChannelPackInputs_t* out)` | **Main entry point** — decode all 16 channels into the struct. |
 | `int16_t crsfToGimbal(uint16_t)` | CRSF → `-1000..+1000`. |
 | `int16_t crsfToPot(uint16_t)` | CRSF → `0..1000`. |
+| `void crsfToArmPot(uint16_t, int16_t*, bool*)` | Decode Pot 1 and SW_A from CH5. |
 | `int32_t crsfToEncoder(uint16_t)` | CRSF → `0..2047`. |
-| `void unpackSwitches(uint16_t, bool[8])` | Decode CH9. |
+| `void unpackAuxSwitches(uint16_t, bool[8])` | Decode SW_B/C/D/G/H from CH9. |
 | `void unpackButtonToggleState(uint16_t, bool[4], uint8_t[2])` | Decode CH10. |
 | `void unpackNavStates(uint16_t, bool[2][5])` | Decode CH11. |
 

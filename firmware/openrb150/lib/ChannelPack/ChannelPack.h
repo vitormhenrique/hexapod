@@ -8,9 +8,10 @@
  *
  * Channel Assignment:
  *   CH1-4:  Gimbal axes (LEFT_X, LEFT_Y, RIGHT_X, RIGHT_Y) - proportional
- *   CH5-6:  Potentiometers (POT_1, POT_2) - proportional
+ *   CH5:    POT_1 + safety-critical SW_A in guarded low/high bands
+ *   CH6:    POT_2 - proportional
  *   CH7-8:  Encoder positions (wrapped 11-bit)
- *   CH9:    6x 2-pos switches - scaled 6-bit mask
+ *   CH9:    switches B,C,D,G,H - scaled 5-bit mask
  *   CH10:   4 buttons + 2 three-pos toggles - scaled physical-state index
  *   CH11:   10 nav switch buttons (2x 5-way) - scaled physical-state index
  *   CH12-16: Reserved (center)
@@ -25,10 +26,13 @@
 
 // Packed digital fields must also stay inside the valid CRSF channel range.
 // ELRS clamps raw channel values below CPACK_CRSF_MIN, which would otherwise
-// collapse small bitfields (for example CH9 values 0..63) to the same value.
-#define CPACK_SWITCH_FIELD_MAX     63u  // 6 independent switches
+// collapse several low-valued bitfield states to the same value.
+#define CPACK_SWITCH_FIELD_MAX     31u  // 5 independent switches (B,C,D,G,H)
 #define CPACK_BTN_TOGGLE_FIELD_MAX 44u  // 9 toggle pairs x 5 button states
 #define CPACK_NAV_FIELD_MAX        35u  // 6 NAV1 states x 6 NAV2 states
+#define CPACK_ARM_POT_STEPS        511u
+#define CPACK_ARM_POT_ON_BASE      1536u
+#define CPACK_ARM_POT_CODE_MAX     2047u
 
 // Channel assignments (0-based)
 #define CPACK_CH_LEFT_X      0
@@ -39,7 +43,7 @@
 #define CPACK_CH_POT2        5
 #define CPACK_CH_ENC1        6
 #define CPACK_CH_ENC2        7
-#define CPACK_CH_SWITCHES    8   // 6x 2-pos switches (A,B,C,D,G,H) + 2 reserved
+#define CPACK_CH_SWITCHES    8   // 5x 2-pos switches (B,C,D,G,H)
 #define CPACK_CH_BTN_TOGGLE  9   // 4 buttons + 2 three-pos toggles (SW_E, SW_F)
 #define CPACK_CH_NAV        10   // 10 nav switch buttons (2x5)
 #define CPACK_NUM_CHANNELS  16
@@ -86,6 +90,17 @@ inline uint16_t potToCrsf(int16_t val) {
     return (uint16_t)(((int32_t)val * (CPACK_CRSF_MAX - CPACK_CRSF_MIN)) / 1000 + CPACK_CRSF_MIN);
 }
 
+inline uint16_t armPotToCrsf(int16_t pot, bool arm) {
+    pot = clampI16(pot, 0, 1000);
+    const uint16_t pot_code = (uint16_t)(
+        ((uint32_t)pot * CPACK_ARM_POT_STEPS + 500u) / 1000u);
+    const uint16_t code = arm ? CPACK_ARM_POT_ON_BASE + pot_code : pot_code;
+    const uint32_t span = CPACK_CRSF_MAX - CPACK_CRSF_MIN;
+    return (uint16_t)(CPACK_CRSF_MIN +
+        ((uint32_t)code * span + CPACK_ARM_POT_CODE_MAX / 2u) /
+            CPACK_ARM_POT_CODE_MAX);
+}
+
 // Map encoder position to 11-bit value (wrapping)
 inline uint16_t encoderToCrsf(int32_t pos) {
     return (uint16_t)(((pos % 2048) + 2048) % 2048);
@@ -113,6 +128,14 @@ inline uint16_t packSwitches(const bool sw[8]) {
     uint16_t val = 0;
     for (int i = 0; i < 8; i++) {
         if (sw[i]) val |= (1 << i);
+    }
+    return val;
+}
+
+inline uint16_t packAuxSwitches(const bool sw[8]) {
+    uint16_t val = 0;
+    for (int i = 1; i < 6; i++) {
+        if (sw[i]) val |= (1u << (i - 1));
     }
     return val;
 }
@@ -176,12 +199,12 @@ inline void packInputs(const ChannelPackInputs_t* in, uint16_t ch[CPACK_NUM_CHAN
     ch[CPACK_CH_LEFT_Y]     = gimbalToCrsf(in->gimbal[1]);
     ch[CPACK_CH_RIGHT_X]    = gimbalToCrsf(in->gimbal[2]);
     ch[CPACK_CH_RIGHT_Y]    = gimbalToCrsf(in->gimbal[3]);
-    ch[CPACK_CH_POT1]       = potToCrsf(in->pot[0]);
+    ch[CPACK_CH_POT1]       = armPotToCrsf(in->pot[0], in->switches[0]);
     ch[CPACK_CH_POT2]       = potToCrsf(in->pot[1]);
     ch[CPACK_CH_ENC1]       = encoderToCrsf(in->encoder[0]);
     ch[CPACK_CH_ENC2]       = encoderToCrsf(in->encoder[1]);
     ch[CPACK_CH_SWITCHES] = discreteToCrsf(
-        packSwitches(in->switches) & CPACK_SWITCH_FIELD_MAX,
+        packAuxSwitches(in->switches) & CPACK_SWITCH_FIELD_MAX,
         CPACK_SWITCH_FIELD_MAX);
     ch[CPACK_CH_BTN_TOGGLE] = discreteToCrsf(
         packButtonToggleState(in->buttons, in->toggles),
@@ -205,6 +228,22 @@ inline int16_t crsfToPot(uint16_t crsf_val) {
     return (int16_t)(((int32_t)(crsf_val - CPACK_CRSF_MIN) * 1000) / (CPACK_CRSF_MAX - CPACK_CRSF_MIN));
 }
 
+inline void crsfToArmPot(uint16_t crsf_val, int16_t* pot, bool* arm) {
+    if (crsf_val < CPACK_CRSF_MIN) crsf_val = CPACK_CRSF_MIN;
+    if (crsf_val > CPACK_CRSF_MAX) crsf_val = CPACK_CRSF_MAX;
+    const uint32_t span = CPACK_CRSF_MAX - CPACK_CRSF_MIN;
+    const uint16_t code = (uint16_t)(
+        ((uint32_t)(crsf_val - CPACK_CRSF_MIN) * CPACK_ARM_POT_CODE_MAX +
+         span / 2u) / span);
+    *arm = code >= (CPACK_ARM_POT_CODE_MAX + 1u) / 2u;
+    uint16_t pot_code = *arm
+        ? (code > CPACK_ARM_POT_ON_BASE ? code - CPACK_ARM_POT_ON_BASE : 0u)
+        : code;
+    if (pot_code > CPACK_ARM_POT_STEPS) pot_code = CPACK_ARM_POT_STEPS;
+    *pot = (int16_t)(((uint32_t)pot_code * 1000u +
+                      CPACK_ARM_POT_STEPS / 2u) / CPACK_ARM_POT_STEPS);
+}
+
 inline int32_t crsfToEncoder(uint16_t crsf_val) {
     return (int32_t)(crsf_val & 0x7FF);
 }
@@ -213,6 +252,13 @@ inline void unpackSwitches(uint16_t val, bool sw[8]) {
     for (int i = 0; i < 8; i++) {
         sw[i] = (val >> i) & 1;
     }
+}
+
+inline void unpackAuxSwitches(uint16_t val, bool sw[8]) {
+    sw[0] = false;
+    for (int i = 1; i < 6; i++) sw[i] = (val >> (i - 1)) & 1u;
+    sw[6] = false;
+    sw[7] = false;
 }
 
 inline void unpackButtonsToggles(uint16_t val, bool btn[4], uint8_t tog[2]) {
@@ -257,13 +303,13 @@ inline void unpackChannels(const uint16_t ch[CPACK_NUM_CHANNELS], ChannelPackInp
     out->gimbal[1] = crsfToGimbal(ch[CPACK_CH_LEFT_Y]);
     out->gimbal[2] = crsfToGimbal(ch[CPACK_CH_RIGHT_X]);
     out->gimbal[3] = crsfToGimbal(ch[CPACK_CH_RIGHT_Y]);
-    out->pot[0]    = crsfToPot(ch[CPACK_CH_POT1]);
     out->pot[1]    = crsfToPot(ch[CPACK_CH_POT2]);
     out->encoder[0] = crsfToEncoder(ch[CPACK_CH_ENC1]);
     out->encoder[1] = crsfToEncoder(ch[CPACK_CH_ENC2]);
-    unpackSwitches(
+    unpackAuxSwitches(
         crsfToDiscrete(ch[CPACK_CH_SWITCHES], CPACK_SWITCH_FIELD_MAX),
         out->switches);
+    crsfToArmPot(ch[CPACK_CH_POT1], &out->pot[0], &out->switches[0]);
     unpackButtonToggleState(
         crsfToDiscrete(ch[CPACK_CH_BTN_TOGGLE],
                        CPACK_BTN_TOGGLE_FIELD_MAX),
