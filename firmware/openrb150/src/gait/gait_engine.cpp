@@ -78,11 +78,25 @@ inline float frac01(float v) {
 
 inline float smoothstep(float v) { return v * v * (3.0f - 2.0f * v); }
 
-inline float slewToward(float current, float target, float max_delta) {
-  const float delta = target - current;
-  if (delta > max_delta) return current + max_delta;
-  if (delta < -max_delta) return current - max_delta;
-  return target;
+// One tracker axis step: critically-damped spring-damper pulled toward
+// `target` with natural frequency `w`. Integrated in bounded substeps so the
+// semi-implicit Euler stays stable for any caller dt, with the state clamped
+// to the valid normalised twist range.
+inline void trackAxis(float& x, float& v, float target, float w, float dt) {
+  while (dt > 0.0f) {
+    const float h = dt > 0.02f ? 0.02f : dt;
+    dt -= h;
+    const float a = w * w * (target - x) - 2.0f * w * v;
+    v += a * h;
+    x += v * h;
+  }
+  if (x > 1.0f) {
+    x = 1.0f;
+    if (v > 0.0f) v = 0.0f;
+  } else if (x < -1.0f) {
+    x = -1.0f;
+    if (v < 0.0f) v = 0.0f;
+  }
 }
 
 }  // namespace
@@ -91,12 +105,24 @@ GaitEngine::GaitEngine() {}
 
 void GaitEngine::configure(const config::GaitDefaults& d) {
   gait_ = static_cast<config::GaitId>(d.gait);
-  stride_mm_ = clampf(static_cast<float>(d.stride_len_mm), 0.0f, kMaxStrideMm);
-  step_mm_ = clampf(static_cast<float>(d.step_height_mm), 0.0f, kMaxStepMm);
-  body_height_mm_ = static_cast<float>(d.body_height_mm);
+  // Live shape values are filter TARGETS: the RC/host feeds raw knob values
+  // every cycle and update()'s first-order lag delivers them to the trajectory
+  // smoothly, so pot/ADC noise never jumps the body or the stride.
+  stride_target_ = clampf(static_cast<float>(d.stride_len_mm), 0.0f, kMaxStrideMm);
+  step_target_ = clampf(static_cast<float>(d.step_height_mm), 0.0f, kMaxStepMm);
+  height_target_ = static_cast<float>(d.body_height_mm);
   requested_duty_ = clampf(static_cast<float>(d.duty_x255) / 255.0f, 0.0f,
                            kMaxDutyFactor);
-  speed_ = clampf(static_cast<float>(d.speed_x255) / 255.0f, 0.0f, 1.0f);
+  speed_target_ = clampf(static_cast<float>(d.speed_x255) / 255.0f, 0.0f, 1.0f);
+  if (!params_seeded_) {
+    // First configuration (boot / pipeline construction): start the filters
+    // exactly on target so the initial pose is the configured one.
+    stride_mm_ = stride_target_;
+    step_mm_ = step_target_;
+    body_height_mm_ = height_target_;
+    speed_ = speed_target_;
+    params_seeded_ = true;
+  }
 }
 
 void GaitEngine::setGait(config::GaitId g) { gait_ = g; }
@@ -130,6 +156,15 @@ void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
 }
 
 void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
+  const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
+
+  // Advance the shape-parameter filters (body height, stride, step, speed).
+  const float pk = (dt_s >= kParamFilterTau) ? 1.0f : dt_s / kParamFilterTau;
+  stride_mm_ += (stride_target_ - stride_mm_) * pk;
+  step_mm_ += (step_target_ - step_mm_) * pk;
+  body_height_mm_ += (height_target_ - body_height_mm_) * pk;
+  speed_ += (speed_target_ - speed_) * pk;
+
   // Static poses: no stepping, no twist.
   if (gait_ == config::GaitId::Stand || gait_ == config::GaitId::Sit) {
     for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
@@ -144,29 +179,34 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
     return;
   }
 
-  // Slew the working twist toward the latest stick/host target. Pot1 controls
-  // this response together with cadence: low speed is deliberately gentle;
-  // high speed remains responsive. Returning to centre uses a modestly faster
-  // rate so the robot settles promptly without an abrupt target jump.
-  const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
+  // Track the stick target with the critically-damped spring-damper. The
+  // working twist therefore has continuous position and velocity: direction
+  // and magnitude changes become S-curves instead of rate-limited ramps.
+  const float omega =
+      kMinTwistOmega + (kMaxTwistOmega - kMinTwistOmega) * speed_;
+  trackAxis(twist_.vx, twist_vel_.vx, target_twist_.vx, omega, dt_s);
+  trackAxis(twist_.vy, twist_vel_.vy, target_twist_.vy, omega, dt_s);
+  trackAxis(twist_.wz, twist_vel_.wz, target_twist_.wz, omega, dt_s);
+
+  // Park: once the target is neutral and the tracker tail has decayed inside
+  // the park window, snap to exactly zero so the phase stops advancing and
+  // the feet hold the planted home stance (no bobbing at centre sticks).
   const bool target_neutral = target_twist_.vx == 0.0f &&
                               target_twist_.vy == 0.0f &&
                               target_twist_.wz == 0.0f;
-  float slew_rate = kMinTwistSlewPerSec +
-                    (kMaxTwistSlewPerSec - kMinTwistSlewPerSec) * speed_;
-  if (target_neutral) slew_rate *= 1.5f;
-  const float max_delta = slew_rate * dt_s;
-  twist_.vx = slewToward(twist_.vx, target_twist_.vx, max_delta);
-  twist_.vy = slewToward(twist_.vy, target_twist_.vy, max_delta);
-  twist_.wz = slewToward(twist_.wz, target_twist_.wz, max_delta);
+  if (target_neutral &&
+      fabsf(twist_.vx) < kTwistParkPos && fabsf(twist_.vy) < kTwistParkPos &&
+      fabsf(twist_.wz) < kTwistParkPos &&
+      fabsf(twist_vel_.vx) < kTwistParkVel &&
+      fabsf(twist_vel_.vy) < kTwistParkVel &&
+      fabsf(twist_vel_.wz) < kTwistParkVel) {
+    twist_.vx = twist_.vy = twist_.wz = 0.0f;
+    twist_vel_.vx = twist_vel_.vy = twist_vel_.wz = 0.0f;
+  }
 
-  // A selected walking gait is still a planted stance when both the command
-  // and its filtered tail are centred. Phase stays parked, so RC jitter cannot
-  // make the robot cycle its feet in place after arming.
   const float command_scale =
       fmaxf(fabsf(twist_.vx), fmaxf(fabsf(twist_.vy), fabsf(twist_.wz)));
-  const bool motion_commanded = command_scale > 0.0f;
-  if (!motion_commanded) {
+  if (command_scale <= 0.0f) {
     for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
       FootTarget& foot = out.feet[leg];
       homeFoot(leg, foot.x_mm, foot.y_mm, foot.z_mm);
@@ -204,9 +244,11 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
     float L;     // longitudinal sweep in [-0.5, +0.5]
     float lift;  // swing Z lift (mm)
     if (leg_phase < beta) {
-      // Stance: foot moves +0.5 -> -0.5 (body pushed forward).
+      // Stance: LINEAR sweep +0.5 -> -0.5. Constant push velocity is what
+      // moves the body at constant speed; easing the stance would make the
+      // whole body surge twice per cycle.
       const float s = (beta > 0.0f) ? (leg_phase / beta) : 0.0f;
-      L = 0.5f - smoothstep(s);
+      L = 0.5f - s;
       lift = 0.0f;
       swing = false;
     } else {

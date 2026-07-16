@@ -45,15 +45,50 @@ constexpr float kSitFootZMm = -8.0f;    // body-down sit pose
 // Cycle frequency range mapped from the speed knob (0..255).
 constexpr float kMinFreqHz = 0.25f;
 constexpr float kMaxFreqHz = 1.20f;
-// Pot1 speed also controls how quickly the filtered body twist follows the
-// sticks. Full-scale response ranges from ~1.3 s to ~0.33 s.
-constexpr float kMinTwistSlewPerSec = 0.75f;
-constexpr float kMaxTwistSlewPerSec = 3.0f;
+// Critically-damped second-order twist tracking. The stick target drives a
+// spring-damper (poles at -omega), so the working twist has continuous
+// position AND velocity: S-curve response with zero acceleration steps, unlike
+// a linear slew. Pot1 speed maps the natural frequency (gentle .. brisk).
+constexpr float kMinTwistOmega = 3.0f;   // rad/s, ~1.5 s settle at speed 0
+constexpr float kMaxTwistOmega = 10.0f;  // rad/s, ~0.5 s settle at speed 1
+// Park thresholds: once the target is neutral and the tracker has decayed
+// inside these bounds it snaps to exactly zero so the gait phase parks.
+constexpr float kTwistParkPos = 0.03f;
+constexpr float kTwistParkVel = 0.20f;
+// First-order filter time constant for the live shape parameters (body
+// height, stride, step height, speed). RC pot/ADC noise lands on the filter
+// target, never directly on the servo goals.
+constexpr float kParamFilterTau = 0.25f;  // seconds
 // Ignore residual stick/transport noise around centre. A stepping gait with a
 // neutral command must hold the planted home stance rather than bob in place.
 constexpr float kMotionDeadband = 0.03f;
 // Keep a non-zero swing interval even when the host requests 100% stance.
 constexpr float kMaxDutyFactor = 0.95f;
+
+// RC body-height envelope for the Pot2 knob. Pot CENTRE is the neutral stance
+// height (the calibrated femur-up / tibia-vertical pose), turning down lowers
+// the body and turning up raises it. Both ends stay strictly inside the
+// leg-reach annulus at the planted home foot radius, so a height command can
+// NEVER engage the reach clamp -- which would slide the feet radially inward
+// off their footholds. Up-travel is short because the neutral stance already
+// stands near the model's maximum reachable height at that stance radius.
+constexpr float kRcBodyHeightMinMm = 24.0f;
+constexpr float kRcBodyHeightNeutralMm = 40.0f;
+constexpr float kRcBodyHeightMaxMm = 44.0f;
+
+// Map the Pot2 0..1 fraction onto the reach-safe height envelope, piecewise
+// linear about the neutral centre.
+inline float rcBodyHeightMm(float frac) {
+  if (frac < 0.0f) frac = 0.0f;
+  if (frac > 1.0f) frac = 1.0f;
+  return frac < 0.5f
+             ? kRcBodyHeightNeutralMm -
+                   (0.5f - frac) * 2.0f *
+                       (kRcBodyHeightNeutralMm - kRcBodyHeightMinMm)
+             : kRcBodyHeightNeutralMm +
+                   (frac - 0.5f) * 2.0f *
+                       (kRcBodyHeightMaxMm - kRcBodyHeightNeutralMm);
+}
 
 // Normalised body twist command. Each component is clamped to [-1, 1].
 struct BodyTwist {
@@ -100,13 +135,22 @@ class GaitEngine {
 
   config::GaitId gait_ = config::GaitId::Stand;
   float phase_ = 0.0f;
+  // Filtered live shape parameters (first-order lag toward the *_target_
+  // values below, advanced in update()). Seeded from the first configure().
   float stride_mm_ = 60.0f;
   float step_mm_ = 30.0f;
   float body_height_mm_ = 40.0f;
   float requested_duty_ = 0.5f;
   float speed_ = 0.5f;  // 0..1 normalised
+  // Raw configure() targets for the filtered parameters.
+  float stride_target_ = 60.0f;
+  float step_target_ = 30.0f;
+  float height_target_ = 40.0f;
+  float speed_target_ = 0.5f;
+  bool params_seeded_ = false;
   BodyTwist target_twist_;
-  BodyTwist twist_;  // slew-limited command used to generate foot targets
+  BodyTwist twist_;      // tracker position: the working twist
+  BodyTwist twist_vel_;  // tracker velocity state
 };
 
 }  // namespace gait

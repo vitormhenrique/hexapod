@@ -43,13 +43,19 @@
 
 namespace gait {
 
-// Goal-tick slew limiter range (ticks/second), mapped from the speed knob
-// (Pot1) in setParams. Bounds every per-servo goal change so mode entries,
-// body-height jumps and the arm-to-stance transition ramp instead of snapping.
-// The low end still comfortably covers slow-cadence walking sweeps; the high
-// end keeps fast tripod swings unclipped.
+// Goal-tick slew range (ticks/second), mapped from the speed knob (Pot1) in
+// setParams. Used ONLY for the arm-to-stance transition: after seedGoal()
+// each joint ramps from its actual present position until it reaches the
+// commanded trajectory once, then the limiter disengages so it can never
+// distort (clip) live gait trajectories into flatten-and-catch-up jerk.
 constexpr float kMinGoalSlewTicksPerSec = 600.0f;
 constexpr float kMaxGoalSlewTicksPerSec = 4500.0f;
+// First-order filter time constant for the commanded body pose. Stick noise
+// in translate/rotate modes lands on the filter target, not the servos.
+constexpr float kPoseFilterTau = 0.12f;  // seconds
+// Pose snap-to-neutral thresholds (imperceptible residuals).
+constexpr float kPoseSnapMm = 0.5f;
+constexpr float kPoseSnapRad = 0.005f;
 
 // One resolved joint goal: the DXL id + clamped goal tick, plus the leg/joint
 // slot and whether the tick was saturated against the configured servo travel.
@@ -111,8 +117,8 @@ class GaitPipeline {
 
   // Seed the goal slew limiter for one servo from its known present position
   // (raw ticks). Called on the motion-gate rising edge with fresh status reads
-  // so the first authorised goals ramp smoothly from where the servos actually
-  // are instead of snapping to the stance pose in a single write.
+  // so the joint ramps smoothly from where it actually is onto the commanded
+  // trajectory; once it reaches the trajectory the limiter disengages.
   void seedGoal(uint8_t id, uint16_t present_tick);
 
   // Advance the gait by dt_ms and fill `out` with goal ticks for every mapped
@@ -126,14 +132,15 @@ class GaitPipeline {
   GaitEngine engine_;
   BodyKinematics body_;
   dxl::ServoMap map_;
-  BodyPose pose_;          // body offset applied to planted feet (oha.3)
-  bool apply_pose_ = false;  // true while pose_ is non-neutral
-  // Per-slot goal slew state ((leg, joint) slot order). A slot becomes active
-  // on its first emitted/seeded tick; afterwards every goal change is bounded
-  // by goal_slew_ticks_per_s_ (set from the Pot1 speed knob via setParams).
+  BodyPose pose_target_;   // latest commanded body pose (raw, from RC/host)
+  BodyPose pose_;          // filtered pose actually applied to the feet
+  bool apply_pose_ = false;  // true while the filtered pose is non-neutral
+  // Per-slot arm-transition ramp state ((leg, joint) slot order). seedGoal()
+  // arms a slot; it disengages permanently once the joint reaches the live
+  // trajectory, so steady-state gait output is NEVER rate-clipped.
   float goal_slew_ticks_per_s_ = kMinGoalSlewTicksPerSec;
   uint16_t last_tick_[config::kNumServos] = {};
-  bool slew_active_[config::kNumServos] = {};
+  bool ramping_[config::kNumServos] = {};
 };
 
 }  // namespace gait

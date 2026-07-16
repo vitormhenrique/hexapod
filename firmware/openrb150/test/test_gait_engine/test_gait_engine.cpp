@@ -187,8 +187,11 @@ void test_swing_finishes_with_vertical_touchdown_approach() {
   ge.update(25, late);
   TEST_ASSERT_TRUE(early.feet[0].swing);
   TEST_ASSERT_TRUE(late.feet[0].swing);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, early.feet[0].x_mm, late.feet[0].x_mm);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, early.feet[0].y_mm, late.feet[0].y_mm);
+  // Horizontal placement is complete (sub-0.1 mm residual comes only from the
+  // twist tracker's converging tail scaling the stroke), while the foot is
+  // clearly descending.
+  TEST_ASSERT_FLOAT_WITHIN(0.1f, early.feet[0].x_mm, late.feet[0].x_mm);
+  TEST_ASSERT_FLOAT_WITHIN(0.1f, early.feet[0].y_mm, late.feet[0].y_mm);
   TEST_ASSERT_TRUE(late.feet[0].z_mm < early.feet[0].z_mm);
 }
 
@@ -292,6 +295,35 @@ void test_centering_command_settles_smoothly_then_parks_phase() {
   }
 }
 
+void test_rc_body_height_pot_neutral_at_center() {
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kRcBodyHeightNeutralMm, rcBodyHeightMm(0.5f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kRcBodyHeightMinMm, rcBodyHeightMm(0.0f));
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kRcBodyHeightMaxMm, rcBodyHeightMm(1.0f));
+  // Monotonic through the centre.
+  TEST_ASSERT_TRUE(rcBodyHeightMm(0.25f) < kRcBodyHeightNeutralMm);
+  TEST_ASSERT_TRUE(rcBodyHeightMm(0.75f) > kRcBodyHeightNeutralMm);
+}
+
+// The whole Pot2 sweep must keep the planted home-XY feet inside the reach
+// annulus WITHOUT engaging the reach clamp -- the clamp slides feet radially
+// inward, which is exactly the "feet don't stay planted" failure.
+void test_rc_body_height_envelope_keeps_feet_planted() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics bk(cfg);
+  for (int i = 0; i <= 10; ++i) {
+    const float frac = static_cast<float>(i) / 10.0f;
+    const float bh = rcBodyHeightMm(frac);
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      bool reach_limited = false;
+      IkResult r = bk.solveBodyLimited(leg, kHomeXy[leg][0], kHomeXy[leg][1],
+                                       -bh, reach_limited);
+      TEST_ASSERT_TRUE(r.reachable);
+      TEST_ASSERT_FALSE(reach_limited);
+    }
+  }
+}
+
 void test_all_gait_targets_are_ik_reachable() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
@@ -352,6 +384,8 @@ int main(int, char**) {
   RUN_TEST(test_centered_twist_holds_planted_home_stance);
   RUN_TEST(test_twist_is_slew_limited_by_speed_setting);
   RUN_TEST(test_centering_command_settles_smoothly_then_parks_phase);
+  RUN_TEST(test_rc_body_height_pot_neutral_at_center);
+  RUN_TEST(test_rc_body_height_envelope_keeps_feet_planted);
   RUN_TEST(test_all_gait_targets_are_ik_reachable);
   RUN_TEST(test_phase_wraps_and_advances);
   return UNITY_END();

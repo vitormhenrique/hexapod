@@ -1165,12 +1165,13 @@ void controlTask(void*) {
           body_pose.pitch += cc.trim_pitch;
         }
         // RC knobs drive the gait shape live (POT1 speed, POT2 body height,
-        // ENC1 stride, ENC2 step height). Map the bridge 0..1 scalars onto the
-        // config-validated safe ranges; duty stays on the host/config value.
-        const uint16_t bh = static_cast<uint16_t>(
-            config::kMinGaitBodyHeightMm +
-            height_frac *
-                (config::kMaxGaitBodyHeightMm - config::kMinGaitBodyHeightMm));
+        // ENC1 stride, ENC2 step height). POT2 maps through the reach-safe
+        // envelope: centre = neutral stance height, both ends inside the leg
+        // workspace so height changes keep the feet planted (no reach-clamp
+        // slide). Stride/step map onto the config-validated safe ranges; duty
+        // stays on the host/config value.
+        const uint16_t bh =
+            static_cast<uint16_t>(gait::rcBodyHeightMm(height_frac) + 0.5f);
         const uint16_t st =
             static_cast<uint16_t>(cc.stride * config::kMaxGaitStrideMm);
         const uint16_t sh =
