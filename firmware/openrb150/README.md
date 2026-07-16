@@ -52,11 +52,13 @@ If `pio` is not on PATH, use the bundled binary: `~/.platformio/penv/bin/pio`.
 
 ### Default stand pose
 
-With the default servo calibration, a planted stand commands each coxa to the
-MX-28 centre (`2048`), each femur slightly raised at about `2219` (`+15 deg`
-trim), and each tibia at about `1536` (`-45 deg` trim). A walking gait selected
-with centred gimbals holds this same planted pose; it does not advance gait
-phase or lift feet.
+With the default (zero-trim) calibration, a planted stand commands every servo
+to the MX-28 centre (`2048` / 180 deg). The mechanical build is designed so
+that all-centre IS the home pose: coxa at the middle, femur slightly up, tibia
+perpendicular to the floor. A walking gait selected with centred gimbals holds
+this same planted pose; it does not advance gait phase or lift feet. Per-servo
+`trim_ticks` are reserved for measured hardware calibration deltas only --
+never for posing.
 
 The final part of swing places the foot horizontally first and then descends
 vertically with zero touchdown velocity. Tibia pitch is not independently

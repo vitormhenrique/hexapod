@@ -306,7 +306,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(52627, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(13664, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {

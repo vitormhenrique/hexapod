@@ -53,14 +53,58 @@ void test_default_stand_uses_natural_joint_pose() {
   PipelineOutput out;
   pipe.update(20, out);
 
+  // The stance pose is commanded as real joint angles (leg_ik.h stance
+  // constants) with zero trims: coxa center 2048, femur +15 deg = 2219,
+  // tibia -45 deg = 1536. Ticks and telemetry honestly show the deviation.
   for (uint8_t i = 0; i < out.count; ++i) {
     const uint8_t joint = out.joints[i].joint;
     const uint16_t expected =
         joint == static_cast<uint8_t>(JointRole::Femur)
-            ? static_cast<uint16_t>(kServoCenterTick + kDefaultFemurTrimTicks)
+            ? static_cast<uint16_t>(2219)
             : (joint == static_cast<uint8_t>(JointRole::Tibia)
-                   ? static_cast<uint16_t>(kServoCenterTick +
-                                           kDefaultTibiaTrimTicks)
+                   ? static_cast<uint16_t>(1536)
+                   : kServoCenterTick);
+    TEST_ASSERT_UINT16_WITHIN(1, expected, out.joints[i].tick);
+  }
+}
+
+// Seeding present positions on the motion-gate rising edge makes the first
+// authorised goals ramp toward the stance instead of snapping in one write,
+// with the ramp rate bounded by the Pot1-driven goal slew limit.
+void test_seeded_goals_ramp_from_present_pose() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  // Speed 0 -> slowest slew (600 ticks/s = 12 ticks per 20 ms cycle).
+  pipe.setParams(40, 60, 30, 128, 0);
+
+  // All servos start 400 ticks below center (robot slumped after torque-off).
+  for (uint8_t id = 1; id <= kNumServos; ++id) {
+    pipe.seedGoal(id, static_cast<uint16_t>(kServoCenterTick - 400));
+  }
+
+  PipelineOutput first;
+  pipe.update(20, first);
+  const long max_step = 12;  // 600 ticks/s * 0.02 s
+  bool any_moving = false;
+  for (uint8_t i = 0; i < first.count; ++i) {
+    const long delta = static_cast<long>(first.joints[i].tick) -
+                       static_cast<long>(kServoCenterTick - 400);
+    TEST_ASSERT_TRUE(delta >= -max_step && delta <= max_step);
+    if (delta != 0) any_moving = true;
+  }
+  TEST_ASSERT_TRUE(any_moving);
+
+  // The ramp converges to the exact stance pose.
+  PipelineOutput out;
+  for (int i = 0; i < 400; ++i) pipe.update(20, out);
+  for (uint8_t i = 0; i < out.count; ++i) {
+    const uint8_t joint = out.joints[i].joint;
+    const uint16_t expected =
+        joint == static_cast<uint8_t>(JointRole::Femur)
+            ? static_cast<uint16_t>(2219)
+            : (joint == static_cast<uint8_t>(JointRole::Tibia)
+                   ? static_cast<uint16_t>(1536)
                    : kServoCenterTick);
     TEST_ASSERT_UINT16_WITHIN(1, expected, out.joints[i].tick);
   }
@@ -319,10 +363,11 @@ void test_body_pose_neutral_restores_walk_path() {
   pipe.setBodyPose(pose);
   PipelineOutput posed;
   pipe.update(20, posed);
-  // Now clear back to neutral.
+  // Now clear back to neutral. The goal slew limiter ramps the return (no
+  // snap), so run a few cycles and require convergence to the walk path.
   pipe.setBodyPose(BodyPose{});
   PipelineOutput cleared;
-  pipe.update(20, cleared);
+  for (int i = 0; i < 25; ++i) pipe.update(20, cleared);
 
   TEST_ASSERT_EQUAL_UINT8(want.count, cleared.count);
   for (uint8_t i = 0; i < want.count; ++i) {
@@ -356,6 +401,7 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
   RUN_TEST(test_default_stand_uses_natural_joint_pose);
+  RUN_TEST(test_seeded_goals_ramp_from_present_pose);
   RUN_TEST(test_joint_ids_match_default_servo_map);
   RUN_TEST(test_tripod_phase_advance_changes_goals);
   RUN_TEST(test_forward_twist_changes_goals_vs_neutral);

@@ -1203,6 +1203,16 @@ void controlTask(void*) {
 
       if (!prev_motion_gate) {
         g_pipeline.resetPhase();
+        // Seed the goal slew limiter from the latest present-position reads so
+        // the first authorised goals ramp from the servos' actual pose instead
+        // of snapping to the stance in one write. dxlTask refreshed these while
+        // preparing torque-on hold targets, so they are bench-fresh here.
+        for (uint8_t s = 0; s < g_servoStatusCount; ++s) {
+          if (!g_servoStatus[s].ok) continue;
+          const int32_t p = g_servoStatus[s].present_position;
+          if (p < 0 || p > config::kServoMaxTick) continue;
+          g_pipeline.seedGoal(g_servoStatus[s].id, static_cast<uint16_t>(p));
+        }
       }
       gait::PipelineOutput goals;
       watchdog::markControlProgress(80);

@@ -28,13 +28,16 @@ JOINTS_PER_LEG = 3
 NUM_SERVOS = NUM_LEGS * JOINTS_PER_LEG  # 18
 NUM_FOOT_SENSORS = 6
 ROBOT_NAME_LEN = 16  # incl. NUL terminator
-SCHEMA_VERSION = 2
+# v3: default joint trims are zero -- servo center (2048/180 deg) is the
+# mechanical home pose per the URDF all-zero model. The bump invalidates v2
+# payloads that carried the old hidden +171/-512 posture trims.
+SCHEMA_VERSION = 3
 
 SERVO_CENTER_TICK = 2048
 SERVO_MAX_TICK = 4095
 DEFAULT_COXA_TRIM_TICKS = 0
-DEFAULT_FEMUR_TRIM_TICKS = 171
-DEFAULT_TIBIA_TRIM_TICKS = -512
+DEFAULT_FEMUR_TRIM_TICKS = 0
+DEFAULT_TIBIA_TRIM_TICKS = 0
 TICKS_PER_REV = 4096.0
 TICKS_PER_DEG = TICKS_PER_REV / 360.0  # ~11.3778
 RAD_TO_DEG = 180.0 / math.pi

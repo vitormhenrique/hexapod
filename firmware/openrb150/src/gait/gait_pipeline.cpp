@@ -34,8 +34,13 @@ void GaitPipeline::setParams(uint16_t body_height_mm, uint16_t stride_len_mm,
   // to the config default.
   const config::GaitId g = engine_.gait();
   engine_.configure(d);
-  engine_.setGait(g);
-}
+  engine_.setGait(g);  // The speed knob (Pot1) also drives the goal slew limiter, so one remote
+  // control scales cadence, twist response AND how briskly the servos are
+  // allowed to chase their targets.
+  const float s = static_cast<float>(speed_x255) / 255.0f;
+  goal_slew_ticks_per_s_ =
+      kMinGoalSlewTicksPerSec +
+      (kMaxGoalSlewTicksPerSec - kMinGoalSlewTicksPerSec) * s;}
 
 void GaitPipeline::setTwist(float vx, float vy, float wz) {
   BodyTwist t;
@@ -52,6 +57,16 @@ void GaitPipeline::setBodyPose(const BodyPose& pose) {
 }
 
 void GaitPipeline::resetPhase() { engine_.reset(); }
+
+void GaitPipeline::seedGoal(uint8_t id, uint16_t present_tick) {
+  const config::ServoConfig* sc = map_.servoForId(id);
+  if (sc == nullptr) return;
+  const uint8_t slot =
+      static_cast<uint8_t>(sc->leg * config::kJointsPerLeg + sc->joint);
+  if (slot >= config::kNumServos) return;
+  last_tick_[slot] = present_tick;
+  slew_active_[slot] = true;
+}
 
 void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
   GaitOutput feet;
@@ -94,9 +109,28 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
         continue;  // no servo mapped for this slot; emit nothing
       }
       const dxl::JointCommand jc = map_.angleToTick(leg, j, angles[j]);
+      // Goal slew limiter: bound the per-cycle tick change so authorisations,
+      // mode entries and knob jumps ramp instead of snapping. Rate comes from
+      // the Pot1 speed knob (setParams); the very first frame with no seeded
+      // present position latches unlimited (nothing to ramp from).
+      const uint8_t slot =
+          static_cast<uint8_t>(leg * config::kJointsPerLeg + j);
+      uint16_t tick = jc.tick;
+      if (slew_active_[slot]) {
+        const float max_step =
+            goal_slew_ticks_per_s_ * static_cast<float>(dt_ms) / 1000.0f;
+        const long limit = max_step < 1.0f ? 1L : static_cast<long>(max_step);
+        const long prev = static_cast<long>(last_tick_[slot]);
+        long next = static_cast<long>(tick);
+        if (next > prev + limit) next = prev + limit;
+        if (next < prev - limit) next = prev - limit;
+        tick = static_cast<uint16_t>(next);
+      }
+      last_tick_[slot] = tick;
+      slew_active_[slot] = true;
       PipelineJoint& pj = out.joints[out.count++];
       pj.id = sc->id;
-      pj.tick = jc.tick;
+      pj.tick = tick;
       pj.leg = leg;
       pj.joint = j;
       pj.clamped = jc.clamped_low || jc.clamped_high;

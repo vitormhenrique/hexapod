@@ -43,6 +43,14 @@
 
 namespace gait {
 
+// Goal-tick slew limiter range (ticks/second), mapped from the speed knob
+// (Pot1) in setParams. Bounds every per-servo goal change so mode entries,
+// body-height jumps and the arm-to-stance transition ramp instead of snapping.
+// The low end still comfortably covers slow-cadence walking sweeps; the high
+// end keeps fast tripod swings unclipped.
+constexpr float kMinGoalSlewTicksPerSec = 600.0f;
+constexpr float kMaxGoalSlewTicksPerSec = 4500.0f;
+
 // One resolved joint goal: the DXL id + clamped goal tick, plus the leg/joint
 // slot and whether the tick was saturated against the configured servo travel.
 struct PipelineJoint {
@@ -101,6 +109,12 @@ class GaitPipeline {
   // Reset the gait cycle phase to 0 (e.g. when motion is (re)authorised).
   void resetPhase();
 
+  // Seed the goal slew limiter for one servo from its known present position
+  // (raw ticks). Called on the motion-gate rising edge with fresh status reads
+  // so the first authorised goals ramp smoothly from where the servos actually
+  // are instead of snapping to the stance pose in a single write.
+  void seedGoal(uint8_t id, uint16_t present_tick);
+
   // Advance the gait by dt_ms and fill `out` with goal ticks for every mapped
   // joint. Bounded, no heap, never blocks.
   void update(uint32_t dt_ms, PipelineOutput& out);
@@ -114,6 +128,12 @@ class GaitPipeline {
   dxl::ServoMap map_;
   BodyPose pose_;          // body offset applied to planted feet (oha.3)
   bool apply_pose_ = false;  // true while pose_ is non-neutral
+  // Per-slot goal slew state ((leg, joint) slot order). A slot becomes active
+  // on its first emitted/seeded tick; afterwards every goal change is bounded
+  // by goal_slew_ticks_per_s_ (set from the Pot1 speed knob via setParams).
+  float goal_slew_ticks_per_s_ = kMinGoalSlewTicksPerSec;
+  uint16_t last_tick_[config::kNumServos] = {};
+  bool slew_active_[config::kNumServos] = {};
 };
 
 }  // namespace gait

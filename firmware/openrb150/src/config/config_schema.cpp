@@ -118,6 +118,8 @@ void defaultRobotConfig(RobotConfig& cfg) {
     // All legs share a +1 servo sign; hardware validation showed the right
     // legs (2, 3, 4) were mirrored the wrong way under the old -1 rule.
     s.sign = 1;
+    // Zero trim by default: servo center (2048) is the mechanical home pose.
+    // Trims exist only for measured per-servo calibration deltas.
     if (joint == static_cast<uint8_t>(JointRole::Femur)) {
       s.trim_ticks = kDefaultFemurTrimTicks;
     } else if (joint == static_cast<uint8_t>(JointRole::Tibia)) {

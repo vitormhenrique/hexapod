@@ -29,6 +29,17 @@ namespace gait {
 constexpr float kHomeRadiusMm = 127.0f;
 constexpr float kHomeFootZMm = -44.55f;
 
+// Default stance pose, expressed as commanded joint angles relative to servo
+// center (URDF zero). The URDF all-zero pose is the splayed flat assembly
+// posture -- NOT a standing pose -- so the working stance lifts the femur and
+// folds the tibia to vertical. These are applied as real commanded angles
+// through solve(), so ticks and telemetry honestly show the deviation from
+// 180 deg (femur ~2219, tibia ~1536). ServoConfig::trim_ticks must stay
+// reserved for per-servo hardware calibration deltas and never encode pose.
+constexpr float kStanceCoxaRad = 0.0f;
+constexpr float kStanceFemurRad = 0.2617994f;   // +15 deg, femur slightly up
+constexpr float kStanceTibiaRad = -0.7853982f;  // -45 deg, tibia vertical
+
 // Reachability-aware stride limit (lmt.14): generated foot targets are pulled
 // radially inward by clampToReach() so the planar reach distance never exceeds
 // this fraction of the full two-link extension (l2 + l3). The documented home

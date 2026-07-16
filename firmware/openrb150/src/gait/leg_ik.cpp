@@ -60,9 +60,13 @@ IkResult LegIk::solveRaw(float x_mm, float y_mm, float z_mm) const {
 
 IkResult LegIk::solve(float x_mm, float y_mm, float z_mm) const {
   IkResult r = solveRaw(x_mm, y_mm, z_mm);
-  // Offset to URDF-zero-relative (home foot -> 0).
-  r.femur -= femur_rest_;
-  r.tibia -= tibia_rest_;
+  // Offset so the home foot maps to the default stance pose: rest angles are
+  // removed (home -> 0) and the commanded stance angles are added on top. The
+  // stance therefore lives in the default joint angles -- visible in ticks and
+  // telemetry -- never in hidden servo trims.
+  r.coxa += kStanceCoxaRad;
+  r.femur = r.femur - femur_rest_ + kStanceFemurRad;
+  r.tibia = r.tibia - tibia_rest_ + kStanceTibiaRad;
   return r;
 }
 

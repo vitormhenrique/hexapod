@@ -46,14 +46,23 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 // Schema version for the serialized payload. Bump on any layout change so the
 // loader can reject configs it does not understand and fall back to defaults.
 // v2 (lmt.11): added the BodyGeometry block (home stance + coxa lift).
-constexpr uint16_t kSchemaVersion = 2;
+// v3: default joint trims returned to zero -- the mechanical build's servo
+//     center (tick 2048 / 180 deg) IS the home pose (coxa middle, femur
+//     slightly up, tibia perpendicular; see the URDF all-zero pose). The bump
+//     forces a stored v2 config carrying the old hidden +171/-512 trims to be
+//     rejected at boot so the robot falls back to these corrected defaults.
+constexpr uint16_t kSchemaVersion = 3;
 
 // MX-28: 4096 ticks/rev, center 180deg = tick 2048.
 constexpr uint16_t kServoCenterTick = 2048;
 constexpr uint16_t kServoMaxTick = 4095;
+// Default per-joint trims are zero: physical assembly at all-center already
+// produces the desired stance, and any non-zero default silently desyncs
+// commanded ticks from what the DYNAMIXEL tools show. Per-servo trims remain
+// available in ServoConfig for real hardware calibration deltas only.
 constexpr int16_t kDefaultCoxaTrimTicks = 0;
-constexpr int16_t kDefaultFemurTrimTicks = 171;   // +15 degrees
-constexpr int16_t kDefaultTibiaTrimTicks = -512;  // -45 degrees
+constexpr int16_t kDefaultFemurTrimTicks = 0;
+constexpr int16_t kDefaultTibiaTrimTicks = 0;
 
 // ---------------------------------------------------------------------------
 // Enums.

@@ -34,13 +34,16 @@ constexpr Vec3 kHomeFootB[kNumLegs] = {
 
 // ---- LegIk ---------------------------------------------------------------
 
-void test_home_foot_maps_to_zero_angles() {
+void test_home_foot_maps_to_stance_angles() {
   LegIk ik(kL1, kL2, kL3);
   IkResult r = ik.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm);
   TEST_ASSERT_TRUE(r.reachable);
-  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, r.coxa);
-  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, r.femur);
-  TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, r.tibia);
+  // The home foot commands the default stance pose (femur up, tibia vertical),
+  // applied as real joint angles -- URDF zero is the splayed flat assembly
+  // pose, not a standing posture.
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kStanceCoxaRad, r.coxa);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kStanceFemurRad, r.femur);
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, kStanceTibiaRad, r.tibia);
 }
 
 void test_coxa_yaw_from_lateral_offset() {
@@ -59,10 +62,12 @@ void test_fk_round_trip_nominal() {
   IkResult r = ik.solve(tx, ty, tz);
   TEST_ASSERT_TRUE(r.reachable);
 
-  // Reconstruct raw angles and run FK; must reproduce the coxa-frame target.
+  // Reconstruct raw angles (remove the stance offsets, restore rest) and run
+  // FK; must reproduce the coxa-frame target.
   float fx, fy, fz;
-  ik.forwardRaw(r.coxa, r.femur + ik.femurRest(), r.tibia + ik.tibiaRest(), fx,
-                fy, fz);
+  ik.forwardRaw(r.coxa - kStanceCoxaRad,
+                r.femur - kStanceFemurRad + ik.femurRest(),
+                r.tibia - kStanceTibiaRad + ik.tibiaRest(), fx, fy, fz);
   TEST_ASSERT_FLOAT_WITHIN(0.02f, tx, fx);
   TEST_ASSERT_FLOAT_WITHIN(0.02f, ty, fy);
   TEST_ASSERT_FLOAT_WITHIN(0.02f, tz, fz);
@@ -74,8 +79,8 @@ void test_edge_full_extension_is_reachable_boundary() {
   const float x = kL1 + (kL2 + kL3);  // 147.45
   IkResult r = ik.solve(x, 0.0f, 0.0f);
   TEST_ASSERT_TRUE(r.reachable);
-  // Knee straight: raw tibia ~ 0 -> relative tibia ~ -tibiaRest.
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, -ik.tibiaRest(), r.tibia);
+  // Knee straight: raw tibia ~ 0 -> relative tibia ~ stance - rest.
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kStanceTibiaRad - ik.tibiaRest(), r.tibia);
 }
 
 void test_edge_too_far_is_unreachable() {
@@ -96,8 +101,8 @@ void test_unreachable_still_returns_clamped_angles() {
   LegIk ik(kL1, kL2, kL3);
   IkResult r = ik.solve(400.0f, 0.0f, 0.0f);  // way out
   TEST_ASSERT_FALSE(r.reachable);
-  // acos clamps cos_k to 1 -> raw tibia 0 -> relative tibia = -tibiaRest.
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, -ik.tibiaRest(), r.tibia);
+  // acos clamps cos_k to 1 -> raw tibia 0 -> relative tibia = stance - rest.
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kStanceTibiaRad - ik.tibiaRest(), r.tibia);
   // No NaNs leaked.
   TEST_ASSERT_FALSE(isnan(r.femur));
   TEST_ASSERT_FALSE(isnan(r.tibia));
@@ -111,19 +116,21 @@ void test_leg_ik_home_params_shift_rest_offset() {
   LegIk def(kL1, kL2, kL3);  // default home (kHomeRadiusMm, kHomeFootZMm)
   LegIk low(kL1, kL2, kL3, kHomeRadiusMm, kHomeFootZMm - 10.0f);  // home 10 mm down
 
-  // Default maps the documented home foot to ~zero.
+  // Default maps the documented home foot to the stance pose.
   IkResult d = def.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, d.femur);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, d.tibia);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kStanceFemurRad, d.femur);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kStanceTibiaRad, d.tibia);
 
-  // The lowered-home solver reads the SAME foot as non-zero (its zero moved).
+  // The lowered-home solver reads the SAME foot away from the stance pose
+  // (its reference moved).
   IkResult l = low.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm);
-  TEST_ASSERT_TRUE(fabsf(l.femur) > 1e-3f || fabsf(l.tibia) > 1e-3f);
+  TEST_ASSERT_TRUE(fabsf(l.femur - kStanceFemurRad) > 1e-3f ||
+                   fabsf(l.tibia - kStanceTibiaRad) > 1e-3f);
 
-  // ...and maps ITS configured home (10 mm lower) to ~zero.
+  // ...and maps ITS configured home (10 mm lower) to the stance pose.
   IkResult l0 = low.solve(kHomeRadiusMm, 0.0f, kHomeFootZMm - 10.0f);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, l0.femur);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 0.0f, l0.tibia);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kStanceFemurRad, l0.femur);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kStanceTibiaRad, l0.tibia);
 }
 
 // ---- clampToReach (lmt.14 reachability-aware stride limiting) -------------
@@ -200,7 +207,7 @@ void test_body_to_coxa_maps_home_to_radial() {
   }
 }
 
-void test_solve_body_home_is_near_zero_all_legs() {
+void test_solve_body_home_is_stance_all_legs() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
   BodyKinematics bk(cfg);
@@ -209,9 +216,9 @@ void test_solve_body_home_is_near_zero_all_legs() {
     IkResult r = bk.solveBody(leg, kHomeFootB[leg].x, kHomeFootB[leg].y,
                               kHomeFootB[leg].z);
     TEST_ASSERT_TRUE(r.reachable);
-    TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.0f, r.coxa);
-    TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.0f, r.femur);
-    TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.0f, r.tibia);
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, kStanceCoxaRad, r.coxa);
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, kStanceFemurRad, r.femur);
+    TEST_ASSERT_FLOAT_WITHIN(0.02f, kStanceTibiaRad, r.tibia);
   }
 }
 
@@ -350,7 +357,7 @@ void test_solve_body_pose_limited_recovers_extreme_pose() {
 
 int main(int, char**) {
   UNITY_BEGIN();
-  RUN_TEST(test_home_foot_maps_to_zero_angles);
+  RUN_TEST(test_home_foot_maps_to_stance_angles);
   RUN_TEST(test_coxa_yaw_from_lateral_offset);
   RUN_TEST(test_fk_round_trip_nominal);
   RUN_TEST(test_edge_full_extension_is_reachable_boundary);
@@ -363,7 +370,7 @@ int main(int, char**) {
   RUN_TEST(test_clamp_reach_preserves_hip_yaw);
   RUN_TEST(test_clamp_reach_pushes_inner_unreachable_outward);
   RUN_TEST(test_body_to_coxa_maps_home_to_radial);
-  RUN_TEST(test_solve_body_home_is_near_zero_all_legs);
+  RUN_TEST(test_solve_body_home_is_stance_all_legs);
   RUN_TEST(test_apply_body_pose_identity);
   RUN_TEST(test_apply_body_pose_pure_yaw);
   RUN_TEST(test_apply_body_pose_translation);
