@@ -120,19 +120,39 @@ void test_forward_twist_changes_goals_vs_neutral() {
   neutral.setGait(GaitId::Tripod);
   neutral.setTwist(0.0f, 0.0f, 0.0f);
   PipelineOutput z;
-  neutral.update(0, z);
+  neutral.update(20, z);
 
   GaitPipeline forward(cfg);
   forward.setGait(GaitId::Tripod);
   forward.setTwist(1.0f, 0.0f, 0.0f);
   PipelineOutput f;
-  forward.update(0, f);
+  forward.update(20, f);
 
   bool changed = false;
   for (uint8_t i = 0; i < z.count; ++i) {
     if (z.joints[i].tick != f.joints[i].tick) changed = true;
   }
   TEST_ASSERT_TRUE(changed);
+}
+
+void test_centered_walking_gait_keeps_home_goals_stable() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Tripod);
+  pipe.setTwist(0.0f, 0.0f, 0.0f);
+
+  PipelineOutput first;
+  pipe.update(20, first);
+  for (int i = 0; i < 50; ++i) {
+    PipelineOutput later;
+    pipe.update(20, later);
+    TEST_ASSERT_EQUAL_UINT8(first.count, later.count);
+    for (uint8_t joint = 0; joint < first.count; ++joint) {
+      TEST_ASSERT_EQUAL_UINT8(first.joints[joint].id, later.joints[joint].id);
+      TEST_ASSERT_EQUAL_UINT16(first.joints[joint].tick,
+                               later.joints[joint].tick);
+    }
+  }
 }
 
 // A narrow servo travel saturates the goal tick and the clamp flag is reported
@@ -339,6 +359,7 @@ int main(int, char**) {
   RUN_TEST(test_joint_ids_match_default_servo_map);
   RUN_TEST(test_tripod_phase_advance_changes_goals);
   RUN_TEST(test_forward_twist_changes_goals_vs_neutral);
+  RUN_TEST(test_centered_walking_gait_keeps_home_goals_stable);
   RUN_TEST(test_narrow_travel_sets_clamp_flag);
   RUN_TEST(test_set_params_preserves_selected_gait);
   RUN_TEST(test_reconfigure_rebuilds_cached_body_ik);

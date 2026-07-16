@@ -37,6 +37,9 @@ Notes:
 - Gimbals are bipolar: centre = 0, with a 5% deadband to kill jitter.
 - Walk-mode outputs are normalised twist in `[-1, 1]`; the gait engine scales
   them to real body velocity.
+- Centred Walk-mode gimbals hold all feet at the planted home stance and park
+  gait phase. Direction and magnitude changes are slew-limited rather than
+  applied as instantaneous foot-target jumps.
 - Body-pose outputs are clamped to the safe envelope (`±50 mm` translation,
   `±25°` rotation — `poselim::kMaxTransMm` / `kMaxRotRad`) so a stick command can
   never exceed what `SET_BODY_POSE` accepts over USB.
@@ -48,13 +51,15 @@ These are read in **every** mode and continuously shape the gait, normalised to
 
 | Control | CRSF ch | Type | Hexapod parameter |
 |---------|:------:|------|-------------------|
-| POT 1 | CH5 | absolute | **Speed** scalar (`speed`) |
+| POT 1 | CH5 | absolute | **Speed and response** scalar (`speed`) |
 | POT 2 | CH6 | absolute | **Body height** (`body_height`) |
 | ENC 1 | CH7 | relative trim | **Stride** length (`stride`) |
 | ENC 2 | CH8 | relative trim | **Step height** / foot clearance (`step_height`) |
 
 Encoders integrate their relative delta into a 0..1 trim
 (`kEncoderCountsFullScale = 1024` counts = full sweep); pots are absolute.
+POT 1 controls both gait cadence and the twist slew rate: lower settings give a
+gentler full-stick response, while higher settings accelerate more quickly.
 
 ---
 

@@ -9,6 +9,10 @@ namespace gait {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
+// Finish horizontal placement before touchdown so the final swing segment is
+// a vertical descent. This reduces scuffing and gives the calibrated tibia
+// home geometry the best chance to meet the floor near-perpendicularly.
+constexpr float kSwingPlacementFraction = 0.70f;
 
 // Home foot XY in body frame B (mm), IK ref section 13 HOME_FOOT. The Z comes
 // from the configured body height.
@@ -72,6 +76,15 @@ inline float frac01(float v) {
   return v;
 }
 
+inline float smoothstep(float v) { return v * v * (3.0f - 2.0f * v); }
+
+inline float slewToward(float current, float target, float max_delta) {
+  const float delta = target - current;
+  if (delta > max_delta) return current + max_delta;
+  if (delta < -max_delta) return current - max_delta;
+  return target;
+}
+
 }  // namespace
 
 GaitEngine::GaitEngine() {}
@@ -89,9 +102,12 @@ void GaitEngine::configure(const config::GaitDefaults& d) {
 void GaitEngine::setGait(config::GaitId g) { gait_ = g; }
 
 void GaitEngine::setTwist(const BodyTwist& t) {
-  twist_.vx = clampf(t.vx, -1.0f, 1.0f);
-  twist_.vy = clampf(t.vy, -1.0f, 1.0f);
-  twist_.wz = clampf(t.wz, -1.0f, 1.0f);
+  target_twist_.vx = clampf(t.vx, -1.0f, 1.0f);
+  target_twist_.vy = clampf(t.vy, -1.0f, 1.0f);
+  target_twist_.wz = clampf(t.wz, -1.0f, 1.0f);
+  if (fabsf(target_twist_.vx) <= kMotionDeadband) target_twist_.vx = 0.0f;
+  if (fabsf(target_twist_.vy) <= kMotionDeadband) target_twist_.vy = 0.0f;
+  if (fabsf(target_twist_.wz) <= kMotionDeadband) target_twist_.wz = 0.0f;
 }
 
 void GaitEngine::reset() { phase_ = 0.0f; }
@@ -128,9 +144,39 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
     return;
   }
 
+  // Slew the working twist toward the latest stick/host target. Pot1 controls
+  // this response together with cadence: low speed is deliberately gentle;
+  // high speed remains responsive. Returning to centre uses a modestly faster
+  // rate so the robot settles promptly without an abrupt target jump.
+  const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
+  const bool target_neutral = target_twist_.vx == 0.0f &&
+                              target_twist_.vy == 0.0f &&
+                              target_twist_.wz == 0.0f;
+  float slew_rate = kMinTwistSlewPerSec +
+                    (kMaxTwistSlewPerSec - kMinTwistSlewPerSec) * speed_;
+  if (target_neutral) slew_rate *= 1.5f;
+  const float max_delta = slew_rate * dt_s;
+  twist_.vx = slewToward(twist_.vx, target_twist_.vx, max_delta);
+  twist_.vy = slewToward(twist_.vy, target_twist_.vy, max_delta);
+  twist_.wz = slewToward(twist_.wz, target_twist_.wz, max_delta);
+
+  // A selected walking gait is still a planted stance when both the command
+  // and its filtered tail are centred. Phase stays parked, so RC jitter cannot
+  // make the robot cycle its feet in place after arming.
+  const float command_scale =
+      fmaxf(fabsf(twist_.vx), fmaxf(fabsf(twist_.vy), fabsf(twist_.wz)));
+  const bool motion_commanded = command_scale > 0.0f;
+  if (!motion_commanded) {
+    for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+      FootTarget& foot = out.feet[leg];
+      homeFoot(leg, foot.x_mm, foot.y_mm, foot.z_mm);
+      foot.swing = false;
+    }
+    return;
+  }
+
   // Advance cycle phase.
   const float freq = kMinFreqHz + (kMaxFreqHz - kMinFreqHz) * speed_;
-  const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
   phase_ = frac01(phase_ + freq * dt_s);
 
   const float beta = dutyFactor();
@@ -160,14 +206,19 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
     if (leg_phase < beta) {
       // Stance: foot moves +0.5 -> -0.5 (body pushed forward).
       const float s = (beta > 0.0f) ? (leg_phase / beta) : 0.0f;
-      L = 0.5f - s;
+      L = 0.5f - smoothstep(s);
       lift = 0.0f;
       swing = false;
     } else {
-      // Swing: foot returns -0.5 -> +0.5 with a sinusoidal lift.
+      // Swing: zero-velocity easing avoids horizontal reversals and a squared
+      // sine gives zero vertical velocity at liftoff and touchdown. Horizontal
+      // placement finishes early, leaving a vertical final approach.
       const float u = (leg_phase - beta) / swing_span;
-      L = -0.5f + u;
-      lift = step_mm_ * sinf(kPi * u);
+      const float placement_u =
+          clampf(u / kSwingPlacementFraction, 0.0f, 1.0f);
+      L = -0.5f + smoothstep(placement_u);
+      const float lift_wave = sinf(kPi * u);
+      lift = step_mm_ * command_scale * lift_wave * lift_wave;
       swing = true;
     }
 

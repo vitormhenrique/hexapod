@@ -45,6 +45,13 @@ constexpr float kSitFootZMm = -8.0f;    // body-down sit pose
 // Cycle frequency range mapped from the speed knob (0..255).
 constexpr float kMinFreqHz = 0.25f;
 constexpr float kMaxFreqHz = 1.20f;
+// Pot1 speed also controls how quickly the filtered body twist follows the
+// sticks. Full-scale response ranges from ~1.3 s to ~0.33 s.
+constexpr float kMinTwistSlewPerSec = 0.75f;
+constexpr float kMaxTwistSlewPerSec = 3.0f;
+// Ignore residual stick/transport noise around centre. A stepping gait with a
+// neutral command must hold the planted home stance rather than bob in place.
+constexpr float kMotionDeadband = 0.03f;
 // Keep a non-zero swing interval even when the host requests 100% stance.
 constexpr float kMaxDutyFactor = 0.95f;
 
@@ -98,7 +105,8 @@ class GaitEngine {
   float body_height_mm_ = 40.0f;
   float requested_duty_ = 0.5f;
   float speed_ = 0.5f;  // 0..1 normalised
-  BodyTwist twist_;
+  BodyTwist target_twist_;
+  BodyTwist twist_;  // slew-limited command used to generate foot targets
 };
 
 }  // namespace gait

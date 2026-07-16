@@ -50,6 +50,19 @@ If `pio` is not on PATH, use the bundled binary: `~/.platformio/penv/bin/pio`.
   Servos are unpowered until firmware explicitly arms them.
 - Logic is 3.3 V and **not 5 V tolerant**. Do not run servos from USB power.
 
+### Default stand pose
+
+With the default servo calibration, a planted stand commands each coxa to the
+MX-28 centre (`2048`), each femur slightly raised at about `2219` (`+15 deg`
+trim), and each tibia at about `1536` (`-45 deg` trim). A walking gait selected
+with centred gimbals holds this same planted pose; it does not advance gait
+phase or lift feet.
+
+The final part of swing places the foot horizontally first and then descends
+vertically with zero touchdown velocity. Tibia pitch is not independently
+controllable because the 3-DOF leg uses coxa yaw plus a two-link point-foot IK;
+the calibrated home geometry supplies the near-perpendicular contact posture.
+
 ## Layout
 
 ```text
