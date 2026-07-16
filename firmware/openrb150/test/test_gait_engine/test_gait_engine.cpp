@@ -7,6 +7,7 @@
 #include "../../src/config/config_schema.h"
 #include "../../src/gait/body_ik.h"
 #include "../../src/gait/gait_engine.h"
+#include "../../src/gait/leg_ik.h"
 
 using namespace gait;
 using namespace config;
@@ -317,10 +318,10 @@ void test_rc_body_height_pot_neutral_at_center() {
   TEST_ASSERT_TRUE(rcBodyHeightMm(0.75f) > kRcBodyHeightNeutralMm);
 }
 
-// The whole Pot2 sweep rides the constant-tibia-orientation locus: every
-// stance target must stay reachable WITHOUT engaging the reach clamp (the
-// clamp would drag feet off the locus), and the radius must shrink as the
-// body rises (legs reconfigure, not just the knee).
+// The whole Pot2 sweep rides the URDF-derived constant distal-link orientation
+// locus: every stance target must stay reachable WITHOUT engaging the reach
+// clamp (the clamp would drag feet off the locus), and the radius must shrink
+// as the body rises (legs reconfigure, not just the knee).
 void test_rc_body_height_envelope_keeps_feet_reachable() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
@@ -348,6 +349,41 @@ void test_rc_body_height_envelope_keeps_feet_reachable() {
     // pure +X mid-right leg, so its x is the hip-relative radius + mount).
     TEST_ASSERT_TRUE(out.feet[2].x_mm < prev_r);
     prev_r = out.feet[2].x_mm;
+  }
+}
+
+void test_rc_body_height_keeps_urdf_distal_direction() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics bk(cfg);
+  LegIk ik(cfg.links.coxa_cmm / 100.0f, cfg.links.femur_cmm / 100.0f,
+           cfg.links.tibia_cmm / 100.0f, cfg.geometry.home_radius_cmm / 100.0f,
+           cfg.geometry.home_foot_z_cmm / 100.0f);
+
+  float neutral_direction = 0.0f;
+  for (int i = 0; i <= 10; ++i) {
+    const float fraction = static_cast<float>(i) / 10.0f;
+    const float height = rcBodyHeightMm(fraction);
+    GaitEngine ge;
+    GaitDefaults d = defaultGait();
+    d.gait = static_cast<uint8_t>(GaitId::Stand);
+    d.body_height_mm = static_cast<uint16_t>(height + 0.5f);
+    ge.configure(d);
+    GaitOutput out;
+    ge.update(20, out);
+
+    // Leg 3 is the middle-right leg, whose stance vector is purely radial in
+    // the body frame. Reconstruct the raw URDF planar angles from the command.
+    IkResult result = bk.solveBody(2, out.feet[2].x_mm, out.feet[2].y_mm,
+                                   out.feet[2].z_mm);
+    TEST_ASSERT_TRUE(result.reachable);
+    const float direction = result.femur + ik.femurRest() + result.tibia +
+                            ik.tibiaRest();
+    if (i == 0) {
+      neutral_direction = direction;
+    } else {
+      TEST_ASSERT_FLOAT_WITHIN(1e-3f, neutral_direction, direction);
+    }
   }
 }
 
@@ -413,6 +449,7 @@ int main(int, char**) {
   RUN_TEST(test_centering_command_settles_smoothly_then_parks_phase);
   RUN_TEST(test_rc_body_height_pot_neutral_at_center);
   RUN_TEST(test_rc_body_height_envelope_keeps_feet_reachable);
+  RUN_TEST(test_rc_body_height_keeps_urdf_distal_direction);
   RUN_TEST(test_all_gait_targets_are_ik_reachable);
   RUN_TEST(test_phase_wraps_and_advances);
   return UNITY_END();

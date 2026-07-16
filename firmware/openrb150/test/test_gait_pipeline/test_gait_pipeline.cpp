@@ -53,18 +53,11 @@ void test_default_stand_uses_natural_joint_pose() {
   PipelineOutput out;
   pipe.update(20, out);
 
-  // The stance pose is commanded as real joint angles (leg_ik.h stance
-  // constants) with zero trims: coxa center 2048, femur +15 deg = 2219,
-  // tibia -45 deg = 1536. Ticks and telemetry honestly show the deviation.
+  // The documented URDF home foot maps to the calibrated servo centre. Pot2
+  // changes the foot target on the constrained stance locus; it must not add
+  // another joint-space posture offset after IK.
   for (uint8_t i = 0; i < out.count; ++i) {
-    const uint8_t joint = out.joints[i].joint;
-    const uint16_t expected =
-        joint == static_cast<uint8_t>(JointRole::Femur)
-            ? static_cast<uint16_t>(2219)
-            : (joint == static_cast<uint8_t>(JointRole::Tibia)
-                   ? static_cast<uint16_t>(1536)
-                   : kServoCenterTick);
-    TEST_ASSERT_UINT16_WITHIN(1, expected, out.joints[i].tick);
+    TEST_ASSERT_UINT16_WITHIN(1, kServoCenterTick, out.joints[i].tick);
   }
 }
 
@@ -95,18 +88,11 @@ void test_seeded_goals_ramp_from_present_pose() {
   }
   TEST_ASSERT_TRUE(any_moving);
 
-  // The ramp converges to the exact stance pose.
+  // The ramp converges to the exact URDF home pose.
   PipelineOutput out;
   for (int i = 0; i < 400; ++i) pipe.update(20, out);
   for (uint8_t i = 0; i < out.count; ++i) {
-    const uint8_t joint = out.joints[i].joint;
-    const uint16_t expected =
-        joint == static_cast<uint8_t>(JointRole::Femur)
-            ? static_cast<uint16_t>(2219)
-            : (joint == static_cast<uint8_t>(JointRole::Tibia)
-                   ? static_cast<uint16_t>(1536)
-                   : kServoCenterTick);
-    TEST_ASSERT_UINT16_WITHIN(1, expected, out.joints[i].tick);
+    TEST_ASSERT_UINT16_WITHIN(1, kServoCenterTick, out.joints[i].tick);
   }
 }
 
