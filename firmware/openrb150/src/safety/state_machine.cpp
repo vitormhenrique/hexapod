@@ -25,6 +25,22 @@ inline bool srcIs(uint8_t src, CommandSource want) {
   return src == static_cast<uint8_t>(want);
 }
 
+// States eligible for the idle auto-disarm: armed, torque-holding, operator-
+// driven. ArmingChecks has its own bounded timeout; MacMaintenance sessions
+// are governed by the maintenance-lock TTL; PassivePoseStream is torque-off
+// by contract and explicitly entered.
+inline bool idleDisarmEligible(State s) {
+  switch (s) {
+    case State::StandReady:
+    case State::RcManual:
+    case State::ContactTerrain:
+    case State::JetsonAssisted:
+      return true;
+    default:
+      return false;
+  }
+}
+
 }  // namespace
 
 bool stateAllowsMotion(State s) {
@@ -58,6 +74,7 @@ void StateMachine::reset() {
   batt_low_active_ = false;
   batt_low_since_ms_ = 0;
   arming_since_ms_ = 0;
+  last_activity_ms_ = 0;
   arm_release_required_ = true;
 }
 
@@ -152,6 +169,22 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
   }
 
   // --- 3. Normal progression. ----------------------------------------------
+  // Idle auto-disarm (power saving): an armed robot holding torque with no
+  // motion activity for idle_disarm_ms drops to Disarmed, which cuts DXL
+  // power via the state policy. Entering an armed state or any activity
+  // refreshes the timer; re-powering requires a full re-arm (the arm switch
+  // release edge is enforced below) or an explicit maintenance power command.
+  if (in.motion_active || !idleDisarmEligible(state_)) {
+    last_activity_ms_ = now_ms;
+  }
+  if (params_.idle_disarm_ms != 0 && idleDisarmEligible(state_) &&
+      (now_ms - last_activity_ms_) >= params_.idle_disarm_ms) {
+    arm_release_required_ = true;
+    state_ = State::Disarmed;
+    reason_ = FaultReason::None;
+    return state_;
+  }
+
   // Host force-disarm: a SET_ARMING(disarm) drops any operational/maintenance/
   // passive state straight back to Disarmed. It only ever reduces authority, so
   // it is honored unconditionally (RC still owns re-arming).

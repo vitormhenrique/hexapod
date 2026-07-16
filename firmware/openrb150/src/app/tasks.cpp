@@ -951,6 +951,28 @@ void controlTask(void*) {
     si.contact_enabled = contact_feature_on;
     si.contact_confident =
         contact_feature_on && (confident_feet >= kMinStanceFeet);
+    // Idle auto-disarm activity feed: any deliberate RC stick/pose input, a
+    // running trick, or a fresh host motion intent counts as activity. Quiet
+    // cycles let the FSM's idle timer expire, dropping an untouched armed
+    // robot to Disarmed (cutting DXL power) instead of holding torque on 18
+    // servos indefinitely.
+    {
+      const controller::ControllerCommand cc = g_ctrlCmd;
+      const bool rc_active =
+          cc.valid &&
+          (fabsf(cc.twist_vx) > 0.05f || fabsf(cc.twist_vy) > 0.05f ||
+           fabsf(cc.twist_wz) > 0.05f || fabsf(cc.pose_x_mm) > 2.0f ||
+           fabsf(cc.pose_y_mm) > 2.0f || fabsf(cc.pose_z_mm) > 2.0f ||
+           fabsf(cc.pose_roll) > 0.02f || fabsf(cc.pose_pitch) > 0.02f ||
+           fabsf(cc.pose_yaw) > 0.02f ||
+           cc.trick != controller::TrickId::None);
+      static uint32_t idle_seen_intent_seq = 0xFFFFFFFFu;
+      const uint32_t intent_seq = g_motionApi.intent().seq;
+      const bool host_active = intent_seq != idle_seen_intent_seq;
+      idle_seen_intent_seq = intent_seq;
+      si.motion_active =
+          rc_active || host_active || g_trickEngine.output().active;
+    }
     // Honor a host CLEAR_FAULT pulse before advancing the machine.
     if (g_controlApi.consumeClearFault()) {
       g_stateMachine.requestClearFault();

@@ -50,6 +50,13 @@ struct StateParams {
   uint16_t battery_low_debounce_ms = 250;
   // Maximum time for torque-off DXL discovery and fresh pose collection.
   uint16_t arming_timeout_ms = 10000;
+  // Idle auto-disarm: an ARMED robot (StandReady / RC / contact / Jetson
+  // states) with no motion activity for this long drops to Disarmed, which
+  // cuts DXL power via stateAllowsDxlPower -- 18 idle MX-28s holding torque
+  // waste watts and heat. Re-powering requires an explicit re-arm (the arm
+  // switch must be released and re-asserted) or a maintenance power command.
+  // 0 disables the timeout.
+  uint32_t idle_disarm_ms = 60000;
 };
 
 // One cycle of inputs sampled from the rest of the firmware. All fields are
@@ -89,6 +96,11 @@ struct StateInputs {
   // Contact-aware terrain.
   bool contact_enabled = false;
   bool contact_confident = false;
+
+  // True when any command source is actively requesting motion this cycle
+  // (sticks off-centre, host twist/pose/gait activity, trick running).
+  // Feeds the idle auto-disarm timer; quiet cycles let it expire.
+  bool motion_active = false;
 };
 
 // Returns true when servo goal writes are permitted in the given state.
@@ -128,6 +140,7 @@ class StateMachine {
   bool batt_low_active_ = false;
   uint32_t batt_low_since_ms_ = 0;
   uint32_t arming_since_ms_ = 0;
+  uint32_t last_activity_ms_ = 0;  // idle auto-disarm reference
   bool arm_release_required_ = true;
 };
 

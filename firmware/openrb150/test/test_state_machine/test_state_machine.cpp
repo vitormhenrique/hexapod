@@ -333,6 +333,58 @@ void test_invalid_battery_reading_does_not_estop() {
   TEST_ASSERT_EQUAL(State::RcManual, m.update(in, 50));
 }
 
+// Idle auto-disarm (power saving): an armed robot with no motion activity for
+// idle_disarm_ms drops to Disarmed, cutting DXL power via the state policy.
+void test_idle_timeout_disarms_armed_robot() {
+  StateMachine m = atStandReady();  // last update at t=40 (activity refresh)
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  in.motion_active = false;
+  // Default idle_disarm_ms = 60000. Quiet until just before the deadline.
+  TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 40 + 59999));
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 40 + 60000));
+  // The still-held arm switch must NOT restart arming (release edge required).
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 40 + 60010));
+  // Release and re-assert the switch: normal arming works again.
+  in.rc_armed = false;
+  m.update(in, 40 + 60020);
+  in.rc_armed = true;
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 40 + 60030));
+}
+
+void test_motion_activity_refreshes_idle_timer() {
+  StateMachine m = atStandReady();
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  in.command_source = static_cast<uint8_t>(CommandSource::Rc);
+  m.update(in, 50);  // RcManual
+  // Activity at t=50000 pushes the deadline out.
+  in.motion_active = true;
+  m.update(in, 50000);
+  in.motion_active = false;
+  TEST_ASSERT_EQUAL(State::RcManual, m.update(in, 50000 + 59999));
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 50000 + 60000));
+}
+
+void test_idle_disarm_disabled_when_zero() {
+  StateMachine m;
+  StateParams p;
+  p.battery_min_mv = 10000;
+  p.idle_disarm_ms = 0;  // disabled
+  m.configure(p);
+  m.reset();
+  StateInputs in = healthy();
+  in.rc_ever_seen = true;
+  in.arming_checks_pass = true;
+  m.update(in, 0);
+  m.update(in, 10);
+  m.update(in, 20);
+  in.rc_armed = true;
+  m.update(in, 30);
+  m.update(in, 40);  // StandReady
+  TEST_ASSERT_EQUAL(State::StandReady, m.update(in, 10000000));
+}
+
 void test_watchdog_fault_forces_estop() {
   StateMachine m = atStandReady();
   StateInputs in = healthy();
@@ -490,6 +542,9 @@ int main(int, char**) {
   RUN_TEST(test_low_battery_forces_estop);
   RUN_TEST(test_transient_battery_dip_does_not_estop);
   RUN_TEST(test_invalid_battery_reading_does_not_estop);
+  RUN_TEST(test_idle_timeout_disarms_armed_robot);
+  RUN_TEST(test_motion_activity_refreshes_idle_timer);
+  RUN_TEST(test_idle_disarm_disabled_when_zero);
   RUN_TEST(test_watchdog_fault_forces_estop);
   RUN_TEST(test_rc_failsafe_stops_when_operational);
   RUN_TEST(test_dxl_hard_fault_latches_until_cleared);
