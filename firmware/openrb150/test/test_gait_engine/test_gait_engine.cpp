@@ -65,14 +65,16 @@ void test_tripod_groups_are_opposite_at_phase_zero() {
   t.vx = 1.0f;
   ge.setTwist(t);
   ge.reset();
-  // First tiny tick leaves phase ~0: group A {0,2,3} stance, B {1,4,5} swing.
+  // First tiny tick leaves phase ~0: alternating tripods {1,3,5} (legs
+  // 0,2,4: rear-left, mid-right, front-left) stance, {2,4,6} (legs 1,3,5)
+  // swing. Each group is a balanced triangle straddling the body centre.
   GaitOutput out;
   ge.update(1, out);
   TEST_ASSERT_FALSE(out.feet[0].swing);
   TEST_ASSERT_FALSE(out.feet[2].swing);
-  TEST_ASSERT_FALSE(out.feet[3].swing);
+  TEST_ASSERT_FALSE(out.feet[4].swing);
   TEST_ASSERT_TRUE(out.feet[1].swing);
-  TEST_ASSERT_TRUE(out.feet[4].swing);
+  TEST_ASSERT_TRUE(out.feet[3].swing);
   TEST_ASSERT_TRUE(out.feet[5].swing);
 }
 
@@ -168,7 +170,11 @@ void test_swing_lift_reaches_step_height() {
   TEST_ASSERT_FLOAT_WITHIN(2.0f, static_cast<float>(d.step_height_mm), max_lift);
 }
 
-void test_swing_finishes_with_vertical_touchdown_approach() {
+// The swing profile's endpoint slopes match the stance sweep rate, so the
+// foot's body-frame velocity is continuous through touchdown (zero scuff in
+// the world frame). Sample x-velocity across leg 0's swing->stance flip and
+// require no visible step.
+void test_touchdown_velocity_is_continuous() {
   GaitEngine ge;
   GaitDefaults d = defaultGait();
   d.gait = static_cast<uint8_t>(GaitId::Wave);
@@ -179,20 +185,27 @@ void test_swing_finishes_with_vertical_touchdown_approach() {
   ge.setTwist(t);
   ge.reset();
 
-  // At 1.2 Hz, these samples put leg 0 late in its short Wave-gait swing.
-  // Horizontal placement is already complete, while the foot is descending.
-  GaitOutput early;
-  ge.update(800, early);
-  GaitOutput late;
-  ge.update(25, late);
-  TEST_ASSERT_TRUE(early.feet[0].swing);
-  TEST_ASSERT_TRUE(late.feet[0].swing);
-  // Horizontal placement is complete (sub-0.1 mm residual comes only from the
-  // twist tracker's converging tail scaling the stroke), while the foot is
-  // clearly descending.
-  TEST_ASSERT_FLOAT_WITHIN(0.1f, early.feet[0].x_mm, late.feet[0].x_mm);
-  TEST_ASSERT_FLOAT_WITHIN(0.1f, early.feet[0].y_mm, late.feet[0].y_mm);
-  TEST_ASSERT_TRUE(late.feet[0].z_mm < early.feet[0].z_mm);
+  // Let the twist tracker converge so the stroke is steady.
+  GaitOutput prev;
+  for (int i = 0; i < 150; ++i) ge.update(10, prev);
+
+  // Walk in fine 2 ms steps until leg 0 flips swing -> stance; compare the
+  // per-step x velocity just before and across the flip.
+  float vel_before = 0.0f;
+  for (int i = 0; i < 2000; ++i) {
+    GaitOutput cur;
+    ge.update(2, cur);
+    const float step_x = cur.feet[0].x_mm - prev.feet[0].x_mm;
+    if (prev.feet[0].swing && !cur.feet[0].swing) {
+      // Touchdown happened inside this step. The velocity across the flip
+      // must be close to the last in-swing velocity (no jolt).
+      TEST_ASSERT_FLOAT_WITHIN(0.12f, vel_before, step_x);
+      return;
+    }
+    vel_before = step_x;
+    prev = cur;
+  }
+  TEST_FAIL_MESSAGE("leg 0 never touched down");
 }
 
 void test_forward_twist_moves_stance_foot_backward() {
@@ -304,23 +317,37 @@ void test_rc_body_height_pot_neutral_at_center() {
   TEST_ASSERT_TRUE(rcBodyHeightMm(0.75f) > kRcBodyHeightNeutralMm);
 }
 
-// The whole Pot2 sweep must keep the planted home-XY feet inside the reach
-// annulus WITHOUT engaging the reach clamp -- the clamp slides feet radially
-// inward, which is exactly the "feet don't stay planted" failure.
-void test_rc_body_height_envelope_keeps_feet_planted() {
+// The whole Pot2 sweep rides the constant-tibia-orientation locus: every
+// stance target must stay reachable WITHOUT engaging the reach clamp (the
+// clamp would drag feet off the locus), and the radius must shrink as the
+// body rises (legs reconfigure, not just the knee).
+void test_rc_body_height_envelope_keeps_feet_reachable() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
   BodyKinematics bk(cfg);
+  float prev_r = 1e9f;
   for (int i = 0; i <= 10; ++i) {
     const float frac = static_cast<float>(i) / 10.0f;
     const float bh = rcBodyHeightMm(frac);
+    GaitEngine ge;
+    GaitDefaults d = defaultGait();
+    d.gait = static_cast<uint8_t>(GaitId::Stand);
+    d.body_height_mm = static_cast<uint16_t>(bh + 0.5f);
+    ge.configure(d);
+    GaitOutput out;
+    ge.update(20, out);
     for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
       bool reach_limited = false;
-      IkResult r = bk.solveBodyLimited(leg, kHomeXy[leg][0], kHomeXy[leg][1],
-                                       -bh, reach_limited);
+      IkResult r = bk.solveBodyLimited(leg, out.feet[leg].x_mm,
+                                       out.feet[leg].y_mm,
+                                       out.feet[leg].z_mm, reach_limited);
       TEST_ASSERT_TRUE(r.reachable);
       TEST_ASSERT_FALSE(reach_limited);
     }
+    // Stance radius shrinks monotonically as the body rises (leg 2 is the
+    // pure +X mid-right leg, so its x is the hip-relative radius + mount).
+    TEST_ASSERT_TRUE(out.feet[2].x_mm < prev_r);
+    prev_r = out.feet[2].x_mm;
   }
 }
 
@@ -379,13 +406,13 @@ int main(int, char**) {
   RUN_TEST(test_requested_duty_is_bounded_to_leave_swing_time);
   RUN_TEST(test_targets_bounded_over_full_cycle);
   RUN_TEST(test_swing_lift_reaches_step_height);
-  RUN_TEST(test_swing_finishes_with_vertical_touchdown_approach);
+  RUN_TEST(test_touchdown_velocity_is_continuous);
   RUN_TEST(test_forward_twist_moves_stance_foot_backward);
   RUN_TEST(test_centered_twist_holds_planted_home_stance);
   RUN_TEST(test_twist_is_slew_limited_by_speed_setting);
   RUN_TEST(test_centering_command_settles_smoothly_then_parks_phase);
   RUN_TEST(test_rc_body_height_pot_neutral_at_center);
-  RUN_TEST(test_rc_body_height_envelope_keeps_feet_planted);
+  RUN_TEST(test_rc_body_height_envelope_keeps_feet_reachable);
   RUN_TEST(test_all_gait_targets_are_ik_reachable);
   RUN_TEST(test_phase_wraps_and_advances);
   return UNITY_END();

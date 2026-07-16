@@ -66,15 +66,14 @@ constexpr float kMotionDeadband = 0.03f;
 constexpr float kMaxDutyFactor = 0.95f;
 
 // RC body-height envelope for the Pot2 knob. Pot CENTRE is the neutral stance
-// height (the calibrated femur-up / tibia-vertical pose), turning down lowers
-// the body and turning up raises it. Both ends stay strictly inside the
-// leg-reach annulus at the planted home foot radius, so a height command can
-// NEVER engage the reach clamp -- which would slide the feet radially inward
-// off their footholds. Up-travel is short because the neutral stance already
-// stands near the model's maximum reachable height at that stance radius.
-constexpr float kRcBodyHeightMinMm = 24.0f;
+// height, turning down lowers and turning up raises the body. Height rides
+// the constant-tibia-orientation locus (gait_engine.cpp homeFoot): the stance
+// radius adjusts with height so femur and knee reconfigure together while the
+// distal link keeps its calibrated ground orientation. Both ends stay inside
+// the leg-reach annulus, so height commands never engage the reach clamp.
+constexpr float kRcBodyHeightMinMm = 31.0f;
 constexpr float kRcBodyHeightNeutralMm = 40.0f;
-constexpr float kRcBodyHeightMaxMm = 44.0f;
+constexpr float kRcBodyHeightMaxMm = 55.0f;
 
 // Map the Pot2 0..1 fraction onto the reach-safe height envelope, piecewise
 // linear about the neutral centre.

@@ -9,10 +9,6 @@ namespace gait {
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
-// Finish horizontal placement before touchdown so the final swing segment is
-// a vertical descent. This reduces scuffing and gives the calibrated tibia
-// home geometry the best chance to meet the floor near-perpendicularly.
-constexpr float kSwingPlacementFraction = 0.70f;
 
 // Home foot XY in body frame B (mm), IK ref section 13 HOME_FOOT. The Z comes
 // from the configured body height.
@@ -20,6 +16,36 @@ constexpr float kHomeFootXy[config::kNumLegs][2] = {
     {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
     {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
 };
+
+// Coxa mount XY in body frame B (mm), mirroring config kLegSeeds. Used to
+// scale the stance radius about each hip for the height locus below.
+constexpr float kCoxaMountXy[config::kNumLegs][2] = {
+    {-65.6f, -115.6f}, {65.6f, -115.6f}, {69.8f, 0.0f},
+    {65.6f, 115.6f},   {-65.6f, 115.6f}, {-69.8f, 0.0f},
+};
+
+// Reference-model constants for the constant-tibia-orientation stance locus.
+// Changing body height must NOT simply bend the knee at a fixed foot radius:
+// the whole leg reconfigures -- femur rotates, knee follows -- while the
+// distal link keeps its home orientation (the calibrated tibia-vertical
+// contact). That locus is a circle of radius L_FEMUR about the fixed distal
+// offset: r(alpha) = L1 + L2*cos(alpha) + Cr, z(alpha) = L2*sin(alpha) + Cz,
+// with Cr/Cz = L3*cos/sin(theta_d) and theta_d = 7.45 deg the model's distal
+// orientation at the documented home pose.
+constexpr float kIkL1Mm = 56.08f;
+constexpr float kIkL2Mm = 66.51f;
+constexpr float kDistalCrMm = 24.650f;  // L3 * cos(theta_d)
+constexpr float kDistalCzMm = 3.224f;   // L3 * sin(theta_d)
+constexpr float kCoxaZOffMm = 4.55f;    // coxa-frame z = body z - 4.55
+
+// Stance radius (mm, horizontal distance from the hip axis) that keeps the
+// distal link at its home orientation for a given body height.
+inline float stanceRadiusForHeight(float bh_mm) {
+  float s = (-bh_mm - kCoxaZOffMm - kDistalCzMm) / kIkL2Mm;
+  if (s < -1.0f) s = -1.0f;
+  if (s > 0.0f) s = 0.0f;
+  return kIkL1Mm + kIkL2Mm * sqrtf(1.0f - s * s) + kDistalCrMm;
+}
 
 // Per-gait minimum stance duty factor (fraction of the cycle grounded). A
 // requested duty may lengthen stance but must never destabilize a gait by
@@ -42,9 +68,13 @@ float minimumGaitDuty(config::GaitId g) {
 float legOffset(config::GaitId g, uint8_t leg) {
   switch (g) {
     case config::GaitId::Tripod: {
-      // Tripod A {1,3,4}=legs{0,2,3} at 0.0; Tripod B {2,5,6}=legs{1,4,5} at 0.5
+      // Alternating tripods {1,3,5} / {2,4,6} (rear-left + mid-right +
+      // front-left vs. the mirror). NOTE: the IK reference doc 10.1 grouping
+      // {1,4,3}/{2,5,6} is geometrically defective -- its rear-left ->
+      // front-right support diagonal passes exactly through the body centre,
+      // leaving zero stability margin, so the robot teeters every half cycle.
       static const float kOff[config::kNumLegs] = {0.0f, 0.5f, 0.0f,
-                                                   0.0f, 0.5f, 0.5f};
+                                                   0.5f, 0.0f, 0.5f};
       return kOff[leg];
     }
     case config::GaitId::Ripple: {
@@ -150,8 +180,16 @@ float GaitEngine::dutyFactor() const {
 }
 
 void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
-  x = kHomeFootXy[leg][0];
-  y = kHomeFootXy[leg][1];
+  // Height changes ride the constant-tibia-orientation locus: the stance
+  // radius scales about each hip so femur AND knee reconfigure together while
+  // the distal link keeps its calibrated ground orientation. Normalised to
+  // exactly 1.0 at the neutral height so the documented home stance is exact.
+  const float scale = stanceRadiusForHeight(body_height_mm_) /
+                      stanceRadiusForHeight(kRcBodyHeightNeutralMm);
+  x = kCoxaMountXy[leg][0] +
+      (kHomeFootXy[leg][0] - kCoxaMountXy[leg][0]) * scale;
+  y = kCoxaMountXy[leg][1] +
+      (kHomeFootXy[leg][1] - kCoxaMountXy[leg][1]) * scale;
   z = -body_height_mm_;
 }
 
@@ -252,15 +290,19 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
       lift = 0.0f;
       swing = false;
     } else {
-      // Swing: zero-velocity easing avoids horizontal reversals and a squared
-      // sine gives zero vertical velocity at liftoff and touchdown. Horizontal
-      // placement finishes early, leaving a vertical final approach.
+      // Swing: cubic Hermite return whose endpoint slopes MATCH the stance
+      // sweep rate, so the foot's body-frame velocity is continuous through
+      // liftoff and touchdown -- i.e. zero world-frame velocity at ground
+      // contact (no scuff, no per-step jolt). The squared sine gives zero
+      // vertical velocity at both ends; a lift floor keeps real clearance
+      // even at small commands.
       const float u = (leg_phase - beta) / swing_span;
-      const float placement_u =
-          clampf(u / kSwingPlacementFraction, 0.0f, 1.0f);
-      L = -0.5f + smoothstep(placement_u);
+      const float m = -swing_span / beta;  // matched endpoint slope (in u)
+      L = -0.5f + smoothstep(u) + m * u * (u - 1.0f) * (2.0f * u - 1.0f);
       const float lift_wave = sinf(kPi * u);
-      lift = step_mm_ * command_scale * lift_wave * lift_wave;
+      const float lift_scale =
+          command_scale > 0.25f ? 1.0f : command_scale * 4.0f;
+      lift = step_mm_ * lift_scale * lift_wave * lift_wave;
       swing = true;
     }
 
