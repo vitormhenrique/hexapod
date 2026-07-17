@@ -29,10 +29,16 @@ def _now_ns() -> int:
 
 
 def _record_to_dict(record: Any) -> Any:
+    if isinstance(record, (bytes, bytearray)):
+        return {"encoding": "hex", "data": bytes(record).hex()}
     if is_dataclass(record) and not isinstance(record, type):
         return {k: _record_to_dict(v) for k, v in asdict(record).items()}
+    if isinstance(record, tuple):
+        return [_record_to_dict(v) for v in record]
     if isinstance(record, list):
         return [_record_to_dict(v) for v in record]
+    if isinstance(record, dict):
+        return {str(k): _record_to_dict(v) for k, v in record.items()}
     return record
 
 

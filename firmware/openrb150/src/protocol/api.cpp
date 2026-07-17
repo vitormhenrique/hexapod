@@ -1,11 +1,14 @@
 #include "api.h"
 
+#include <string.h>
+
 #include "../config/config_api.h"
 #include "control_api.h"
 #include "controller_api.h"
 #include "dxl_job_api.h"
 #include "feature_api.h"
 #include "framing.h"
+#include "../hil/observer_api.h"
 #include "maintenance_api.h"
 #include "maintenance_target_api.h"
 #include "motion_api.h"
@@ -37,8 +40,11 @@ void copyName(uint8_t* dst, const char* src) {
 
 uint8_t buildStatusFlags(const StatusSnapshot& s) {
   uint8_t f = 0;
-  if (s.dxl_power) f |= 0x01;
-  if (s.dxl_power_control) f |= 0x02;
+  if (s.dxl_power) f |= statusflag::kDxlPower;
+  if (s.dxl_power_control) f |= statusflag::kDxlPowerControl;
+  if ((s.hil_flags & hilflag::kOutputDisabled) != 0) {
+    f |= statusflag::kHilOutputDisabled;
+  }
   return f;
 }
 
@@ -64,7 +70,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      MaintTargetApi* maint_target, DxlJobApi* dxl_jobs,
                      FeatureApi* features, SensorApi* sensors,
                      PassiveApi* passive, ControllerApi* controller,
-                     DecodeStatus* decode_status) {
+                     DecodeStatus* decode_status,
+                     hil::ObserverApi* hil_observer) {
   Header req;
   uint8_t req_payload[kMaxPayload];
   size_t req_len = 0;
@@ -133,7 +140,24 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       payload[22] = status.last_reset_control_progress;
       payload[23] = status.last_reset_safety_state;
       putU32(&payload[24], status.dxl_power_transitions);
-      payload_len = 28;
+      payload[28] = status.hil_flags;
+      putU32(&payload[29], status.blocked_power_enable);
+      putU32(&payload[33], status.blocked_torque_enable);
+      putU32(&payload[37], status.blocked_goal_write);
+      putU32(&payload[41], status.blocked_dxl_write);
+      putU32(&payload[45], status.last_goal_sequence);
+      payload[49] = status.last_goal_count;
+      payload[50] = status.last_fault_reason;
+      putU32(&payload[51], status.last_fault_timestamp_ms);
+      payload[55] = status.last_fatal_reason;
+      payload[56] = status.last_fatal_stage;
+      memcpy(&payload[57], status.last_fatal_task_name, 16);
+      putU32(&payload[73], status.last_fault_stack_pointer);
+      putU32(&payload[77], status.last_fault_exception_return);
+      for (uint8_t index = 0; index < 8; ++index) {
+        putU32(&payload[81 + index * 4], status.last_fault_registers[index]);
+      }
+      payload_len = 113;
       break;
     }
     case msg::kGetCapabilities: {
@@ -144,7 +168,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       payload[4] = info.fw_patch;
       putU32(&payload[5], info.feature_bits);
       copyName(&payload[9], info.device_name);
-      payload_len = 25;
+      payload[25] = info.build_flags;
+      payload_len = 26;
       break;
     }
     default: {
@@ -171,6 +196,21 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                         &tel_len, &tel_flags)) {
           payload_len = tel_len;
           flags = tel_flags;
+          break;
+        }
+      }
+      // HIL observer sessions are read-only trace controls. The adapter only
+      // supplies this optional handler for the immutable output-disabled image;
+      // a normal image has no path from these IDs to actuator control.
+      if (hil_observer != nullptr && req.msg_id >= kHilObserverMsgFirst &&
+          req.msg_id <= kHilObserverMsgLast) {
+        uint16_t hil_len = 0;
+        uint8_t hil_flags = 0;
+        if (hil_observer->handle(req.msg_id, req_payload,
+                                 static_cast<uint16_t>(req_len), payload,
+                                 kMaxPayload, &hil_len, &hil_flags)) {
+          payload_len = hil_len;
+          flags = hil_flags;
           break;
         }
       }

@@ -11,6 +11,7 @@
 
 #include <unity.h>
 
+#include "dxl/scan_cursor.h"
 #include "protocol/dxl_job_api.h"
 #include "protocol/framing.h"
 
@@ -31,6 +32,29 @@ bool runDxl(DxlJobApi& api_obj, uint8_t msg_id, const uint8_t* req,
 }
 
 }  // namespace
+
+void test_scan_cursor_advances_one_id_per_turn() {
+  dxl::ScanCursor cursor;
+  TEST_ASSERT_TRUE(cursor.begin(1, 30));
+  for (uint8_t expected = 1; expected <= 30; ++expected) {
+    TEST_ASSERT_TRUE(cursor.active());
+    TEST_ASSERT_EQUAL_UINT8(expected, cursor.currentId());
+    TEST_ASSERT_EQUAL(expected < 30, cursor.advanceAfterPing());
+  }
+  TEST_ASSERT_FALSE(cursor.active());
+}
+
+void test_scan_cursor_rejects_invalid_ranges_and_resets() {
+  dxl::ScanCursor cursor;
+  TEST_ASSERT_FALSE(cursor.begin(0, 1));
+  TEST_ASSERT_FALSE(cursor.active());
+  TEST_ASSERT_FALSE(cursor.begin(4, 3));
+  TEST_ASSERT_FALSE(cursor.active());
+  TEST_ASSERT_TRUE(cursor.begin(18, 18));
+  TEST_ASSERT_EQUAL_UINT8(18, cursor.currentId());
+  cursor.reset();
+  TEST_ASSERT_FALSE(cursor.active());
+}
 
 // --- DxlJobQueue ------------------------------------------------------------
 
@@ -608,6 +632,8 @@ void tearDown() {}
 
 int main(int, char**) {
   UNITY_BEGIN();
+  RUN_TEST(test_scan_cursor_advances_one_id_per_turn);
+  RUN_TEST(test_scan_cursor_rejects_invalid_ranges_and_resets);
   RUN_TEST(test_queue_submit_claim_complete_poll_roundtrip);
   RUN_TEST(test_queue_busy_while_in_flight);
   RUN_TEST(test_queue_resubmit_overwrites_collected_result);

@@ -216,6 +216,11 @@ const TrickOutput& TrickEngine::update(uint32_t dt_ms, bool sticks_active) {
     return out_;
   }
 
+  // ControllerClock normally rejects large time jumps. Keep this layer
+  // independently bounded so a looping program cannot spend millions of
+  // iterations consuming an externally supplied elapsed interval.
+  constexpr uint32_t kMaxAdvanceMs = 1000;
+  if (dt_ms > kMaxAdvanceMs) dt_ms = kMaxAdvanceMs;
   seg_elapsed_ms_ += dt_ms;
   for (;;) {
     const TrickKeyframe& kf = prog_->frames[seg_];

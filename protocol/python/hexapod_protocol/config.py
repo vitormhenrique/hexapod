@@ -364,6 +364,149 @@ def default_robot_config() -> RobotConfig:
 
 
 # --------------------------------------------------------------------------- #
+# RobotConfig validation (mirrors firmware validateRobotConfig).
+# --------------------------------------------------------------------------- #
+def validate_robot_config(config: RobotConfig) -> list[str]:
+    """Return human-readable safety violations for a staged robot config.
+
+    The firmware remains the final authority when ``CFG_VALIDATE`` runs, but
+    calibration tools need deterministic local feedback before transmitting a
+    multi-frame config update. This mirrors the firmware's structural and
+    safety checks, adds fixed-width representation checks, and verifies that
+    the configured neutral stance is geometrically reachable.
+    """
+    errors: list[str] = []
+
+    if config.schema_version != SCHEMA_VERSION:
+        errors.append(
+            f"schema version {config.schema_version} is not {SCHEMA_VERSION}"
+        )
+    if len(config.robot_name.encode("ascii", errors="ignore")) >= ROBOT_NAME_LEN:
+        errors.append(f"robot name must fit within {ROBOT_NAME_LEN - 1} ASCII bytes")
+
+    for name, value in (
+        ("coxa link", config.links.coxa_cmm),
+        ("femur link", config.links.femur_cmm),
+        ("tibia link", config.links.tibia_cmm),
+    ):
+        if not 1 <= value <= 0xFFFF:
+            errors.append(f"{name} must be within 1..65535 centi-mm")
+
+    geometry = config.geometry
+    if not 1 <= geometry.home_radius_cmm <= 0xFFFF:
+        errors.append("home radius must be within 1..65535 centi-mm")
+    if not -0x8000 <= geometry.home_foot_z_cmm <= 0x7FFF:
+        errors.append("home foot z is outside the signed centi-mm range")
+    if not 0 <= geometry.coxa_lift_cmm <= 0xFFFF:
+        errors.append("coxa lift is outside the unsigned centi-mm range")
+    if all(
+        0 < value <= 0xFFFF
+        for value in (
+            config.links.coxa_cmm,
+            config.links.femur_cmm,
+            config.links.tibia_cmm,
+            geometry.home_radius_cmm,
+        )
+    ):
+        coxa_mm = config.links.coxa_cmm / 100.0
+        femur_mm = config.links.femur_cmm / 100.0
+        tibia_mm = config.links.tibia_cmm / 100.0
+        home_radius_mm = geometry.home_radius_cmm / 100.0
+        home_z_mm = geometry.home_foot_z_cmm / 100.0
+        home_distance_mm = math.hypot(home_radius_mm - coxa_mm, home_z_mm)
+        if not abs(femur_mm - tibia_mm) <= home_distance_mm <= femur_mm + tibia_mm:
+            errors.append("home stance is outside the two-link reach envelope")
+
+    if len(config.legs) != NUM_LEGS:
+        errors.append(f"expected {NUM_LEGS} leg geometry records")
+    for index, leg in enumerate(config.legs):
+        for name, value in (
+            ("mount x", leg.mount_x_dmm),
+            ("mount y", leg.mount_y_dmm),
+            ("mount z", leg.mount_z_dmm),
+            ("mount yaw", leg.mount_yaw_cdeg),
+        ):
+            if not -0x8000 <= value <= 0x7FFF:
+                errors.append(f"leg {index} {name} is outside the signed range")
+
+    gait = config.gait
+    if gait.gait not in GAIT_NAMES:
+        errors.append(f"gait {gait.gait} is unknown")
+    if not 5 <= gait.body_height_mm <= 120:
+        errors.append("body height must be within 5..120 mm")
+    if not 0 <= gait.stride_len_mm <= 80:
+        errors.append("stride length must be within 0..80 mm")
+    if not 0 <= gait.step_height_mm <= 50:
+        errors.append("step height must be within 0..50 mm")
+    if not 0 <= config.feature_defaults <= 0xFFFFFFFF:
+        errors.append("feature defaults are outside the unsigned 32-bit range")
+    elif config.feature_defaults & ~(
+        FEAT_FOOT_CONTACT
+        | FEAT_TERRAIN_LEVELING
+        | FEAT_SENSOR_POLLING
+        | FEAT_PASSIVE_POSE_STREAM
+        | FEAT_JETSON_CONTROL
+    ):
+        errors.append("feature defaults include unknown bits")
+
+    if len(config.servos) != NUM_SERVOS:
+        errors.append(f"expected {NUM_SERVOS} servo calibration records")
+    servo_ids: set[int] = set()
+    joint_slots: set[tuple[int, int]] = set()
+    for index, servo in enumerate(config.servos):
+        if not 1 <= servo.id <= 253:
+            errors.append(f"servo {index} id must be within 1..253")
+        elif servo.id in servo_ids:
+            errors.append(f"servo id {servo.id} is duplicated")
+        servo_ids.add(servo.id)
+        if not 0 <= servo.leg < NUM_LEGS:
+            errors.append(f"servo {index} leg must be within 0..{NUM_LEGS - 1}")
+        if not 0 <= servo.joint < JOINTS_PER_LEG:
+            errors.append(
+                f"servo {index} joint must be within 0..{JOINTS_PER_LEG - 1}"
+            )
+        slot = (servo.leg, servo.joint)
+        if slot in joint_slots:
+            errors.append(f"servo slot leg {servo.leg}, joint {servo.joint} is duplicated")
+        joint_slots.add(slot)
+        if servo.sign not in (-1, 1):
+            errors.append(f"servo {index} sign must be +1 or -1")
+        if not -0x8000 <= servo.trim_ticks <= 0x7FFF:
+            errors.append(f"servo {index} trim is outside the signed tick range")
+        if not 0 <= servo.min_tick <= SERVO_MAX_TICK:
+            errors.append(f"servo {index} min tick is outside 0..{SERVO_MAX_TICK}")
+        if not 0 <= servo.max_tick <= SERVO_MAX_TICK:
+            errors.append(f"servo {index} max tick is outside 0..{SERVO_MAX_TICK}")
+        if servo.min_tick >= servo.max_tick:
+            errors.append(f"servo {index} min tick must be less than max tick")
+    expected_slots = {
+        (leg, joint) for leg in range(NUM_LEGS) for joint in range(JOINTS_PER_LEG)
+    }
+    if joint_slots != expected_slots:
+        errors.append("servo map must cover every leg and joint exactly once")
+
+    if len(config.feet) != NUM_FOOT_SENSORS:
+        errors.append(f"expected {NUM_FOOT_SENSORS} foot sensor calibration records")
+    for index, foot in enumerate(config.feet):
+        if not -0x80000000 <= foot.pressure_baseline <= 0x7FFFFFFF:
+            errors.append(f"foot {index} baseline is outside the signed 32-bit range")
+        for name, value in (
+            ("near threshold", foot.near_thresh),
+            ("touch threshold", foot.touch_thresh),
+            ("load threshold", foot.load_thresh),
+        ):
+            if not 0 <= value <= 0xFFFF:
+                errors.append(f"foot {index} {name} is outside the unsigned range")
+        if foot.enabled:
+            if not foot.near_thresh or not foot.touch_thresh or not foot.load_thresh:
+                errors.append(f"foot {index} enabled calibration needs nonzero thresholds")
+            if foot.load_thresh < foot.touch_thresh:
+                errors.append(f"foot {index} load threshold must be at least touch")
+
+    return errors
+
+
+# --------------------------------------------------------------------------- #
 # CFG_GET_SUMMARY decode + CFG_GET_BLOCK reassembly.
 # --------------------------------------------------------------------------- #
 def decode_config_summary(payload: bytes) -> ConfigSummary:

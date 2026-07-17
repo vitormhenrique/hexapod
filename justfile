@@ -7,6 +7,7 @@ root := justfile_directory()
 companion_dir := root / "companion"
 firmware_dir := root / "firmware/openrb150"
 protocol_dir := root / "protocol"
+ros_simulation_dir := root / "robot_ros_simulation"
 pio := env_var_or_default("PIO", env_var("HOME") + "/.platformio/penv/bin/pio")
 
 # List all available recipes.
@@ -27,12 +28,26 @@ doctor:
 companion-sync:
     cd "{{companion_dir}}" && uv sync --extra dev
 
+# Install companion commands into uv's user tool directory from this checkout.
+companion-install:
+    uv tool install --editable "{{companion_dir}}" --with-editable "{{protocol_dir}}/python"
+
+# Build source and wheel artifacts for local package validation.
+companion-package:
+    cd "{{companion_dir}}" && uv build
+
 # Start the PySide6 companion application.
 companion-run:
     cd "{{companion_dir}}" && uv run hexapod-companion
 
 # Short alias for companion-run.
 companion: companion-run
+
+# Build the ROS SIL graph, RViz, and companion app connected to its local
+# simulated-firmware endpoint. Example: just sim-companion 127.0.0.1 5561
+# Pass false as the fourth positional argument to keep the same graph headless.
+sim-companion host="127.0.0.1" port="5560" token="hexapod-sim" rviz="true":
+    cd "{{ros_simulation_dir}}" && just companion-sim "{{host}}" "{{port}}" "{{token}}" "{{rviz}}"
 
 # Run the companion CLI; example: just companion-cli status
 companion-cli *args:
@@ -53,6 +68,19 @@ companion-lint:
 # Format companion source and tests with Ruff.
 companion-format:
     cd "{{companion_dir}}" && uvx ruff format src tests
+
+# Install/synchronize the Jetson bridge package and its test tools.
+jetson-sync:
+    cd "{{root}}/jetson" && uv sync --extra dev
+
+# Run the hardware-free Jetson bridge tests.
+jetson-test:
+    cd "{{root}}/jetson" && uv run pytest
+
+# Expose a Jetson-owned OpenRB-150 USB link to one authenticated Mac client.
+# Example: just jetson-relay --serial-port /dev/ttyACM0 --host 0.0.0.0
+jetson-relay *args:
+    cd "{{root}}/jetson" && uv run hexapod-jetson-relay {{args}}
 
 # Run a hardware-in-loop page; example: just companion-hil all --port /dev/cu.usbmodem2101
 companion-hil *args:
@@ -89,8 +117,28 @@ firmware-clean:
 protocol-test:
     cd "{{protocol_dir}}" && uv run --project python --extra dev pytest tests
 
-# Run protocol, companion, and native firmware tests.
-test: protocol-test companion-test firmware-test
+# Lint the shared protocol implementation and vector tests.
+protocol-lint:
+    cd "{{protocol_dir}}" && uvx ruff check python/hexapod_protocol tests
 
-# Run tests and compile firmware for the OpenRB-150.
-check: test firmware-build
+# Type-check the shared protocol implementation.
+protocol-typecheck:
+    cd "{{protocol_dir}}" && uv run --project python --extra dev pyright python/hexapod_protocol
+
+# Lint the pure-Python Jetson bridge and its loopback tests.
+jetson-lint:
+    cd "{{root}}/jetson" && uvx ruff check src tests
+
+# Type-check the pure-Python Jetson bridge against its editable dependencies.
+jetson-typecheck:
+    cd "{{root}}/jetson" && uv run --extra dev pyright src/hexapod_jetson_bridge
+
+# Run protocol, companion, and native firmware tests.
+test: protocol-test companion-test jetson-test firmware-test
+
+# Run Ruff across protocol, companion, and Jetson Python code.
+lint: protocol-lint companion-lint jetson-lint
+typecheck: protocol-typecheck jetson-typecheck
+
+# Run all local software quality gates and compile the real firmware target.
+check: test lint typecheck firmware-build

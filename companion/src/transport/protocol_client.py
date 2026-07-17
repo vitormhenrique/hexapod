@@ -44,6 +44,9 @@ class Response:
 TelemetryCallback = Callable[[int, object, Header], None]
 """Called as ``cb(stream_id, decoded_record, header)`` for each telemetry frame."""
 
+EventCallback = Callable[[int, bytes, Header], None]
+"""Called as ``cb(event_id, payload, header)`` for each protocol event frame."""
+
 ConnectionCallback = Callable[[bool], None]
 
 
@@ -103,6 +106,7 @@ class ProtocolClient:
         self._pending_lock = threading.Lock()
 
         self._telemetry_cbs: list[TelemetryCallback] = []
+        self._event_cbs: list[EventCallback] = []
         self._connection_cbs: list[ConnectionCallback] = []
         # Optional raw wire-frame taps (e.g. SessionLogger.log_raw_frame) so
         # sessions can preserve lossless raw frames per AGENTS.md 7.5. Called
@@ -175,6 +179,14 @@ class ProtocolClient:
 
     def on_telemetry(self, cb: TelemetryCallback) -> None:
         self._telemetry_cbs.append(cb)
+
+    def on_event(self, cb: EventCallback) -> None:
+        """Register a callback for asynchronous protocol event frames."""
+        self._event_cbs.append(cb)
+
+    def remove_event(self, cb: EventCallback) -> None:
+        if cb in self._event_cbs:
+            self._event_cbs.remove(cb)
 
     def on_raw_frame(self, cb: Callable[[bytes], None]) -> None:
         """Register a tap that receives every delimited wire frame (bytes)."""
@@ -333,6 +345,16 @@ class ProtocolClient:
         r = self.request(api.MSG_HELLO)
         return api.parse_hello(r.payload) if r else None
 
+    def jetson_heartbeat(self) -> Optional[tuple[int, int]]:
+        """Refresh Jetson autonomy liveness and return ``(uptime_ms, state)``.
+
+        This deliberately uses the distinct Jetson heartbeat command rather
+        than the generic session heartbeat, so only the Jetson bridge can
+        refresh firmware autonomy authority.
+        """
+        r = self._send_built(api.build_jetson_heartbeat())
+        return api.parse_heartbeat(r.payload) if r else None
+
     def get_status(self) -> Optional[api.StatusInfo]:
         r = self.request(api.MSG_GET_STATUS)
         return api.parse_status(r.payload) if r else None
@@ -364,6 +386,43 @@ class ProtocolClient:
     def get_stream_stats(self) -> Optional[api.StreamStats]:
         r = self.request(api.MSG_GET_STREAM_STATS)
         return api.parse_stream_stats(r.payload) if r else None
+
+    # HIL observer session. These methods only expose the additive command
+    # group; firmware remains responsible for output-disabled build checks,
+    # maintenance-token validation, session TTL, and capture safety.
+    def hil_get_capability(self) -> Optional[api.HilSessionStatus]:
+        r = self._send_built(api.build_hil_get_capability())
+        return api.parse_hil_session_status(r.payload) if r else None
+
+    def hil_open_session(self, maintenance_token: int) -> Optional[api.HilOpenSessionResult]:
+        r = self._send_built(api.build_hil_open_session(maintenance_token))
+        return api.parse_hil_open_session(r.payload) if r else None
+
+    def hil_close_session(self, session_token: int) -> Optional[api.HilResult]:
+        r = self._send_built(api.build_hil_close_session(session_token))
+        return api.parse_hil_result(r.payload) if r else None
+
+    def hil_heartbeat(self, session_token: int) -> Optional[api.HilResult]:
+        r = self._send_built(api.build_hil_heartbeat(session_token))
+        return api.parse_hil_result(r.payload) if r else None
+
+    def hil_capture(self, session_token: int, step_count: int) -> Optional[api.HilCaptureResult]:
+        r = self._send_built(api.build_hil_capture(session_token, step_count))
+        return api.parse_hil_capture(r.payload) if r else None
+
+    def hil_abort_capture(self, session_token: int) -> Optional[api.HilResult]:
+        r = self._send_built(api.build_hil_abort_capture(session_token))
+        return api.parse_hil_result(r.payload) if r else None
+
+    def hil_mark(self, session_token: int, marker_id: int) -> Optional[api.HilResult]:
+        r = self._send_built(api.build_hil_mark(session_token, marker_id))
+        return api.parse_hil_result(r.payload) if r else None
+
+    def hil_get_session_status(
+        self, session_token: int
+    ) -> Optional[api.HilSessionStatus]:
+        r = self._send_built(api.build_hil_get_session_status(session_token))
+        return api.parse_hil_session_status(r.payload) if r else None
 
     # --- typed control-group commands ------------------------------------
     #
@@ -834,7 +893,11 @@ class ProtocolClient:
             self._dispatch_telemetry(header, payload)
             return None
 
-        # Response/event: route to a waiting request by seq.
+        if header.msg_type == int(MsgType.EVENT):
+            self._dispatch_event(header, payload)
+            return None
+
+        # A response routes to a waiting request by sequence number.
         response = Response(header, payload)
         with self._pending_lock:
             slot = self._pending.get(header.seq)
@@ -855,6 +918,13 @@ class ProtocolClient:
                 cb(stream_id, record, header)
             except Exception as exc:
                 print_exception("telemetry callback failed", exc)
+
+    def _dispatch_event(self, header: Header, payload: bytes) -> None:
+        for cb in list(self._event_cbs):
+            try:
+                cb(header.msg_id, payload, header)
+            except Exception as exc:
+                print_exception("event callback failed", exc)
 
 
 def struct_subscribe(stream_id: int, rate_hz: int) -> bytes:

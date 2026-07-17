@@ -76,6 +76,17 @@ def test_raw_frames_read_back_byte_exact(tmp_path) -> None:
     assert read_back == frames
 
 
+def test_decoded_binary_record_is_hex_encoded(tmp_path) -> None:
+    from data import SessionLogger, SessionReplay
+
+    with SessionLogger(out_dir=tmp_path, robot_name="hex") as logger:
+        session_dir = logger.dir
+        logger.log_record("hil_trace", {"payload": b"\x00\xFF"})
+
+    record = next(SessionReplay(session_dir).iter_records())
+    assert record["data"]["payload"] == {"encoding": "hex", "data": "00ff"}
+
+
 def test_decoded_frame_replay(tmp_path) -> None:
     from data import SessionLogger, SessionReplay
 

@@ -28,6 +28,27 @@ MSG_UNSUBSCRIBE = 0x11
 MSG_SET_STREAM_RATE = 0x12
 MSG_GET_STREAM_STATS = 0x13
 
+# HIL observer command group (mirrors src/hil/observer_api.h).
+MSG_HIL_GET_CAPABILITY = 0x14
+MSG_HIL_OPEN_SESSION = 0x15
+MSG_HIL_CLOSE_SESSION = 0x16
+MSG_HIL_HEARTBEAT = 0x17
+MSG_HIL_CAPTURE = 0x18
+MSG_HIL_ABORT_CAPTURE = 0x19
+MSG_HIL_MARK = 0x1A
+MSG_HIL_GET_SESSION_STATUS = 0x1B
+
+HIL_OK = 0
+HIL_NOT_AVAILABLE = 1
+HIL_BAD_REQUEST = 2
+HIL_REJECTED = 3
+HIL_BAD_TOKEN = 4
+HIL_BUSY = 5
+HIL_RATE_LIMITED = 6
+HIL_NO_CAPTURE = 7
+HIL_CAPTURE_MIN_STEPS = 1
+HIL_CAPTURE_MAX_STEPS = 32
+
 # Config command group (mirrors src/config/config_api.h).
 MSG_CFG_GET_SUMMARY = 0x20
 MSG_CFG_GET_BLOCK = 0x21
@@ -270,6 +291,9 @@ DXL_CODE_POWER_OFF = 2
 DXL_CODE_BUS_ERROR = 3
 DXL_CODE_UNSUPPORTED = 4
 DXL_CODE_VERIFY_FAILED = 5
+DXL_CODE_OUTPUT_DISABLED = 6
+
+CAPABILITY_HIL_OUTPUT_DISABLED = 0x01
 
 # DXL logical parameters (mirrors dxl::LogicalParam in src/dxl/dxl_params.h).
 DXL_PARAM_ID = 0
@@ -333,6 +357,29 @@ class StatusInfo:
     last_reset_control_progress: int = 0
     last_reset_safety_state: int = 0
     dxl_power_transitions: int = 0
+    hil_output_disabled: bool = False
+    hil_flags: int = 0
+    blocked_power_enable: int = 0
+    blocked_torque_enable: int = 0
+    blocked_goal_write: int = 0
+    blocked_dxl_write: int = 0
+    last_goal_sequence: int = 0
+    last_goal_count: int = 0
+    last_fault_reason: int = 0
+    last_fault_timestamp_ms: int = 0
+    last_fatal_reason: int = 0
+    last_fatal_stage: int = 0
+    last_fatal_task_name: str = ""
+    last_fault_stack_pointer: int = 0
+    last_fault_exception_return: int = 0
+    last_fault_r0: int = 0
+    last_fault_r1: int = 0
+    last_fault_r2: int = 0
+    last_fault_r3: int = 0
+    last_fault_r12: int = 0
+    last_fault_lr: int = 0
+    last_fault_pc: int = 0
+    last_fault_xpsr: int = 0
 
 
 @dataclass
@@ -347,6 +394,11 @@ class Capabilities:
     # firmware, so it reflects detected DXL/I2C hardware (4sa.4).
     feature_bits: int
     device_name: str
+    build_flags: int = 0
+
+    @property
+    def hil_output_disabled(self) -> bool:
+        return bool(self.build_flags & CAPABILITY_HIL_OUTPUT_DISABLED)
 
 
 def _name(raw: bytes) -> str:
@@ -428,6 +480,39 @@ def parse_status(payload: bytes) -> StatusInfo:
     dxl_power_transitions = (
         struct.unpack("<I", payload[24:28])[0] if len(payload) >= 28 else 0
     )
+    hil_flags = payload[28] if len(payload) >= 29 else 0
+    blocked_power_enable = (
+        struct.unpack("<I", payload[29:33])[0] if len(payload) >= 33 else 0
+    )
+    blocked_torque_enable = (
+        struct.unpack("<I", payload[33:37])[0] if len(payload) >= 37 else 0
+    )
+    blocked_goal_write = (
+        struct.unpack("<I", payload[37:41])[0] if len(payload) >= 41 else 0
+    )
+    blocked_dxl_write = (
+        struct.unpack("<I", payload[41:45])[0] if len(payload) >= 45 else 0
+    )
+    last_goal_sequence = (
+        struct.unpack("<I", payload[45:49])[0] if len(payload) >= 49 else 0
+    )
+    last_goal_count = payload[49] if len(payload) >= 50 else 0
+    last_fault_reason = payload[50] if len(payload) >= 51 else 0
+    last_fault_timestamp_ms = (
+        struct.unpack("<I", payload[51:55])[0] if len(payload) >= 55 else 0
+    )
+    last_fatal_reason = payload[55] if len(payload) >= 56 else 0
+    last_fatal_stage = payload[56] if len(payload) >= 57 else 0
+    last_fatal_task_name = _name(payload[57:73]) if len(payload) >= 73 else ""
+    last_fault_stack_pointer = (
+        struct.unpack("<I", payload[73:77])[0] if len(payload) >= 77 else 0
+    )
+    last_fault_exception_return = (
+        struct.unpack("<I", payload[77:81])[0] if len(payload) >= 81 else 0
+    )
+    fault_registers = (
+        struct.unpack("<8I", payload[81:113]) if len(payload) >= 113 else (0,) * 8
+    )
     return StatusInfo(
         uptime_ms=uptime_ms,
         state=state,
@@ -443,6 +528,29 @@ def parse_status(payload: bytes) -> StatusInfo:
         last_reset_control_progress=last_reset_control_progress,
         last_reset_safety_state=last_reset_safety_state,
         dxl_power_transitions=dxl_power_transitions,
+        hil_output_disabled=bool(flags & 0x04),
+        hil_flags=hil_flags,
+        blocked_power_enable=blocked_power_enable,
+        blocked_torque_enable=blocked_torque_enable,
+        blocked_goal_write=blocked_goal_write,
+        blocked_dxl_write=blocked_dxl_write,
+        last_goal_sequence=last_goal_sequence,
+        last_goal_count=last_goal_count,
+        last_fault_reason=last_fault_reason,
+        last_fault_timestamp_ms=last_fault_timestamp_ms,
+        last_fatal_reason=last_fatal_reason,
+        last_fatal_stage=last_fatal_stage,
+        last_fatal_task_name=last_fatal_task_name,
+        last_fault_stack_pointer=last_fault_stack_pointer,
+        last_fault_exception_return=last_fault_exception_return,
+        last_fault_r0=fault_registers[0],
+        last_fault_r1=fault_registers[1],
+        last_fault_r2=fault_registers[2],
+        last_fault_r3=fault_registers[3],
+        last_fault_r12=fault_registers[4],
+        last_fault_lr=fault_registers[5],
+        last_fault_pc=fault_registers[6],
+        last_fault_xpsr=fault_registers[7],
     )
 
 
@@ -450,6 +558,7 @@ def parse_capabilities(payload: bytes) -> Capabilities:
     proto_major, proto_minor, fw_major, fw_minor, fw_patch = payload[:5]
     (feature_bits,) = struct.unpack("<I", payload[5:9])
     name = _name(payload[9 : 9 + DEVICE_NAME_LEN])
+    build_flags = payload[25] if len(payload) >= 26 else 0
     return Capabilities(
         proto_major,
         proto_minor,
@@ -458,6 +567,7 @@ def parse_capabilities(payload: bytes) -> Capabilities:
         fw_patch,
         feature_bits,
         name,
+        build_flags,
     )
 
 
@@ -486,6 +596,165 @@ def build_unsubscribe(stream_id: int, seq: int = 0) -> bytes:
 def build_get_stream_stats(seq: int = 0) -> bytes:
     """Build a GET_STREAM_STATS command."""
     return build_command(MSG_GET_STREAM_STATS, seq=seq)
+
+
+# --- HIL observer commands -------------------------------------------------
+
+
+def build_hil_get_capability(seq: int = 0) -> bytes:
+    """Build HIL_GET_CAPABILITY for an output-disabled firmware image."""
+    return build_command(MSG_HIL_GET_CAPABILITY, seq=seq)
+
+
+def build_hil_open_session(maintenance_token: int, seq: int = 0) -> bytes:
+    """Build HIL_OPEN_SESSION using the separate live maintenance token."""
+    return build_command(
+        MSG_HIL_OPEN_SESSION,
+        seq=seq,
+        payload=struct.pack("<I", maintenance_token & 0xFFFFFFFF),
+    )
+
+
+def build_hil_close_session(session_token: int, seq: int = 0) -> bytes:
+    """Build HIL_CLOSE_SESSION without implicitly releasing maintenance."""
+    return build_command(
+        MSG_HIL_CLOSE_SESSION,
+        seq=seq,
+        payload=struct.pack("<I", session_token & 0xFFFFFFFF),
+    )
+
+
+def build_hil_heartbeat(session_token: int, seq: int = 0) -> bytes:
+    """Build HIL_HEARTBEAT, which refreshes only the observer-session TTL."""
+    return build_command(
+        MSG_HIL_HEARTBEAT,
+        seq=seq,
+        payload=struct.pack("<I", session_token & 0xFFFFFFFF),
+    )
+
+
+def build_hil_capture(session_token: int, step_count: int, seq: int = 0) -> bytes:
+    """Build HIL_CAPTURE for the next ``1..32`` complete controller steps."""
+    if not HIL_CAPTURE_MIN_STEPS <= step_count <= HIL_CAPTURE_MAX_STEPS:
+        raise ValueError(
+            f"step_count must be in {HIL_CAPTURE_MIN_STEPS}..{HIL_CAPTURE_MAX_STEPS}"
+        )
+    return build_command(
+        MSG_HIL_CAPTURE,
+        seq=seq,
+        payload=struct.pack("<IB", session_token & 0xFFFFFFFF, step_count),
+    )
+
+
+def build_hil_abort_capture(session_token: int, seq: int = 0) -> bytes:
+    """Build HIL_ABORT_CAPTURE for the caller's active observer capture."""
+    return build_command(
+        MSG_HIL_ABORT_CAPTURE,
+        seq=seq,
+        payload=struct.pack("<I", session_token & 0xFFFFFFFF),
+    )
+
+
+def build_hil_mark(session_token: int, marker_id: int, seq: int = 0) -> bytes:
+    """Build HIL_MARK for the next controller-step boundary."""
+    return build_command(
+        MSG_HIL_MARK,
+        seq=seq,
+        payload=struct.pack(
+            "<II", session_token & 0xFFFFFFFF, marker_id & 0xFFFFFFFF
+        ),
+    )
+
+
+def build_hil_get_session_status(session_token: int, seq: int = 0) -> bytes:
+    """Build HIL_GET_SESSION_STATUS for the caller's observer session."""
+    return build_command(
+        MSG_HIL_GET_SESSION_STATUS,
+        seq=seq,
+        payload=struct.pack("<I", session_token & 0xFFFFFFFF),
+    )
+
+
+@dataclass
+class HilResult:
+    result: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == HIL_OK
+
+
+@dataclass
+class HilOpenSessionResult(HilResult):
+    session_id: int = 0
+    session_token: int = 0
+    trace_schema_version: int = 0
+    capability_mask: int = 0
+
+
+@dataclass
+class HilCaptureResult(HilResult):
+    capture_id: int = 0
+
+
+@dataclass
+class HilSessionStatus(HilResult):
+    session_open: bool = False
+    capture_active: bool = False
+    available: bool = False
+    session_id: int = 0
+    capture_id: int = 0
+    last_heartbeat_ms: int = 0
+    trace_schema_version: int = 0
+    output_disabled: bool = False
+
+
+def parse_hil_result(payload: bytes) -> HilResult:
+    """Decode a one-byte HIL result response, including error responses."""
+    return HilResult(payload[0] if payload else HIL_BAD_REQUEST)
+
+
+def parse_hil_open_session(payload: bytes) -> HilOpenSessionResult:
+    """Decode HIL_OPEN_SESSION's 12-byte success response."""
+    result = payload[0] if payload else HIL_BAD_REQUEST
+    if len(payload) < 12:
+        return HilOpenSessionResult(result)
+    session_id, session_token, schema_version = struct.unpack_from("<IIH", payload, 1)
+    return HilOpenSessionResult(
+        result,
+        session_id,
+        session_token,
+        schema_version,
+        payload[11],
+    )
+
+
+def parse_hil_capture(payload: bytes) -> HilCaptureResult:
+    """Decode HIL_CAPTURE's result and nonzero capture ID on success."""
+    result = payload[0] if payload else HIL_BAD_REQUEST
+    capture_id = struct.unpack_from("<I", payload, 1)[0] if len(payload) >= 5 else 0
+    return HilCaptureResult(result, capture_id)
+
+
+def parse_hil_session_status(payload: bytes) -> HilSessionStatus:
+    """Decode HIL_GET_CAPABILITY or HIL_GET_SESSION_STATUS's 19-byte body."""
+    result = payload[0] if payload else HIL_BAD_REQUEST
+    if len(payload) < 19:
+        return HilSessionStatus(result)
+    session_id, capture_id, last_heartbeat_ms, schema_version = struct.unpack_from(
+        "<IIIH", payload, 4
+    )
+    return HilSessionStatus(
+        result,
+        bool(payload[1]),
+        bool(payload[2]),
+        bool(payload[3]),
+        session_id,
+        capture_id,
+        last_heartbeat_ms,
+        schema_version,
+        bool(payload[18]),
+    )
 
 
 @dataclass

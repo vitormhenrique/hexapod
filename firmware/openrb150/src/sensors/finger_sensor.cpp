@@ -33,51 +33,28 @@ constexpr uint8_t kLpsAutoIncrement = 0x80;
 }  // namespace
 
 bool FingerSensorReader::write8(uint8_t addr, uint8_t reg, uint8_t value) {
-  wire_.beginTransmission(addr);
-  wire_.write(reg);
-  wire_.write(value);
-  return wire_.endTransmission() == 0;
+  const uint8_t data[2] = {reg, value};
+  return bus_.write(addr, data, sizeof(data));
 }
 
 bool FingerSensorReader::writeCmd16(uint8_t addr, uint8_t cmd, uint8_t low,
                                     uint8_t high) {
-  wire_.beginTransmission(addr);
-  wire_.write(cmd);
-  wire_.write(low);
-  wire_.write(high);
-  return wire_.endTransmission() == 0;
+  const uint8_t data[3] = {cmd, low, high};
+  return bus_.write(addr, data, sizeof(data));
 }
 
 bool FingerSensorReader::readCmd16(uint8_t addr, uint8_t cmd, uint16_t& out) {
-  wire_.beginTransmission(addr);
-  wire_.write(cmd);
-  // Repeated start (no stop) so the device keeps the command pointer.
-  if (wire_.endTransmission(false) != 0) {
-    return false;
-  }
-  if (wire_.requestFrom(addr, static_cast<uint8_t>(2)) != 2) {
-    return false;
-  }
-  const uint8_t low = static_cast<uint8_t>(wire_.read());
-  const uint8_t high = static_cast<uint8_t>(wire_.read());
+  uint8_t data[2] = {0, 0};
+  if (!bus_.writeRead(addr, &cmd, 1, data, sizeof(data))) return false;
+  const uint8_t low = data[0];
+  const uint8_t high = data[1];
   out = static_cast<uint16_t>(low | (static_cast<uint16_t>(high) << 8));
   return true;
 }
 
 bool FingerSensorReader::readRegs(uint8_t addr, uint8_t reg, uint8_t* buf,
                                   uint8_t len) {
-  wire_.beginTransmission(addr);
-  wire_.write(reg);
-  if (wire_.endTransmission(false) != 0) {
-    return false;
-  }
-  if (wire_.requestFrom(addr, len) != len) {
-    return false;
-  }
-  for (uint8_t i = 0; i < len; ++i) {
-    buf[i] = static_cast<uint8_t>(wire_.read());
-  }
-  return true;
+  return bus_.writeRead(addr, &reg, 1, buf, len);
 }
 
 bool FingerSensorReader::configureChannel() {

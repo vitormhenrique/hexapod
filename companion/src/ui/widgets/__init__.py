@@ -272,6 +272,13 @@ class NavRail(QFrame):
             btn.setChecked(True)
             self.navigated.emit(key)
 
+    def set_item_enabled(self, key: str, enabled: bool, tooltip: str = "") -> None:
+        """Enable or disable a page entry without changing its selected state."""
+        btn = self._buttons.get(key)
+        if btn:
+            btn.setEnabled(enabled)
+            btn.setToolTip("" if enabled else tooltip)
+
 
 class EventStrip(QFrame):
     """Bottom strip showing recent faults, commits, mode changes, etc."""

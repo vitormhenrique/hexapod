@@ -24,12 +24,17 @@ Usage:
     # (pip install pyserial), then put hexapod_protocol on the path:
     PYTHONPATH=protocol/python python tools/hil_smoke.py --port <PORT>
 
+    # After flashing openrb150_hil_output_disabled, prove that DXL output
+    # attempts are rejected by the immutable firmware guard:
+    cd companion && uv run python ../tools/hil_smoke.py --port <PORT> --hil-output-disabled
+
 Exit code 0 = all automated checks passed, 1 = a check failed, 2 = setup error.
 """
 
 from __future__ import annotations
 
 import argparse
+import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -54,6 +59,8 @@ EXPECTED_DEVICE_NAME = "OpenRB150-Hex"
 
 READ_TIMEOUT_S = 1.0
 INTER_CMD_PAUSE_S = 0.05
+HIL_REQUIRED_FLAGS = 0x1F
+STATE_MAC_MAINTENANCE = 8
 
 
 @dataclass
@@ -200,12 +207,168 @@ class SmokeRunner:
             f"feature_bits=0x{caps.feature_bits:08X}, name='{caps.device_name}'",
         )
 
-    def run(self) -> bool:
+    def _status(self):
+        result = self._exchange(api.MSG_GET_STATUS)
+        if result is None:
+            return None
+        try:
+            return api.parse_status(result[1])
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _capabilities(self):
+        result = self._exchange(api.MSG_GET_CAPABILITIES)
+        if result is None:
+            return None
+        try:
+            return api.parse_capabilities(result[1])
+        except Exception:  # noqa: BLE001
+            return None
+
+    def _wait_for_state(self, expected: int, timeout_s: float = 2.0):
+        deadline = time.monotonic() + timeout_s
+        status = self._status()
+        while time.monotonic() < deadline:
+            if status is not None and status.state == expected:
+                return status
+            time.sleep(INTER_CMD_PAUSE_S)
+            status = self._status()
+        return status
+
+    def _run_dxl_job(self, msg_id: int, payload: bytes):
+        submitted = self._exchange(msg_id, payload)
+        if submitted is None:
+            return None, "submit timed out"
+        try:
+            submit = api.parse_dxl_submit(submitted[1])
+        except Exception as exc:  # noqa: BLE001
+            return None, f"bad submit response: {exc}"
+        if not submit.accepted:
+            return None, f"submit result={submit.result}, slot={submit.slot}"
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            polled = self._exchange(api.MSG_DXL_GET_RESULT, bytes([submit.job_id]))
+            if polled is None:
+                time.sleep(INTER_CMD_PAUSE_S)
+                continue
+            try:
+                result = api.parse_dxl_result(polled[1])
+            except Exception as exc:  # noqa: BLE001
+                return None, f"bad result response: {exc}"
+            if result.done:
+                return result, f"code={result.code}, data={result.data.hex()}"
+            time.sleep(INTER_CMD_PAUSE_S)
+        return None, "job result timed out"
+
+    def check_hil_output_guard(self) -> None:
+        """Exercise only output attempts that the HIL build must reject."""
+        before = self._status()
+        caps = self._capabilities()
+        if before is None or caps is None:
+            self._record("HIL guard status", False, "status or capabilities unavailable")
+            return
+
+        self._record(
+            "HIL immutable build capability",
+            caps.hil_output_disabled,
+            f"build_flags=0x{caps.build_flags:02X}",
+        )
+        self._record(
+            "HIL output guards active",
+            (before.hil_flags & HIL_REQUIRED_FLAGS) == HIL_REQUIRED_FLAGS,
+            f"hil_flags=0x{before.hil_flags:02X}",
+        )
+        self._record(
+            "HIL DXL power initially OFF",
+            before.dxl_power is False,
+            f"dxl_power={before.dxl_power}, transitions={before.dxl_power_transitions}",
+        )
+        if not caps.hil_output_disabled:
+            return
+
+        entered = self._exchange(api.MSG_ENTER_MAINTENANCE)
+        if entered is None:
+            self._record("HIL maintenance lock", False, "ENTER_MAINTENANCE timed out")
+            return
+        try:
+            maint = api.parse_maint_result(entered[1])
+        except Exception as exc:  # noqa: BLE001
+            self._record("HIL maintenance lock", False, f"bad response: {exc}")
+            return
+        self._record(
+            "HIL maintenance lock",
+            maint.ok and maint.token != 0,
+            f"result={maint.result}, token={maint.token}",
+        )
+        if not maint.ok or maint.token == 0:
+            return
+
+        try:
+            state = self._wait_for_state(STATE_MAC_MAINTENANCE)
+            self._record(
+                "HIL enters maintenance state",
+                state is not None and state.state == STATE_MAC_MAINTENANCE,
+                f"state={state.state if state is not None else 'timeout'}",
+            )
+            if state is None or state.state != STATE_MAC_MAINTENANCE:
+                return
+
+            power, power_detail = self._run_dxl_job(api.MSG_DXL_POWER, b"\x01")
+            self._record(
+                "HIL blocks DXL power enable",
+                power is not None and power.code == api.DXL_CODE_OUTPUT_DISABLED,
+                power_detail,
+            )
+
+            # Normal torque-on first seeds Goal Position from the present pose.
+            # The HIL executor records both blocked torque and goal-write policy.
+            torque, torque_detail = self._run_dxl_job(api.MSG_DXL_TORQUE, b"\x01")
+            self._record(
+                "HIL blocks DXL torque and goal write",
+                torque is not None and torque.code == api.DXL_CODE_OUTPUT_DISABLED,
+                torque_detail,
+            )
+        finally:
+            released = self._exchange(
+                api.MSG_EXIT_MAINTENANCE, struct.pack("<I", maint.token)
+            )
+            self._record(
+                "HIL maintenance lock releases",
+                released is not None,
+                "EXIT_MAINTENANCE response" if released is not None else "timeout",
+            )
+
+        after = self._status()
+        if after is None:
+            self._record("HIL post-operation status", False, "GET_STATUS timed out")
+            return
+        self._record(
+            "HIL DXL rail remains OFF",
+            after.dxl_power is False
+            and after.dxl_power_transitions == before.dxl_power_transitions,
+            f"dxl_power={after.dxl_power}, transitions={after.dxl_power_transitions}",
+        )
+        self._record(
+            "HIL blocked-operation counters advance",
+            after.blocked_power_enable >= before.blocked_power_enable + 1
+            and after.blocked_torque_enable >= before.blocked_torque_enable + 1
+            and after.blocked_goal_write >= before.blocked_goal_write + 1,
+            "power={} torque={} goal={}".format(
+                after.blocked_power_enable,
+                after.blocked_torque_enable,
+                after.blocked_goal_write,
+            ),
+        )
+
+    def run(self, hil_output_disabled: bool = False) -> bool:
         print("Automated USB API checks:")
         self.check_hello()
         self.check_status()
         self.check_heartbeat_advances()
         self.check_capabilities()
+        if hil_output_disabled:
+            self.check_hil_output_guard()
         return all(c.passed for c in self.checks)
 
 
@@ -227,6 +390,23 @@ Manual hardware observations (see docs/hil_smoke_phase1.md for full detail):
            off raises the failsafe flag within ~250 ms.
   FAULT  - Trigger an estop / unsafe condition and confirm the firmware reports
            the fault and refuses motion.
+"""
+
+
+HIL_OUTPUT_DISABLED_CHECKLIST = """
+Output-disabled HIL physical observations:
+
+    BUILD  - Flash only the openrb150_hil_output_disabled image. The normal
+                     openrb150 image must not be used for this check.
+    DXL    - Keep the DXL power feed isolated for the first run. The automated
+                     power/torque requests above must report OutputDisabled while the
+                     DXL rail LED remains OFF.
+    PROBE  - With a safe isolated bench setup, retain logic-analyzer or equivalent
+                     evidence that no torque-enable or Sync Write packet reaches the
+                     DYNAMIXEL bus during the attempted commands.
+    LOG    - Save this script output with GET_STATUS/HIL status telemetry, the
+                     firmware artifact identity, and the physical observation. Software
+                     counters alone are not physical-output evidence.
 """
 
 
@@ -262,6 +442,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--list", action="store_true", help="list candidate serial ports and exit"
     )
+    parser.add_argument(
+        "--hil-output-disabled",
+        action="store_true",
+        help="require and exercise the immutable output-disabled HIL image",
+    )
     args = parser.parse_args(argv)
 
     if args.list:
@@ -285,12 +470,12 @@ def main(argv: list[str] | None = None) -> int:
 
     with port:
         runner = SmokeRunner(port)
-        ok = runner.run()
+        ok = runner.run(hil_output_disabled=args.hil_output_disabled)
 
     total = len(runner.checks)
     passed = sum(1 for c in runner.checks if c.passed)
     print(f"\nAutomated result: {passed}/{total} checks passed.")
-    print(MANUAL_CHECKLIST)
+    print(HIL_OUTPUT_DISABLED_CHECKLIST if args.hil_output_disabled else MANUAL_CHECKLIST)
     return 0 if ok else 1
 
 

@@ -39,9 +39,10 @@ enum class StreamId : uint8_t {
   LegState = 9,       // per-leg commanded foot target + IK reachability/clamp
   ControllerState = 10,  // decoded hand-controller intent + raw inputs (oha.4)
   RcDiagnostics = 11,    // raw CRSF ticks + frame health + link stats (a8n)
+  HilStatus = 12,        // immutable HIL guard counters + last blocked goals
 };
 
-constexpr uint8_t kNumStreams = 12;
+constexpr uint8_t kNumStreams = 13;
 
 // Telemetry frame msg-id base: a telemetry frame for StreamId s uses header
 // msg_id = kTelemetryFrameMsgBase + s. Chosen above the command ranges

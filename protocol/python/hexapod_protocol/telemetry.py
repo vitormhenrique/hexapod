@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 12
+NUM_STREAMS = 13
 
 
 class StreamId(IntEnum):
@@ -30,6 +30,7 @@ class StreamId(IntEnum):
     LEG_STATE = 9
     CONTROLLER_STATE = 10
     RC_DIAGNOSTICS = 11
+    HIL_STATUS = 12
 
 
 STREAM_NAMES = {
@@ -45,6 +46,7 @@ STREAM_NAMES = {
     StreamId.LEG_STATE: "leg_state",
     StreamId.CONTROLLER_STATE: "controller_state",
     StreamId.RC_DIAGNOSTICS: "rc_diagnostics",
+    StreamId.HIL_STATUS: "hil_status",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -144,6 +146,15 @@ class HealthTelemetry:
     fault_reason: int
     watchdog_missed: int
     battery_mv: int
+    hil_flags: int = 0
+    blocked_power_enable: int = 0
+    blocked_torque_enable: int = 0
+    blocked_goal_write: int = 0
+    blocked_dxl_write: int = 0
+    last_goal_sequence: int = 0
+    last_goal_count: int = 0
+    last_fault_reason: int = 0
+    last_fault_timestamp_ms: int = 0
 
     @property
     def state_name(self) -> str:
@@ -152,6 +163,12 @@ class HealthTelemetry:
     @property
     def fault_name(self) -> str:
         return FAULT_REASON_NAMES.get(self.fault_reason, f"0x{self.fault_reason:02X}")
+
+    @property
+    def last_fault_name(self) -> str:
+        return FAULT_REASON_NAMES.get(
+            self.last_fault_reason, f"0x{self.last_fault_reason:02X}"
+        )
 
 
 @dataclass
@@ -307,6 +324,23 @@ class ApiStatsTelemetry:
     rx_overflow: int = 0
 
 
+@dataclass
+class HilGoalTarget:
+    id: int
+    tick: int
+
+
+@dataclass
+class HilStatusTelemetry:
+    hil_flags: int = 0
+    last_goal_sequence: int = 0
+    blocked_power_enable: int = 0
+    blocked_torque_enable: int = 0
+    blocked_goal_write: int = 0
+    blocked_dxl_write: int = 0
+    goals: list[HilGoalTarget] = field(default_factory=list)
+
+
 # Joint roles (mirror config::JointRole: coxa/femur/tibia).
 JOINT_ROLE_NAMES = {0: "coxa", 1: "femur", 2: "tibia"}
 
@@ -441,7 +475,31 @@ def decode_health(p: bytes) -> HealthTelemetry:
     fault = p[5]
     wd = _u32(p, 6)
     batt = _u16(p, 10)
-    return HealthTelemetry(uptime, state, fault, wd, batt)
+    hil_flags = p[12] if len(p) >= 13 else 0
+    blocked_power_enable = _u32(p, 13) if len(p) >= 17 else 0
+    blocked_torque_enable = _u32(p, 17) if len(p) >= 21 else 0
+    blocked_goal_write = _u32(p, 21) if len(p) >= 25 else 0
+    blocked_dxl_write = _u32(p, 25) if len(p) >= 29 else 0
+    last_goal_sequence = _u32(p, 29) if len(p) >= 33 else 0
+    last_goal_count = p[33] if len(p) >= 34 else 0
+    last_fault_reason = p[34] if len(p) >= 35 else 0
+    last_fault_timestamp_ms = _u32(p, 35) if len(p) >= 39 else 0
+    return HealthTelemetry(
+        uptime,
+        state,
+        fault,
+        wd,
+        batt,
+        hil_flags,
+        blocked_power_enable,
+        blocked_torque_enable,
+        blocked_goal_write,
+        blocked_dxl_write,
+        last_goal_sequence,
+        last_goal_count,
+        last_fault_reason,
+        last_fault_timestamp_ms,
+    )
 
 
 def decode_control_state(p: bytes) -> ControlStateTelemetry:
@@ -580,7 +638,12 @@ def decode_api_stats(p: bytes) -> ApiStatsTelemetry:
     tx = _u32(p, 0)
     dropped: list[int] = []
     off = 4
-    for _ in range(NUM_STREAMS):
+    legacy_streams = 12
+    if len(p) == 4 + 4 * legacy_streams + 12:
+        dropped_count = legacy_streams
+    else:
+        dropped_count = NUM_STREAMS
+    for _ in range(dropped_count):
         if off + 4 > len(p):
             break
         dropped.append(_u32(p, off))
@@ -591,6 +654,27 @@ def decode_api_stats(p: bytes) -> ApiStatsTelemetry:
     rx_bad = _u32(p, off + 4) if off + 8 <= len(p) else 0
     rx_overflow = _u32(p, off + 8) if off + 12 <= len(p) else 0
     return ApiStatsTelemetry(tx, dropped, rx_frames, rx_bad, rx_overflow)
+
+
+def decode_hil_status(p: bytes) -> HilStatusTelemetry:
+    if len(p) < 22:
+        return HilStatusTelemetry()
+    goal_count = p[1]
+    out = HilStatusTelemetry(
+        hil_flags=p[0],
+        last_goal_sequence=_u32(p, 2),
+        blocked_power_enable=_u32(p, 6),
+        blocked_torque_enable=_u32(p, 10),
+        blocked_goal_write=_u32(p, 14),
+        blocked_dxl_write=_u32(p, 18),
+    )
+    off = 22
+    for _ in range(goal_count):
+        if off + 5 > len(p):
+            break
+        out.goals.append(HilGoalTarget(p[off], _i32(p, off + 1)))
+        off += 5
+    return out
 
 
 def decode_joint_state(p: bytes) -> JointStateTelemetry:
@@ -732,6 +816,7 @@ _DECODERS = {
     StreamId.LEG_STATE: decode_leg_state,
     StreamId.CONTROLLER_STATE: decode_controller_state,
     StreamId.RC_DIAGNOSTICS: decode_rc_diagnostics,
+    StreamId.HIL_STATUS: decode_hil_status,
 }
 
 

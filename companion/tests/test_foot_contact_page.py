@@ -79,6 +79,17 @@ def test_threshold_result_displays_values(qtbot) -> None:
     assert "near=100" in page.thr_result.text()
 
 
+def test_threshold_edit_blocks_invalid_persistent_calibration(qtbot) -> None:
+    _service, page = _make_page(qtbot)
+    page.thr_near.setValue(100)
+    page.thr_touch.setValue(300)
+    page.thr_load.setValue(200)
+
+    page._write_thresholds()
+
+    assert "load threshold" in page.thr_result.text()
+
+
 def test_calibrate_result_displays_mask(qtbot) -> None:
     service, page = _make_page(qtbot)
     res = api.SensorCalibrateResult(api.SENSOR_OK, 0x3F)

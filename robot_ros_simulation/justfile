@@ -4,8 +4,8 @@
 #
 # Prereqs: pixi (https://pixi.sh) installed and on PATH.
 # Notes:
-#   * Recipes use `pixi run -e {{ros_env}} ...` which auto-activates the env AND
-#     sources the colcon overlay (install/setup.sh). See AGENTS.md.
+#   * Direct ROS CLI recipes source the colcon overlay through
+#     scripts/with_overlay.sh so generated workspace interfaces load on macOS.
 #   * PIXI_PROJECT_MANIFEST is unset so the LOCAL pixi.toml is always used.
 
 set shell := ["zsh", "-cu"]
@@ -13,11 +13,17 @@ set shell := ["zsh", "-cu"]
 package := "HexNav_description"
 ros_env := env_var_or_default("ROS_ENV", env_var_or_default("PIXI_ENVIRONMENT_NAME", "jazzy"))
 manifest := justfile_directory() / "pixi.toml"
+overlay_runner := justfile_directory() / "scripts/with_overlay.sh"
 share_dir := "install/" + package + "/share/" + package
+monorepo_root := justfile_directory() / ".."
+jetson_source := monorepo_root / "jetson" / "src"
+companion_source := monorepo_root / "companion" / "src"
+protocol_source := monorepo_root / "protocol" / "python"
 
 # Always target THIS workspace's manifest, even if PIXI_PROJECT_MANIFEST is
 # inherited pointing somewhere else.
 pixi := "pixi run -e " + ros_env + " --manifest-path " + manifest
+pixi_overlay := pixi + " " + overlay_runner
 
 # Default: list available recipes.
 default:
@@ -54,45 +60,63 @@ clean:
 
 # Launch HexNav robot_state_publisher + ros2_control + RViz.
 launch:
-    {{pixi}} ros2 launch {{package}} display.launch.py
+    {{pixi_overlay}} ros2 launch {{package}} display.launch.py
+
+# Launch ControllerCore against named mock ros2_control joint feedback.
+sil-launch:
+    {{pixi_overlay}} ros2 launch hexapod_controller_ros sil.launch.py
+
+# Build the SIL graph, start loopback simulated firmware, and open the
+# companion app connected to it. The simulated endpoint deliberately exposes
+# only high-level motion, status, and limited telemetry; it never controls DXL.
+# Optional positional arguments: host port token rviz. Set rviz=false for a
+# headless simulation while keeping the companion app and ROS graph active.
+companion-sim host="127.0.0.1" port="5560" token="hexapod-sim" rviz="true":
+    {{pixi}} build
+    "{{justfile_directory()}}/scripts/run_companion_sim.sh" "{{ros_env}}" "{{host}}" "{{port}}" "{{token}}" "{{rviz}}"
+
+# Forward high-level MotionCommand messages to the OpenRB-150 through the
+# optional Jetson serial bridge. The MCU retains all authority and safety checks.
+jetson-ros port baud="115200" *args:
+    PYTHONPATH="{{jetson_source}}:{{companion_source}}:{{protocol_source}}${PYTHONPATH:+:$PYTHONPATH}" {{pixi_overlay}} python -m hexapod_jetson_bridge.ros2_node --ros-args -p serial_port:="{{port}}" -p baud:={{baud}} {{args}}
 
 # Launch HexNav under a ROS namespace.
 launch-ns namespace:
-    {{pixi}} ros2 launch {{package}} display.launch.py namespace:={{namespace}}
+    {{pixi_overlay}} ros2 launch {{package}} display.launch.py namespace:={{namespace}}
 
 # Launch HexNav with a URDF link/joint prefix.
 launch-prefix prefix:
-    {{pixi}} ros2 launch {{package}} display.launch.py prefix:={{prefix}}
+    {{pixi_overlay}} ros2 launch {{package}} display.launch.py prefix:={{prefix}}
 
 # --- Introspection ---------------------------------------------------------
 
 # Show the install prefix for HexNav_description.
 prefix:
-    {{pixi}} ros2 pkg prefix {{package}}
+    {{pixi_overlay}} ros2 pkg prefix {{package}}
 
 # List active ROS topics.
 topics:
-    {{pixi}} ros2 topic list
+    {{pixi_overlay}} ros2 topic list
 
 # List ros2_control controllers and their states.
 controllers:
-    {{pixi}} ros2 control list_controllers
+    {{pixi_overlay}} ros2 control list_controllers
 
 # Echo the published URDF once.
 echo-description:
-    {{pixi}} ros2 topic echo /robot_description --once
+    {{pixi_overlay}} ros2 topic echo /robot_description --once
 
 # Echo current joint states once.
 echo-joints:
-    {{pixi}} ros2 topic echo /joint_states --once
+    {{pixi_overlay}} ros2 topic echo /joint_states --once
 
 # Echo ros2_control dynamic joint states once.
 echo-dynamic-joints:
-    {{pixi}} ros2 topic echo /dynamic_joint_states --once
+    {{pixi_overlay}} ros2 topic echo /dynamic_joint_states --once
 
 # Continuously watch published joint states.
 watch-joints:
-    {{pixi}} ros2 topic echo /joint_states
+    {{pixi_overlay}} ros2 topic echo /joint_states
 
 # Send a sample position command to leg 5: coxa_yaw, femur_pitch, tibia_pitch.
 test-joints:
@@ -104,15 +128,15 @@ move-leg leg coxa femur tibia:
 
 # Send all 18 joint positions explicitly, in controller order.
 move-all-joints values:
-    {{pixi}} ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray '{data: [{{values}}]}'
+    {{pixi_overlay}} ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray '{data: [{{values}}]}'
 
 # Reset the commanded joint positions to zero.
 zero-joints:
-    {{pixi}} ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray '{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}'
+    {{pixi_overlay}} ros2 topic pub --once /position_controller/commands std_msgs/msg/Float64MultiArray '{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}'
 
 # Echo static transforms once.
 echo-tf:
-    {{pixi}} ros2 topic echo /tf_static --once
+    {{pixi_overlay}} ros2 topic echo /tf_static --once
 
 # Verify installed share files (launch, urdf, meshes).
 verify:

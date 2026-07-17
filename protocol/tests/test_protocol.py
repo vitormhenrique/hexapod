@@ -285,6 +285,31 @@ def test_api_parse_status():
     assert st.last_reset_control_progress == want["last_reset_control_progress"]
     assert st.last_reset_safety_state == want["last_reset_safety_state"]
     assert st.dxl_power_transitions == want["dxl_power_transitions"]
+    assert st.hil_output_disabled is True
+    assert st.hil_flags == want["hil_flags"]
+    assert st.blocked_power_enable == want["blocked_power_enable"]
+    assert st.blocked_torque_enable == want["blocked_torque_enable"]
+    assert st.blocked_goal_write == want["blocked_goal_write"]
+    assert st.blocked_dxl_write == want["blocked_dxl_write"]
+    assert st.last_goal_sequence == want["last_goal_sequence"]
+    assert st.last_goal_count == want["last_goal_count"]
+    assert st.last_fault_reason == want["last_fault_reason"]
+    assert st.last_fault_timestamp_ms == want["last_fault_timestamp_ms"]
+    assert st.last_fatal_reason == want["last_fatal_reason"]
+    assert st.last_fatal_stage == want["last_fatal_stage"]
+    assert st.last_fatal_task_name == want["last_fatal_task_name"]
+    assert st.last_fault_stack_pointer == want["last_fault_stack_pointer"]
+    assert st.last_fault_exception_return == want["last_fault_exception_return"]
+    assert [
+        st.last_fault_r0,
+        st.last_fault_r1,
+        st.last_fault_r2,
+        st.last_fault_r3,
+        st.last_fault_r12,
+        st.last_fault_lr,
+        st.last_fault_pc,
+        st.last_fault_xpsr,
+    ] == want["last_fault_registers"]
 
 
 def test_api_parse_legacy_status_defaults_reset_cause():
@@ -297,6 +322,44 @@ def test_api_parse_legacy_status_defaults_reset_cause():
     assert st.last_reset_control_progress == 0
     assert st.last_reset_safety_state == 0
     assert st.dxl_power_transitions == 0
+    assert st.hil_output_disabled is False
+    assert st.hil_flags == 0
+    assert st.blocked_power_enable == 0
+    assert st.blocked_torque_enable == 0
+    assert st.blocked_goal_write == 0
+    assert st.blocked_dxl_write == 0
+    assert st.last_goal_sequence == 0
+    assert st.last_goal_count == 0
+    assert st.last_fault_reason == 0
+    assert st.last_fault_timestamp_ms == 0
+    assert st.last_fatal_reason == 0
+    assert st.last_fatal_task_name == ""
+    assert st.last_fault_pc == 0
+
+
+def test_decode_health_hil_guard_extension():
+    legacy = struct.pack("<IBBIH", 123456, 2, 0, 0, 11800)
+    extended = legacy + struct.pack(
+        "<BIIIIIBBI", 0x1F, 11, 12, 13, 14, 15, 2, 4, 120000
+    )
+
+    st = tlm.decode_health(extended)
+    assert st.uptime_ms == 123456
+    assert st.hil_flags == 0x1F
+    assert st.blocked_power_enable == 11
+    assert st.blocked_torque_enable == 12
+    assert st.blocked_goal_write == 13
+    assert st.blocked_dxl_write == 14
+    assert st.last_goal_sequence == 15
+    assert st.last_goal_count == 2
+    assert st.last_fault_reason == 4
+    assert st.last_fault_timestamp_ms == 120000
+
+    legacy_status = tlm.decode_health(legacy)
+    assert legacy_status.hil_flags == 0
+    assert legacy_status.blocked_power_enable == 0
+    assert legacy_status.last_fault_reason == 0
+    assert legacy_status.last_fault_timestamp_ms == 0
 
 
 def test_api_parse_capabilities():
@@ -306,6 +369,8 @@ def test_api_parse_capabilities():
     dev = VECTORS["api"]["device"]
     assert caps.feature_bits == dev["feature_bits"]
     assert caps.device_name == dev["device_name"]
+    assert caps.build_flags == dev["build_flags"]
+    assert caps.hil_output_disabled is True
 
 
 def test_api_unknown_is_error():
@@ -1116,9 +1181,9 @@ def test_decode_hw_error_bits():
 
 
 def test_telemetry_stream_count_includes_joint_state():
-    # api_stats carries one dropped counter per stream; joint_state, servo_goals,
-    # leg_state, controller_state, and rc_diagnostics grow it to 12.
-    assert telemetry.NUM_STREAMS == 12
+    # api_stats carries one dropped counter per stream; HilStatus is appended at
+    # id 12 without renumbering the existing telemetry surface.
+    assert telemetry.NUM_STREAMS == 13
     assert (
         telemetry.stream_id_from_name("joint_state") == telemetry.StreamId.JOINT_STATE
     )
@@ -1134,6 +1199,7 @@ def test_telemetry_stream_count_includes_joint_state():
         telemetry.stream_id_from_name("rc_diagnostics")
         == telemetry.StreamId.RC_DIAGNOSTICS
     )
+    assert telemetry.stream_id_from_name("hil_status") == telemetry.StreamId.HIL_STATUS
 
 
 def test_decode_api_stats_with_rx_health_tail():
@@ -1160,6 +1226,23 @@ def test_decode_api_stats_with_rx_health_tail():
     rec2 = telemetry.decode_stream(int(telemetry.StreamId.API_STATS), payload)
     assert isinstance(rec2, telemetry.ApiStatsTelemetry)
     assert rec2.rx_overflow == 2
+
+
+def test_decode_hil_status_records_blocked_goal_ticks():
+    payload = struct.pack("<BBIIIII", 0x1F, 2, 15, 11, 12, 13, 14)
+    payload += struct.pack("<BiBi", 1, 2048, 2, 3072)
+    rec = telemetry.decode_hil_status(payload)
+    assert rec.hil_flags == 0x1F
+    assert rec.last_goal_sequence == 15
+    assert rec.blocked_power_enable == 11
+    assert rec.blocked_torque_enable == 12
+    assert rec.blocked_goal_write == 13
+    assert rec.blocked_dxl_write == 14
+    assert [(goal.id, goal.tick) for goal in rec.goals] == [(1, 2048), (2, 3072)]
+    assert isinstance(
+        telemetry.decode_stream(int(telemetry.StreamId.HIL_STATUS), payload),
+        telemetry.HilStatusTelemetry,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1280,6 +1363,34 @@ def test_decode_robot_config_roundtrip():
     cfg = cfgmod.default_robot_config()
     again = cfgmod.decode_robot_config(cfgmod.encode_robot_config(cfg))
     assert again == cfg
+
+
+def test_calibration_config_validation_matches_firmware_rules():
+    import copy
+
+    config = cfgmod.default_robot_config()
+    assert cfgmod.validate_robot_config(config) == []
+
+    no_home_radius = copy.deepcopy(config)
+    no_home_radius.geometry.home_radius_cmm = 0
+    assert "home radius" in "\n".join(cfgmod.validate_robot_config(no_home_radius))
+
+    unreachable_home = copy.deepcopy(config)
+    unreachable_home.geometry.home_radius_cmm = 30000
+    assert "two-link reach" in "\n".join(
+        cfgmod.validate_robot_config(unreachable_home)
+    )
+
+    invalid_servo = copy.deepcopy(config)
+    invalid_servo.servos[0].min_tick = invalid_servo.servos[0].max_tick
+    assert "min tick" in "\n".join(cfgmod.validate_robot_config(invalid_servo))
+
+    invalid_sensor = copy.deepcopy(config)
+    invalid_sensor.feet[0].enabled = 1
+    invalid_sensor.feet[0].near_thresh = 100
+    invalid_sensor.feet[0].touch_thresh = 300
+    invalid_sensor.feet[0].load_thresh = 200
+    assert "load threshold" in "\n".join(cfgmod.validate_robot_config(invalid_sensor))
 
 
 def test_decode_robot_config_rejects_bad_length_and_schema():

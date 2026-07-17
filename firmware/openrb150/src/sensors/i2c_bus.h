@@ -1,9 +1,9 @@
 #pragma once
 
 // ===========================================================================
-// I2C bus manager (single owner of Wire / the root I2C bus).
+// I2C bus manager (single owner of SERCOM0 / the root I2C bus).
 //
-// Per AGENTS.md 5.1 only the I2C task may touch Wire, the TCA9548A mux, the
+// Per AGENTS.md 5.1 only the I2C task may touch SERCOM0, the TCA9548A mux, the
 // 24LC32 EEPROM, and the foot sensors. This class encapsulates that ownership
 // and provides the Phase 1 discovery path (rbg.7):
 //
@@ -14,11 +14,11 @@
 // Exclusive selection matters because every foot board uses the same fixed
 // addresses (0x60 / 0x5C); only one mux channel may be enabled while probing.
 //
-// Arduino-only (pulls in Wire). The topology data model + classification logic
+// Arduino-only. The topology data model + classification logic
 // lives in i2c_topology.{h,cpp}, which is unit-tested on the host.
 // ===========================================================================
 
-#include <Wire.h>
+#include <Arduino.h>
 #include <stdint.h>
 
 #include "i2c_topology.h"
@@ -30,17 +30,26 @@ struct I2cStats {
   uint32_t root_scans = 0;
   uint32_t channel_scans = 0;
   uint32_t mux_select_errors = 0;
-  uint8_t last_error = 0;  // last Wire endTransmission() status
+  uint32_t timeouts = 0;
+  uint32_t recoveries = 0;
+  uint8_t last_error = 0;
 };
 
 class I2cBus {
  public:
-  explicit I2cBus(arduino::TwoWire& wire) : wire_(wire) {}
+  I2cBus() = default;
 
   // Initialize the I2C peripheral. Does not scan. Default 100 kHz keeps long
   // foot-sensor harness runs reliable; raise later only if proven safe.
-  void begin(uint32_t clock_hz = 100000);
+  bool begin(uint32_t clock_hz = 100000);
   bool isReady() const { return ready_; }
+
+  bool write(uint8_t addr, const uint8_t* data, uint8_t len,
+             bool send_stop = true);
+  bool read(uint8_t addr, uint8_t* data, uint8_t len,
+            bool send_stop = true);
+  bool writeRead(uint8_t addr, const uint8_t* write_data, uint8_t write_len,
+                 uint8_t* read_data, uint8_t read_len);
 
   // Probe a 7-bit address on the currently selected bus/channel. Returns true
   // if the device ACKed (endTransmission() == 0).
@@ -69,9 +78,17 @@ class I2cBus {
   const I2cStats& stats() const { return stats_; }
 
  private:
-  arduino::TwoWire& wire_;
+  bool initializeHardware();
+  bool start(uint8_t addr, bool read);
+  bool sendStop();
+  bool waitForFlag(uint8_t flags);
+  bool waitForSync(uint32_t mask);
+  bool recover();
+  bool fail(uint8_t error, bool recover_bus);
+
   I2cStats stats_;
   bool ready_ = false;
+  uint32_t clock_hz_ = 100000;
 };
 
 }  // namespace i2c

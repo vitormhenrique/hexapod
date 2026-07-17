@@ -3,6 +3,16 @@
 
   <xacro:macro name="HexNav" params="prefix">
 
+  <!-- Massless kinematic root: KDL rejects inertia on the tree root, and the
+       SIL odometry TF (odom -> base_footprint) needs a dedicated root frame
+       that robot_state_publisher does not also parent. -->
+  <link name="${prefix}base_footprint"/>
+  <joint name="${prefix}base_footprint_joint" type="fixed">
+    <parent link="${prefix}base_footprint"/>
+    <child link="${prefix}base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
   <link name="${prefix}base_link">
       <inertial>
         <origin xyz="0.076463 0.126463 -0.000093" rpy="0 0 0"/>

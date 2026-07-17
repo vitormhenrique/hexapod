@@ -13,6 +13,12 @@ from typing import Iterator, Optional, Protocol
 
 from diagnostics import print_exception
 
+from .tcp_proxy import (
+    TcpProxyLink as TcpProxyLink,
+    is_tcp_proxy_endpoint,
+    open_tcp_proxy,
+)
+
 
 class ByteStream(Protocol):
     """Minimal duplex byte stream the protocol client needs."""
@@ -166,3 +172,10 @@ def open_serial(port: str, baud: int = 115200) -> Optional[SerialLink]:
     except Exception as exc:
         print_exception(f"opening serial port {port} failed", exc)
         return None
+
+
+def open_transport(endpoint: str, baud: int = 115200) -> Optional[ByteStream]:
+    """Open a direct serial endpoint or an authenticated Jetson TCP proxy."""
+    if is_tcp_proxy_endpoint(endpoint):
+        return open_tcp_proxy(endpoint)
+    return open_serial(endpoint, baud=baud)

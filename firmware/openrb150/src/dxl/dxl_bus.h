@@ -67,14 +67,10 @@ class DxlBus {
   // true and fills `out` on success. Maintenance-safe (no torque/goal writes).
   bool ping(uint8_t id, ServoProfile& out);
 
-  // Scan the inclusive ID range [first_id, last_id], rebuilding the profile
-  // table. Returns the number of servos found and stored. Requires DXL power
-  // to be ON to detect anything.
-  uint8_t scan(uint8_t first_id, uint8_t last_id);
-
   // Incremental discovery used by RC arming. beginDiscovery() clears the
-  // profile table; each discoverId() call performs at most one servo ping so
-  // the high-priority DXL task returns to the scheduler between IDs.
+  // profile table; each discoverId() call performs at most one servo ping. It
+  // is also the only supported maintenance-scan primitive so the high-priority
+  // DXL task can return to the scheduler between IDs.
   void beginDiscovery();
   bool discoverId(uint8_t id);
 

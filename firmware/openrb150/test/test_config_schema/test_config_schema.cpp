@@ -209,6 +209,20 @@ void test_validate_rejects_zero_home_radius() {
   TEST_ASSERT_FALSE(validateRobotConfig(cfg));
 }
 
+void test_validate_rejects_unreachable_home_stance() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  cfg.geometry.home_radius_cmm = 30000;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  // Exact annulus boundaries remain usable neutral poses.
+  defaultRobotConfig(cfg);
+  cfg.geometry.home_radius_cmm = static_cast<uint16_t>(
+      cfg.links.coxa_cmm + cfg.links.femur_cmm + cfg.links.tibia_cmm);
+  cfg.geometry.home_foot_z_cmm = 0;
+  TEST_ASSERT_TRUE(validateRobotConfig(cfg));
+}
+
 void test_validate_rejects_missing_joint_slot() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
@@ -323,6 +337,7 @@ int main(int, char**) {
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
   RUN_TEST(test_validate_rejects_zero_home_radius);
+  RUN_TEST(test_validate_rejects_unreachable_home_stance);
   RUN_TEST(test_validate_rejects_missing_joint_slot);
   RUN_TEST(test_validate_rejects_unsafe_gait_and_features);
   RUN_TEST(test_validate_rejects_bad_foot_calibration);

@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QVBoxLayout,
-    QWidget,
 )
 
 from hexapod_protocol import telemetry as tlm

@@ -25,6 +25,7 @@ Visualization Manager:
     - Class: rviz_default_plugins/TF
       Name: TF
       Value: true
+      Marker Scale: 0.2
       Show Arrows: true
       Show Axes: true
       Show Names: true

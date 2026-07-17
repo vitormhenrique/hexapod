@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.service.event.connect(self.event_strip.add)
         self.service.status_received.connect(self._on_status)
         self.service.telemetry.connect(self._on_telemetry)
+        self.service.simulation_mode_changed.connect(self._on_simulation_mode)
         self.service.maint_lock_changed.connect(
             lambda held, _tok: self.safety_bar.lock.set(
                 "HELD" if held else "none", "warn" if held else "idle"
@@ -130,6 +131,14 @@ class MainWindow(QMainWindow):
         self._last_fault_reason = 0
 
         self.nav.select("connect")
+
+    def connect_endpoint(self, endpoint: str) -> None:
+        """Select the Connect page and begin an application-startup connection."""
+        self._navigate("connect")
+        page = self.stack.widget(self._pages["connect"])
+        if hasattr(page, "port_combo"):
+            page.port_combo.setCurrentText(endpoint)
+        self.service.connect_to(endpoint)
 
     def _navigate(self, key: str) -> None:
         idx = self._pages.get(key)
@@ -173,6 +182,23 @@ class MainWindow(QMainWindow):
                 "FAILSAFE" if record.failsafe else "OK",
                 "error" if record.failsafe else "ok",
             )
+
+    def _on_simulation_mode(self, enabled: bool) -> None:
+        hardware_pages = (
+            "foot_contact",
+            "passive_pose",
+            "leg_lab",
+            "servo_config",
+            "servo_tuning",
+            "sensors",
+            "rc_troubleshooting",
+        )
+        tooltip = "Unavailable in the ROS simulated firmware."
+        for key in hardware_pages:
+            self.nav.set_item_enabled(key, not enabled, tooltip)
+        if enabled:
+            self.event_strip.add("simulation", "ROS simulated firmware connected")
+            self._navigate("gait_lab")
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         self.service.disconnect()

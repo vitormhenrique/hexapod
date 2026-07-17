@@ -84,6 +84,7 @@ enum class Code : uint8_t {
   BusError = 3,    // a bus/library transaction failed
   Unsupported = 4,  // job type / parameter not available on this table
   VerifyFailed = 5,  // write succeeded but read-back did not match
+  OutputDisabled = 6,  // immutable output-disabled HIL guard rejected a write
 };
 
 // Largest serialized job result: a full scan returns 1 count byte + up to 24

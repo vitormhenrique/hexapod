@@ -60,7 +60,7 @@ static_assert(kBatteryDividerRatio >= kBatteryMaxInputMv / kBatteryReferenceMv,
 // Initialize board I/O and enforce safe boot defaults:
 //   - DYNAMIXEL power FET driven OFF (servos unpowered)
 //   - USER LED configured as output, off
-//   - Battery ADC configured (resolution set)
+//   - Battery ADC pin configured as input
 // Call once early in setup(), before any DXL/motion code.
 void init();
 
@@ -83,14 +83,16 @@ bool dxlPowerEnabled();
 uint32_t dxlPowerTransitions();
 
 // --- Battery monitor --------------------------------------------------------
-// Raw 12-bit ADC counts at the battery sense pin (0..4095).
-uint16_t readBatteryRaw();
+// Read the battery sense pin with bounded ADC register waits. Returns false if
+// the ADC cannot synchronize or complete a conversion; callers must treat that
+// as an invalid battery reading and remain disarmed.
+bool readBatteryRaw(uint16_t& raw);
 // Voltage at the ADC pin itself (after the on-board divider), in millivolts.
 // This is the value to read against a meter when calibrating the divider ratio.
-uint16_t readBatteryPinMilliVolts();
+bool readBatteryPinMilliVolts(uint16_t& millivolts);
 // Estimated pack voltage in millivolts, using kBatteryDividerRatio. Accurate
 // only once that ratio (and optionally kBatteryReferenceMv) is HIL-calibrated
 // via the build-flag overrides documented above.
-uint16_t readBatteryMilliVolts();
+bool readBatteryMilliVolts(uint16_t& millivolts);
 
 }  // namespace board

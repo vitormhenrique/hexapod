@@ -1,5 +1,7 @@
 #include "dxl_bus.h"
 
+#include "../hil/output_guard.h"
+
 namespace dxl {
 
 using namespace ControlTableItem;
@@ -68,25 +70,6 @@ bool DxlBus::ping(uint8_t id, ServoProfile& out) {
   stats_.pings_fail++;
   stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
   return false;
-}
-
-uint8_t DxlBus::scan(uint8_t first_id, uint8_t last_id) {
-  count_ = 0;
-  stats_.scans++;
-  if (!ready_) {
-    return 0;
-  }
-  if (last_id > kMaxServoId) {
-    last_id = kMaxServoId;
-  }
-
-  for (uint16_t id = first_id; id <= last_id; ++id) {
-    ServoProfile p;
-    if (ping(static_cast<uint8_t>(id), p) && count_ < kMaxServos) {
-      servos_[count_++] = p;
-    }
-  }
-  return count_;
 }
 
 void DxlBus::beginDiscovery() {
@@ -176,6 +159,9 @@ void DxlBus::selectProtocol(TableKind kind) {
 }
 
 uint8_t DxlBus::setTorqueAll(bool on) {
+  if (!hil::outputGuard().allowTorque(on)) {
+    return 0;
+  }
   if (!ready_) {
     return 0;
   }
@@ -200,6 +186,13 @@ uint8_t DxlBus::setTorqueAll(bool on) {
 
 bool DxlBus::writeGoalPositions(const GoalTarget* targets, uint8_t count) {
   if (!ready_ || targets == nullptr || count == 0) {
+    return false;
+  }
+  if (!hil::outputGuard().allowGoalWrite(count)) {
+    for (uint8_t i = 0; i < count; ++i) {
+      hil::outputGuard().recordBlockedGoal(i, targets[i].id, targets[i].tick);
+    }
+    hil::outputGuard().finishBlockedGoalWrite();
     return false;
   }
 
@@ -307,6 +300,9 @@ bool DxlBus::readRegister(uint8_t id, TableKind table, uint16_t addr,
 
 bool DxlBus::writeRegister(uint8_t id, TableKind table, uint16_t addr,
                            uint8_t len, int32_t value) {
+  if (!hil::outputGuard().allowDxlWrite()) {
+    return false;
+  }
   if (!ready_ || (len != 1 && len != 2 && len != 4)) {
     return false;
   }
@@ -326,6 +322,9 @@ bool DxlBus::writeRegister(uint8_t id, TableKind table, uint16_t addr,
 }
 
 bool DxlBus::setTorqueOne(uint8_t id, TableKind table, bool on) {
+  if (!hil::outputGuard().allowTorque(on)) {
+    return false;
+  }
   if (!ready_) {
     return false;
   }

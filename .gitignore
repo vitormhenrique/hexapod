@@ -23,6 +23,7 @@ __pycache__/
 .venv/
 venv/
 .venv-*/
+dist/
 
 # ROS 2 / colcon build artifacts (robot_ros_simulation)
 build/

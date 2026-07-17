@@ -26,6 +26,9 @@ def generate_launch_description():
     ns = LaunchConfiguration("namespace")
     prefix = LaunchConfiguration("prefix")
     gui = LaunchConfiguration("gui")
+    rviz = LaunchConfiguration("rviz")
+    rvizconfig = LaunchConfiguration("rvizconfig")
+    velocity_controller = LaunchConfiguration("velocity_controller")
 
     robot_description = ParameterValue(
         Command(["xacro ", xacro_file, " prefix:=", prefix]),
@@ -48,6 +51,21 @@ def generate_launch_description():
                 "gui",
                 default_value="true",
                 description="Launch the joint slider control GUI",
+            ),
+            DeclareLaunchArgument(
+                "rviz",
+                default_value="true",
+                description="Launch RViz2",
+            ),
+            DeclareLaunchArgument(
+                "rvizconfig",
+                default_value=rviz_file,
+                description="RViz2 configuration file",
+            ),
+            DeclareLaunchArgument(
+                "velocity_controller",
+                default_value="true",
+                description="Spawn the mock velocity controller",
             ),
             GroupAction(
                 [
@@ -103,14 +121,16 @@ def generate_launch_description():
                             "controller_manager",
                         ],
                         output="screen",
+                        condition=IfCondition(velocity_controller),
                     ),
                     # RViz2
                     Node(
                         package="rviz2",
                         executable="rviz2",
                         name="rviz2",
-                        arguments=["-d", rviz_file],
+                        arguments=["-d", rvizconfig],
                         output="screen",
+                        condition=IfCondition(rviz),
                     ),
                     # Joint slider control GUI (publishes /position_controller/commands)
                     Node(

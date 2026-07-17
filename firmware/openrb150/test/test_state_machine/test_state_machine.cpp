@@ -263,6 +263,29 @@ void test_host_estop_forces_estop() {
   TEST_ASSERT_EQUAL(FaultReason::HostEstop, m.faultReason());
 }
 
+void test_last_fault_survives_estop_auto_release() {
+  StateMachine m = atStandReady();
+  StateInputs in = healthy();
+  in.rc_armed = true;
+  in.host_estop = true;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 1234));
+  TEST_ASSERT_EQUAL(FaultReason::HostEstop, m.lastFaultReason());
+  TEST_ASSERT_EQUAL_UINT32(1234, m.lastFaultTimestampMs());
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 1239));
+  TEST_ASSERT_EQUAL_UINT32(1234, m.lastFaultTimestampMs());
+
+  in.host_estop = false;
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 1244));
+  TEST_ASSERT_EQUAL(FaultReason::None, m.faultReason());
+  TEST_ASSERT_EQUAL(FaultReason::HostEstop, m.lastFaultReason());
+  TEST_ASSERT_EQUAL_UINT32(1234, m.lastFaultTimestampMs());
+
+  in.watchdog_fault = true;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 1254));
+  TEST_ASSERT_EQUAL(FaultReason::Watchdog, m.lastFaultReason());
+  TEST_ASSERT_EQUAL_UINT32(1254, m.lastFaultTimestampMs());
+}
+
 void test_estop_recovers_on_bench_with_failsafe_held() {
   // Bench robot with no RC receiver: the bridge holds failsafe=true with
   // ever_seen=false. A host ESTOP must still be recoverable -- without the
@@ -538,6 +561,7 @@ int main(int, char**) {
   RUN_TEST(test_kill_forces_estop_and_recovers);
   RUN_TEST(test_kill_without_rc_ever_seen_stays_disarmed);
   RUN_TEST(test_host_estop_forces_estop);
+  RUN_TEST(test_last_fault_survives_estop_auto_release);
   RUN_TEST(test_estop_recovers_on_bench_with_failsafe_held);
   RUN_TEST(test_low_battery_forces_estop);
   RUN_TEST(test_transient_battery_dip_does_not_estop);

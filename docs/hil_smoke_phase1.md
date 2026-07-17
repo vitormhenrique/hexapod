@@ -46,7 +46,8 @@ PYTHONPATH=protocol/python python tools/hil_smoke.py --port <PORT>
 
 Expected automated checks (all PASS):
 
-- [ ] **USB HELLO protocol** — reports protocol v0.1.
+- [ ] **USB HELLO protocol** — reports the current protocol version (v0.3 or
+      newer).
 - [ ] **USB HELLO device identity** — name `OpenRB150-Hex`, firmware version.
 - [ ] **DXL power OFF at boot** — `GET_STATUS` shows `dxl_power=False`.
 - [ ] **No watchdog misses** — `watchdog_missed == 0` at idle.
@@ -57,13 +58,42 @@ Expected automated checks (all PASS):
 If `--port` is omitted the script auto-detects a single USB CDC port. Use
 `--list` to enumerate ports.
 
+## 2a. Immutable Output-Disabled HIL Build
+
+This check is for the dedicated HIL image only. It deliberately requests DXL
+power-on and torque-on through the ordinary maintenance API, then verifies that
+the firmware rejects both requests with `OutputDisabled`, leaves the DXL rail
+off, and advances the HIL guard counters. It does not energize servos.
+
+```bash
+cd firmware/openrb150
+pio run -e openrb150_hil_output_disabled -t upload
+
+cd ../../companion
+uv run python ../tools/hil_smoke.py --port <PORT> --hil-output-disabled
+```
+
+Expected automated checks (all PASS):
+
+- [ ] `GET_CAPABILITIES` reports the immutable output-disabled HIL build.
+- [ ] `GET_STATUS` reports all HIL output guards active while DXL power is off.
+- [ ] DXL power-on and torque-on jobs return `OutputDisabled`.
+- [ ] DXL power stays off, power-transition count does not change, and blocked
+      power, torque, and goal-write counters advance.
+
+The protocol evidence is necessary but not sufficient for physical safety
+proof. On an isolated bench, retain a DXL rail observation and a bus probe or
+logic-analyzer capture showing no torque-enable or Sync Write packet during the
+attempted operations. Do not run this mode with the normal `openrb150` image.
+
 ## 3. DYNAMIXEL bus (bench, single servo)
 
 > Requires 12 V DXL power. Keep the servo unloaded.
 
 1. Connect one MX-28AT to the DXL bus; apply 12 V DXL power.
 2. Enable DXL power via firmware (Phase 2 command or bench scan path), then run
-   a maintenance scan (`DxlBus::scan` / Phase 2 `DXL_SCAN`).
+      a maintenance `DXL_SCAN`. The executor advances exactly one ID per DXL task
+      cycle; it remains `Running` while the requested range is in progress.
 3. Confirm:
    - [ ] Servo is discovered at its expected ID.
    - [ ] Model/protocol detected correctly (MX-28 legacy = Protocol 1.0 by
@@ -72,6 +102,18 @@ If `--port` is omitted the script auto-detects a single USB CDC port. Use
    - [ ] Present position / voltage / temperature read back sane values.
    - [ ] Bus error counters stay at 0 during a clean scan.
 4. Power the DXL bus back OFF before continuing.
+
+### Absent-ID watchdog regression
+
+With the expected 18-servo bus connected and torque off, request `DXL_SCAN`
+for IDs `1..30`. Poll `DXL_GET_RESULT` until it completes. Confirm:
+
+- [ ] The scan remains responsive while the 12 absent IDs time out one per DXL
+      task cycle.
+- [ ] `GET_STATUS` never reports a watchdog miss, `FaultHard`, or `ESTOP`.
+- [ ] The maintenance lock remains valid through the completed result.
+- [ ] The result contains the discovered servos and no stale pre-scan status
+      values are reported while it is still running.
 
 ## 4. I2C topology (mux + sensors)
 

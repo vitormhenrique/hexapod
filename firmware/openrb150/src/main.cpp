@@ -2,6 +2,7 @@
 
 #include "app/tasks.h"
 #include "board/board.h"
+#include "safety/fault_capture.h"
 
 // ---------------------------------------------------------------------------
 // OpenRB-150 firmware entry point.
@@ -19,18 +20,24 @@
 // ---------------------------------------------------------------------------
 
 void setup() {
+  fault_capture::init();
+
   // PM->RCAUSE identifies the previous reset (POR/BOD/EXT/WDT/SYST). Capture it
   // before peripheral initialization so post-reset diagnostics are definitive.
   app::setResetCause(PM->RCAUSE.reg);
 
   // Safe boot: configure pins and force DYNAMIXEL power OFF before anything.
   board::init();
+  fault_capture::markStartupStage(
+      fault_capture::StartupStage::BoardInitialized);
 
   // USB CDC (Serial) host link. Non-blocking: do not wait for the host so the
   // board still runs when nothing is connected.
   Serial.begin(115200);
+  fault_capture::markStartupStage(fault_capture::StartupStage::SerialStarted);
 
   // Create the RTOS tasks and start the scheduler. Does not return.
+  fault_capture::markStartupStage(fault_capture::StartupStage::AppStarting);
   app::start();
 }
 

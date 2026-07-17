@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hexapod-jetson-bridge"
+version = "0.1.0"
+description = "High-level OpenRB-150 motion and telemetry bridge for the hexapod Jetson."
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = { text = "MIT" }
+dependencies = [
+    "hexapod-companion",
+    "hexapod-protocol",
+]
+
+[project.scripts]
+hexapod-jetson-relay = "hexapod_jetson_bridge.tcp_relay:main"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pyright>=1.1.407"]
+
+[tool.hatch.build.targets.wheel]
+only-include = ["src"]
+sources = ["src"]
+
+[tool.uv.sources]
+hexapod-companion = { path = "../companion", editable = true }
+hexapod-protocol = { path = "../protocol/python", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

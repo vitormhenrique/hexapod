@@ -68,14 +68,22 @@ ros-humble-desktop = "*"
 [feature.jazzy]
 channels = ["https://prefix.dev/robostack-jazzy"]
 
+# Fast DDS floods macOS consoles with per-thread "Problem to set affinity ...
+# Protocol family not supported" system errors (thread affinity is a Linux
+# API). Cyclone DDS has no such probe, so it is the default RMW here.
+[feature.jazzy.activation.env]
+RMW_IMPLEMENTATION = "rmw_cyclonedds_cpp"
+
 [feature.jazzy.dependencies]
 ros-jazzy-desktop = "*"
+ros-jazzy-rmw-cyclonedds-cpp = "*"
 ros-jazzy-ros-gz = "*" 
 gz-sim8 = "*"
 ros-jazzy-joint-state-publisher-gui = "*"
 ros-jazzy-ros2-control = "*"
 ros-jazzy-ros2-controllers = "*"
 filelock = "*"
+pyserial = "*"
 
 ### ROS Kilted ####
 [feature.kilted]

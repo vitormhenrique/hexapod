@@ -3,14 +3,12 @@
 namespace config {
 
 namespace {
-// Keep read/write chunks within the SAMD Wire buffer (256 bytes); 32 also keeps
-// writes inside a single EEPROM page.
+// Keep reads aligned with the EEPROM page size and bound each transaction.
 constexpr uint8_t kReadChunk = 32;
 }  // namespace
 
 bool Eeprom24LC32::isReady() {
-  wire_.beginTransmission(addr_);
-  return wire_.endTransmission() == 0;
+  return bus_.write(addr_, nullptr, 0);
 }
 
 bool Eeprom24LC32::waitWriteComplete() {
@@ -35,37 +33,25 @@ bool Eeprom24LC32::read(uint16_t addr, uint8_t* buf, uint16_t len) {
       n = kReadChunk;
     }
 
-    // Set the word address with a repeated start (no stop) before reading.
-    wire_.beginTransmission(addr_);
-    wire_.write(static_cast<uint8_t>((cur >> 8) & 0xFF));
-    wire_.write(static_cast<uint8_t>(cur & 0xFF));
-    if (wire_.endTransmission(false) != 0) {
-      return false;
-    }
-
-    const uint8_t got =
-        wire_.requestFrom(addr_, static_cast<uint8_t>(n), static_cast<uint8_t>(true));
-    if (got != n) {
-      return false;
-    }
-    for (uint16_t i = 0; i < n; ++i) {
-      buf[off + i] = static_cast<uint8_t>(wire_.read());
-    }
+    const uint8_t address[2] = {
+        static_cast<uint8_t>((cur >> 8) & 0xFF),
+        static_cast<uint8_t>(cur & 0xFF),
+    };
+    if (!bus_.writeRead(addr_, address, sizeof(address), buf + off,
+                        static_cast<uint8_t>(n))) return false;
     off = static_cast<uint16_t>(off + n);
   }
   return true;
 }
 
 bool Eeprom24LC32::writePage(uint16_t addr, const uint8_t* buf, uint8_t len) {
-  wire_.beginTransmission(addr_);
-  wire_.write(static_cast<uint8_t>((addr >> 8) & 0xFF));
-  wire_.write(static_cast<uint8_t>(addr & 0xFF));
+  uint8_t data[kPageSize + 2];
+  data[0] = static_cast<uint8_t>((addr >> 8) & 0xFF);
+  data[1] = static_cast<uint8_t>(addr & 0xFF);
   for (uint8_t i = 0; i < len; ++i) {
-    wire_.write(buf[i]);
+    data[i + 2] = buf[i];
   }
-  if (wire_.endTransmission() != 0) {
-    return false;
-  }
+  if (!bus_.write(addr_, data, static_cast<uint8_t>(len + 2))) return false;
   return waitWriteComplete();
 }
 

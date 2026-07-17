@@ -18,12 +18,25 @@ from hexapod_protocol import api, telemetry as tlm
 from hexapod_protocol.framing import VERSION_MAJOR, VERSION_MINOR, version_compatible
 
 from diagnostics import print_exception
-from transport import list_serial_ports, open_serial
+from transport import (
+    is_tcp_proxy_endpoint,
+    list_serial_ports,
+    open_serial,
+    open_tcp_proxy,
+)
 from transport.protocol_client import ProtocolClient
 
 _STATE_DISARMED = tlm.SafetyState.DISARMED
 _STATE_MAC_MAINTENANCE = tlm.SafetyState.MAC_MAINTENANCE
 _STATE_PASSIVE = tlm.SafetyState.PASSIVE_POSE_STREAM
+_SIMULATION_DEVICE_NAME = "HexNav ROS SIM"
+_SIMULATION_STREAMS = frozenset(
+    (
+        int(tlm.StreamId.HEALTH),
+        int(tlm.StreamId.CONTROL_STATE),
+        int(tlm.StreamId.RC_INPUT),
+    )
+)
 
 
 class ConnectionService(QObject):
@@ -59,6 +72,7 @@ class ConnectionService(QObject):
     gait_test_changed = Signal(bool, str)  # active, phase/detail
     gait_test_busy_changed = Signal(bool)
     state_changed = Signal(int)  # latest safety state (-1 = unknown/disconnected)
+    simulation_mode_changed = Signal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -70,6 +84,7 @@ class ConnectionService(QObject):
         # thread via our own status_received signal so pages can gate
         # controls without each re-decoding StatusInfo.
         self._robot_state: int = -1
+        self._simulation_mode = False
         self.status_received.connect(self._track_state)
         # Status-poll lifecycle: QTimer.start()/stop() must run on the thread
         # that owns the timer (this GUI-thread object). connect_to()'s worker
@@ -113,6 +128,11 @@ class ConnectionService(QObject):
         """Latest safety state from status polling (-1 when unknown)."""
         return self._robot_state
 
+    @property
+    def simulation_mode(self) -> bool:
+        """Whether the current endpoint is the local ROS simulated firmware."""
+        return self._simulation_mode
+
     def _track_state(self, st) -> None:
         if st.state != self._robot_state:
             self._robot_state = st.state
@@ -123,8 +143,13 @@ class ConnectionService(QObject):
             self._robot_state = -1
             self.state_changed.emit(-1)
 
+    def _set_simulation_mode(self, enabled: bool) -> None:
+        if enabled != self._simulation_mode:
+            self._simulation_mode = enabled
+            self.simulation_mode_changed.emit(enabled)
+
     def connect_to(self, port: str, baud: int = 115200) -> None:
-        """Open the port and handshake in a worker thread (non-blocking)."""
+        """Open a serial or proxy endpoint and handshake without blocking the UI."""
         if self.is_connected:
             self.disconnect()
 
@@ -139,7 +164,10 @@ class ConnectionService(QObject):
                     return
                 client: Optional[ProtocolClient] = None
                 try:
-                    link = open_serial(attempt_port, baud=baud)
+                    if is_tcp_proxy_endpoint(attempt_port):
+                        link = open_tcp_proxy(attempt_port)
+                    else:
+                        link = open_serial(attempt_port, baud=baud)
                     if link is None:
                         raise RuntimeError(f"could not open {attempt_port}")
                     client = ProtocolClient(link)
@@ -165,6 +193,9 @@ class ConnectionService(QObject):
                             break
                     if hello is None:
                         raise RuntimeError(f"no HELLO response from {attempt_port}")
+                    self._set_simulation_mode(
+                        hello.device_name == _SIMULATION_DEVICE_NAME
+                    )
                     self.hello_received.emit(hello)
                     # Surface a protocol version mismatch as a diagnostic rather
                     # than silently talking to incompatible firmware (4sa.5). The
@@ -215,7 +246,7 @@ class ConnectionService(QObject):
                         return
                     self.event.emit(
                         "connect",
-                        f"retrying serial connection ({attempt + 1}/"
+                        f"retrying connection ({attempt + 1}/"
                         f"{self._connect_max_attempts})",
                     )
                     time.sleep(self._connect_retry_delay_s)
@@ -232,6 +263,8 @@ class ConnectionService(QObject):
         threading.Thread(target=worker, name="hexapod-connect", daemon=True).start()
 
     def _retry_port_for(self, requested_port: str, last_port: str) -> str:
+        if is_tcp_proxy_endpoint(requested_port):
+            return requested_port
         ports = list_serial_ports()
         if any(p.device == last_port for p in ports):
             return last_port
@@ -262,12 +295,15 @@ class ConnectionService(QObject):
             self._client.stop()
             self._client = None
         self._reset_state()
+        self._set_simulation_mode(False)
         self.connected.emit(False)
         self.event.emit("disconnect", "link closed")
 
     # --- commands (safe no-ops when disconnected) ------------------------
 
     def subscribe(self, stream_id: int, rate_hz: int) -> None:
+        if self._simulation_mode and stream_id not in _SIMULATION_STREAMS:
+            return
         if self._client:
             threading.Thread(
                 target=lambda: self._client
@@ -681,6 +717,9 @@ class ConnectionService(QObject):
 
         Emits ``i2c_topology`` with the result (``None`` on failure).
         """
+        if self._simulation_mode:
+            self.i2c_topology.emit(None)
+            return
         client = self._client
         if client is None:
             self.error.emit("i2c topology: not connected")
@@ -698,6 +737,9 @@ class ConnectionService(QObject):
 
     def refresh_sensor_status(self) -> None:
         """Read the fused per-foot sensor status; emit ``sensor_status``."""
+        if self._simulation_mode:
+            self.sensor_status.emit(None)
+            return
         client = self._client
         if client is None:
             self.error.emit("sensor status: not connected")
@@ -899,6 +941,17 @@ class ConnectionService(QObject):
         if self._gait_test_busy:
             return
 
+        if self._simulation_mode:
+            self._start_simulated_gait_test(
+                client,
+                body_height_mm,
+                stride_len_mm,
+                step_height_mm,
+                duty_x255,
+                speed_x255,
+            )
+            return
+
         self._gait_test_busy = True
         self._gait_test_cancel.clear()
         self.gait_test_busy_changed.emit(True)
@@ -1023,6 +1076,75 @@ class ConnectionService(QObject):
             target=guarded_worker, name="hexapod-gait-start", daemon=True
         ).start()
 
+    def _start_simulated_gait_test(
+        self,
+        client: ProtocolClient,
+        body_height_mm: int,
+        stride_len_mm: int,
+        step_height_mm: int,
+        duty_x255: int,
+        speed_x255: int,
+    ) -> None:
+        """Start Gait Lab in ROS SIL without any DXL maintenance operations."""
+        self._gait_test_busy = True
+        self._gait_test_cancel.clear()
+        self.gait_test_busy_changed.emit(True)
+        self.gait_test_changed.emit(False, "starting ROS simulation")
+
+        def worker() -> None:
+            try:
+                arming = client.set_arming(True)
+                results = (
+                    client.set_gait_params(
+                        body_height_mm,
+                        stride_len_mm,
+                        step_height_mm,
+                        duty_x255,
+                        speed_x255,
+                    ),
+                    client.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    client.set_body_twist(0.0, 0.0, 0.0),
+                    client.set_gait(api.GAIT_STAND),
+                )
+            except Exception as exc:
+                arming = None
+                results = ()
+                detail = f"simulation setup failed: {exc}"
+            else:
+                detail = (
+                    "simulation arming rejected"
+                    if arming is None or not arming.ok
+                    else "simulation command rejected"
+                )
+
+            if self._gait_test_cancel.is_set():
+                self._gait_test_busy = False
+                self.gait_test_busy_changed.emit(False)
+                self.gait_test_changed.emit(False, "start cancelled")
+                return
+            if (
+                arming is None
+                or not arming.ok
+                or not results
+                or any(result is None or not result.ok for result in results)
+            ):
+                self._gait_test_busy = False
+                self.gait_test_busy_changed.emit(False)
+                self.gait_test_changed.emit(False, detail)
+                self.error.emit(f"gait test: {detail}")
+                return
+
+            self._gait_test_active = True
+            self._gait_test_busy = False
+            self._gait_test_owns_lock = False
+            self.gait_test_busy_changed.emit(False)
+            self.gait_test_changed.emit(True, "running in ROS simulation")
+            self.event.emit("commit", "gait controls running in ROS simulation")
+
+        threading.Thread(
+            target=worker, name="hexapod-sim-gait-start", daemon=True
+        ).start()
+
     def stop_gait_test(self) -> None:
         """Stop motion, disable torque, and unwind this page's bench session."""
         client = self._client
@@ -1037,6 +1159,10 @@ class ConnectionService(QObject):
             self.gait_test_changed.emit(False, "stopping setup")
             return
         if not self._gait_test_active:
+            return
+
+        if self._simulation_mode:
+            self._stop_simulated_gait_test(client)
             return
 
         self._gait_test_busy = True
@@ -1087,6 +1213,40 @@ class ConnectionService(QObject):
 
         threading.Thread(target=worker, name="hexapod-gait-stop", daemon=True).start()
 
+    def _stop_simulated_gait_test(self, client: ProtocolClient) -> None:
+        """Stop ROS SIL motion without issuing hardware torque commands."""
+        self._gait_test_busy = True
+        self.gait_test_busy_changed.emit(True)
+        self.gait_test_changed.emit(True, "stopping ROS simulation")
+
+        def worker() -> None:
+            try:
+                results = (
+                    client.set_body_twist(0.0, 0.0, 0.0),
+                    client.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                    client.stop_motion(),
+                )
+                client.set_arming(False)
+            except Exception as exc:
+                results = ()
+                detail = f"simulation stop failed: {exc}"
+            else:
+                detail = "simulation stop rejected"
+
+            self._gait_test_busy = False
+            self.gait_test_busy_changed.emit(False)
+            if not results or any(result is None or not result.ok for result in results):
+                self.gait_test_changed.emit(True, detail)
+                self.error.emit(f"gait test: {detail}")
+                return
+            self._gait_test_active = False
+            self.gait_test_changed.emit(False, "stopped in ROS simulation")
+            self.event.emit("commit", "ROS simulation gait controls stopped")
+
+        threading.Thread(
+            target=worker, name="hexapod-sim-gait-stop", daemon=True
+        ).start()
+
     def set_leg_target(self, leg: int, x_mm: int, y_mm: int, z_mm: int) -> None:
         """Command one leg's foot to (x, y, z) mm (body frame); emit IK verdict.
 
@@ -1129,6 +1289,10 @@ class ConnectionService(QObject):
 
     def load_config(self) -> None:
         """Read the staged robot config (windowed) and emit ``config_loaded``."""
+        if self._simulation_mode:
+            self.config_summary.emit(None)
+            self.config_loaded.emit(None)
+            return
         client = self._client
         if client is None:
             self.error.emit("config: not connected")
@@ -1351,5 +1515,6 @@ class ConnectionService(QObject):
         self.connecting.emit(False)
         self._client = None
         self._reset_state()
+        self._set_simulation_mode(False)
         if not self._connecting:
             self.connected.emit(False)

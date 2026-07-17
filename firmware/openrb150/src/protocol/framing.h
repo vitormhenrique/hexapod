@@ -26,7 +26,7 @@ namespace protocol {
 
 constexpr uint8_t kMagic = 0xA5;
 constexpr uint8_t kVersionMajor = 0;
-constexpr uint8_t kVersionMinor = 1;
+constexpr uint8_t kVersionMinor = 3;
 
 constexpr size_t kHeaderLen = 14;
 constexpr size_t kCrcLen = 2;

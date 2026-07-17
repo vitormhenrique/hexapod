@@ -1,0 +1,120 @@
+name: Quality Gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  firmware:
+    name: Firmware native tests and builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ runner.os }}-v1
+          restore-keys: |
+            pio-${{ runner.os }}-
+      - name: Install PlatformIO
+        run: python -m pip install --upgrade pip platformio==6.1.19
+      - name: Run portable firmware unit tests
+        working-directory: firmware/openrb150
+        run: pio test -e native
+      - name: Build normal and output-disabled firmware images
+        working-directory: firmware/openrb150
+        run: |
+          pio run -e openrb150
+          pio run -e openrb150_hil_output_disabled
+
+  protocol:
+    name: Protocol vectors, lint, and type checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: protocol/python/uv.lock
+      - name: Install protocol test tools
+        working-directory: protocol
+        run: uv sync --project python --extra dev
+      - name: Run protocol golden-vector tests
+        working-directory: protocol
+        run: uv run --project python --extra dev pytest tests
+      - name: Lint protocol implementation and tests
+        working-directory: protocol
+        run: uvx ruff check python/hexapod_protocol tests
+      - name: Type-check protocol implementation
+        working-directory: protocol
+        run: uv run --project python --extra dev pyright python/hexapod_protocol
+
+  companion:
+    name: Companion tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: companion/uv.lock
+      - name: Install companion test tools
+        working-directory: companion
+        run: uv sync --extra dev
+      - name: Run headless companion tests
+        working-directory: companion
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run pytest
+      - name: Lint companion implementation and tests
+        working-directory: companion
+        run: uvx ruff check src tests
+      - name: Build companion source and wheel artifacts
+        working-directory: companion
+        run: uv build
+
+  jetson:
+    name: Jetson bridge tests, lint, and type checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            jetson/uv.lock
+            companion/uv.lock
+            protocol/python/uv.lock
+      - name: Install Jetson bridge test tools
+        working-directory: jetson
+        run: uv sync --extra dev
+      - name: Run Jetson bridge loopback tests
+        working-directory: jetson
+        run: uv run pytest
+      - name: Lint Jetson bridge and tests
+        working-directory: jetson
+        run: uvx ruff check src tests
+      - name: Type-check Jetson bridge
+        working-directory: jetson
+        run: uv run --extra dev pyright src/hexapod_jetson_bridge

@@ -13,6 +13,7 @@ Deterministic safety + motion controller for the hexapod, running on a ROBOTIS
 | Env | Board | Use |
 | --- | --- | --- |
 | `openrb150` (default) | custom `boards/openrb150.json` + `variants/OpenRB-150` | **All real firmware work.** Correct pin map: `Serial1`=DXL bus, `Serial3`=CRSF on D14 TX / D13 RX, DXL power FET, LEDs, battery ADC. |
+| `openrb150_hil_output_disabled` | custom `boards/openrb150.json` + `variants/OpenRB-150` | Explicit ATSAMD21 HIL image. It runs the normal tasks but compile-time guards block DXL power-on, torque-on, Sync Write goals, and raw DXL writes. `GET_CAPABILITIES`, `GET_STATUS`, `health`, and `hil_status` expose the guard state. Never use it for actuator tests. |
 | `mkrzero` | stock MKR Zero | Toolchain-only fallback. WRONG serial / DXL-power pins. |
 | `native` | host (no board) | **Host unit tests only.** Builds the portable `src/` logic (protocol, IK, gait, config, safety) against Unity on the host; run with `pio test -e native`. |
 
@@ -25,6 +26,13 @@ pio run
 # Local check: compile both target envs to confirm toolchain + variant are healthy
 pio run -e openrb150 -e mkrzero
 
+# Build the immutable output-disabled HIL image (do not use for motion tests)
+pio run -e openrb150_hil_output_disabled
+
+# Flash it, then run the board-side output guard smoke sequence from companion/
+pio run -e openrb150_hil_output_disabled -t upload
+cd ../../companion && uv run python ../tools/hil_smoke.py --port <PORT> --hil-output-disabled
+
 # Run host unit tests (Unity, no hardware)
 pio test -e native
 
@@ -36,6 +44,41 @@ pio device monitor -b 115200
 ```
 
 If `pio` is not on PATH, use the bundled binary: `~/.platformio/penv/bin/pio`.
+
+### Portable CMake target
+
+The firmware directory also exports `hexapod::controller_portable`, a
+host-only static library for the Arduino-free controller, gait, IK, config,
+protocol, contact, and safety layers. It is intended for native regression
+tests and future ROS 2 packages; it does not build `main.cpp`, FreeRTOS task
+orchestration, DXL bus I/O, `Wire`, the physical EEPROM driver, or board GPIO.
+
+From `firmware/openrb150`, configure, build, and run the standalone smoke test
+with any host CMake 3.16+ toolchain:
+
+```bash
+cmake -S . -B build/portable -G Ninja
+cmake --build build/portable
+ctest --test-dir build/portable --output-on-failure
+```
+
+On this repository's RoboStack workstation setup, use the project-local Pixi
+toolchain instead of installing CMake globally:
+
+```bash
+pixi run -e jazzy --manifest-path ../../robot_ros_simulation/pixi.toml \
+  cmake -S . -B build/portable -G Ninja
+pixi run -e jazzy --manifest-path ../../robot_ros_simulation/pixi.toml \
+  cmake --build build/portable
+pixi run -e jazzy --manifest-path ../../robot_ros_simulation/pixi.toml \
+  ctest --test-dir build/portable --output-on-failure
+```
+
+The CMake and PlatformIO-native builds use the same policy: compile all files
+under `src/` except the explicit hardware-owned entry, RTOS, board, DXL, I2C,
+and EEPROM adapters. A portable source that starts depending on Arduino or
+other hardware libraries should fail host compilation rather than being
+silently omitted.
 
 ### Upload troubleshooting
 

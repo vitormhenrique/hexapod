@@ -20,6 +20,7 @@ from .framing import (
 from . import api
 from . import telemetry
 from . import config
+from . import hil
 
 __all__ = [
     "crc16",
@@ -36,4 +37,5 @@ __all__ = [
     "api",
     "telemetry",
     "config",
+    "hil",
 ]

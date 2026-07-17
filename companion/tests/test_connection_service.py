@@ -182,13 +182,94 @@ def test_gait_test_stop_requires_all_torque_off_acknowledgements(qtbot) -> None:
     service = ConnectionService()
     service._client = FakeClient()  # type: ignore[assignment]
     service._gait_test_active = True
-    errors = []
-    service.error.connect(errors.append)
 
-    service.stop_gait_test()
+    with qtbot.waitSignal(service.error, timeout=2000) as blocker:
+        service.stop_gait_test()
+    (error_message,) = blocker.args
     qtbot.waitUntil(lambda: not service.gait_test_busy, timeout=2000)
     assert service.gait_test_active
-    assert errors and "torque off not confirmed" in errors[-1]
+    assert "torque off not confirmed" in error_message
+
+
+def test_simulation_gait_session_never_uses_dxl(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def _motion(self, name, *args):
+            self.calls.append((name, *args))
+            return api.MotionResultMsg(api.MOTION_OK, 5, True)
+
+        def set_arming(self, arm):
+            self.calls.append(("arm", arm))
+            return api.ControlResult(api.CTRL_OK, 5 if arm else 2, 0)
+
+        def set_gait_params(self, *args):
+            return self._motion("params", *args)
+
+        def set_body_pose(self, *args):
+            return self._motion("pose", *args)
+
+        def set_body_twist(self, *args):
+            return self._motion("twist", *args)
+
+        def set_gait(self, gait):
+            return self._motion("gait", gait)
+
+        def stop_motion(self):
+            return self._motion("stop")
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    service._set_simulation_mode(True)
+
+    service.start_gait_test(40, 60, 30, 128, 180)
+    qtbot.waitUntil(lambda: service.gait_test_active, timeout=2000)
+    assert ("arm", True) in client.calls
+    assert ("params", 40, 60, 30, 128, 180) in client.calls
+    assert ("gait", api.GAIT_STAND) in client.calls
+    assert all(call[0] not in {"power", "scan", "torque", "mode"} for call in client.calls)
+
+    service.stop_gait_test()
+    qtbot.waitUntil(lambda: not service.gait_test_active, timeout=2000)
+    assert ("stop",) in client.calls
+    assert ("arm", False) in client.calls
+
+
+def test_simulation_suppresses_hardware_background_requests(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.subscriptions = []
+
+        def subscribe(self, stream_id, rate_hz):
+            self.subscriptions.append((stream_id, rate_hz))
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    service._set_simulation_mode(True)
+
+    with qtbot.waitSignal(service.config_summary, timeout=1000) as summary:
+        service.load_config()
+    with qtbot.waitSignal(service.config_loaded, timeout=1000) as loaded:
+        service.load_config()
+    with qtbot.waitSignal(service.i2c_topology, timeout=1000) as topology:
+        service.refresh_i2c_topology()
+    with qtbot.waitSignal(service.sensor_status, timeout=1000) as sensors:
+        service.refresh_sensor_status()
+
+    service.subscribe(int(tlm.StreamId.HEALTH), 5)
+    service.subscribe(int(tlm.StreamId.SERVO_STATUS), 5)
+    qtbot.waitUntil(lambda: client.subscriptions == [(int(tlm.StreamId.HEALTH), 5)])
+    assert summary.args == [None]
+    assert loaded.args == [None]
+    assert topology.args == [None]
+    assert sensors.args == [None]
 
 
 def test_passive_enter_requires_all_torque_off_acknowledgements(
@@ -337,6 +418,28 @@ def test_connect_disconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None
     assert blocker.args == [False]
     assert not service.is_connected
     assert stream.closed
+
+
+def test_connect_tcp_proxy_endpoint_uses_proxy_opener(qtbot, monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    stream = RespondingStream(_handshake_handlers())
+    opened: list[str] = []
+
+    def fake_proxy_open(endpoint: str):
+        opened.append(endpoint)
+        return stream
+
+    monkeypatch.setattr(services_mod, "open_tcp_proxy", fake_proxy_open)
+
+    service = ConnectionService()
+    endpoint = "tcp://jetson.local:5555?token=example-token"
+    with qtbot.waitSignal(service.connected, timeout=2000) as blocker:
+        service.connect_to(endpoint)
+    assert blocker.args == [True]
+    assert opened == [endpoint]
+    service.disconnect()
 
 
 def test_connect_version_mismatch_emits_event(qtbot, monkeypatch) -> None:

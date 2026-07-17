@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import time
+
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -127,6 +130,10 @@ class ConnectPage(BasePage):
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.port_combo = QComboBox()
         self.port_combo.setMinimumWidth(320)
+        self.port_combo.setEditable(True)
+        self.port_combo.lineEdit().setPlaceholderText(
+            "Serial port or tcp://jetson:5555?token=..."
+        )
         self.refresh_btn = QPushButton("Refresh")
         self.refresh_btn.clicked.connect(self.refresh_ports)
         row = QHBoxLayout()
@@ -207,9 +214,11 @@ class ConnectPage(BasePage):
         self.port_combo.setCurrentIndex(best_index)
 
     def _toggle(self) -> None:
-        port = self.port_combo.currentData()
-        if port:
-            self.service.connect_to(port)
+        endpoint = self.port_combo.currentData()
+        if not endpoint:
+            endpoint = self.port_combo.currentText().strip()
+        if endpoint and endpoint != "No ports found":
+            self.service.connect_to(endpoint)
 
     def _on_connecting(self, busy: bool) -> None:
         if busy:
@@ -374,6 +383,7 @@ class ModeSafetyPage(BasePage):
         self._connected = False
         self._state = -1
         self._lock_held = False
+        self._simulation_mode = self.service.simulation_mode
 
         self.content.addWidget(self._safety_controls())
         self.content.addWidget(self._lock_controls())
@@ -398,6 +408,7 @@ class ModeSafetyPage(BasePage):
         self.service.maint_lock_changed.connect(self._on_lock_changed)
         self.service.control_result.connect(self._on_control_result)
         self.service.dxl_result.connect(self._on_dxl_result)
+        self.service.simulation_mode_changed.connect(self._on_simulation_mode)
 
         self._apply_gates()
 
@@ -646,6 +657,14 @@ class ModeSafetyPage(BasePage):
                     self.REASON_NAMES.get(f.reason, str(f.reason)),
                 )
 
+    def _on_simulation_mode(self, enabled: bool) -> None:
+        self._simulation_mode = enabled
+        if enabled:
+            self.action_lbl.setText(
+                "ROS simulation: maintenance, DXL, and passive-pose controls are unavailable."
+            )
+        self._apply_gates()
+
     def _on_maint_result(self, res) -> None:
         if res.token:
             self.lock_lbl.setText(f"Maintenance lock: held (token {res.token})")
@@ -763,13 +782,21 @@ class ModeSafetyPage(BasePage):
         )
         gate(
             self.enter_maint_btn,
-            con and not held and st in (-1, tlm.SafetyState.DISARMED),
-            "Requires connection and a Disarmed robot.",
+            not self._simulation_mode
+            and con
+            and not held
+            and st in (-1, tlm.SafetyState.DISARMED),
+            "Unavailable in the ROS simulated firmware.",
         )
-        gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
+        gate(
+            self.exit_maint_btn,
+            not self._simulation_mode and con and held,
+            "Unavailable in the ROS simulated firmware.",
+        )
         gate(
             self.enter_passive_btn,
-            con
+            not self._simulation_mode
+            and con
             and st
             in (
                 -1,
@@ -777,18 +804,20 @@ class ModeSafetyPage(BasePage):
                 tlm.SafetyState.MAC_MAINTENANCE,
                 tlm.SafetyState.PASSIVE_POSE_STREAM,
             ),
-            "Requires a Disarmed, Maintenance, or Passive robot.",
+            "Unavailable in the ROS simulated firmware.",
         )
         gate(
             self.exit_passive_btn,
-            con and st == tlm.SafetyState.PASSIVE_POSE_STREAM,
-            "The robot is not in passive pose mode.",
+            not self._simulation_mode
+            and con
+            and st == tlm.SafetyState.PASSIVE_POSE_STREAM,
+            "Unavailable in the ROS simulated firmware.",
         )
         for btn in self._bench_buttons:
             gate(
                 btn,
-                con and held,
-                "Enter Maintenance first (bench control needs the lock).",
+                not self._simulation_mode and con and held,
+                "Unavailable in the ROS simulated firmware.",
             )
 
     def _toggle(self, name: str, rate: int, checked: bool) -> None:
@@ -817,9 +846,11 @@ class GaitLabPage(BasePage):
         self._connected = self.service.is_connected
         self._session_active = False
         self._session_busy = False
+        self._simulation_mode = self.service.simulation_mode
         self._session_controls = []
 
-        self.content.addWidget(self._session_panel())
+        self.session_box = self._session_panel()
+        self.content.addWidget(self.session_box)
         self.gait_box = self._gait_select()
         self.params_box = self._gait_params()
         self.mode_box = self._mode_select()
@@ -861,6 +892,8 @@ class GaitLabPage(BasePage):
         self.service.gait_test_busy_changed.connect(self._on_session_busy)
         self.service.motion_result.connect(self._on_motion_result)
         self.service.telemetry.connect(self._on_telemetry)
+        self.service.simulation_mode_changed.connect(self._on_simulation_mode)
+        self._on_simulation_mode(self._simulation_mode)
         self._apply_session_gate()
 
     # --- groups -----------------------------------------------------------
@@ -965,31 +998,55 @@ class GaitLabPage(BasePage):
         row.addStretch(1)
         return box
 
+    # (attribute, button label, command-frame twist direction, grid cell).
+    # Pressing a pad button walks in that direction until release. The
+    # firmware holds home stance and ignores twist while the gait is a
+    # posture (Stand/Sit), so a press always re-asserts a walking gait first.
+    WALK_PAD = [
+        ("yaw_ccw", "\u21ba", (0.0, 0.0, 1.0), (0, 0)),
+        ("forward", "\u25b2", (1.0, 0.0, 0.0), (0, 1)),
+        ("yaw_cw", "\u21bb", (0.0, 0.0, -1.0), (0, 2)),
+        ("left", "\u25c0", (0.0, 1.0, 0.0), (1, 0)),
+        ("back", "\u25bc", (-1.0, 0.0, 0.0), (1, 1)),
+        ("right", "\u25b6", (0.0, -1.0, 0.0), (1, 2)),
+    ]
+    WALKING_GAITS = (api.GAIT_TRIPOD, api.GAIT_RIPPLE, api.GAIT_WAVE, api.GAIT_CRAWL)
+
     def _body_twist(self) -> QGroupBox:
-        box = QGroupBox("Walk command")
-        form = QFormLayout(box)
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(12)
-        self._twist_spins = {}
-        for attr, label in (
-            ("vx", "Forward"),
-            ("vy", "Left"),
-            ("wz", "Yaw (CCW)"),
-        ):
-            spin = QSpinBox()
-            spin.setRange(-100, 100)
-            spin.setValue(0)
-            self._twist_spins[attr] = spin
-            form.addRow(label, spin)
-        row = QHBoxLayout()
-        send = QPushButton("Send twist")
-        send.clicked.connect(self._send_twist)
-        zero = QPushButton("Zero")
-        zero.clicked.connect(self._zero_twist)
-        row.addWidget(send)
-        row.addWidget(zero)
+        box = QGroupBox("Walk (hold a direction; release to stop)")
+        row = QHBoxLayout(box)
+        row.setSpacing(18)
+
+        pad = QGridLayout()
+        pad.setHorizontalSpacing(8)
+        pad.setVerticalSpacing(8)
+        self._pad_buttons = {}
+        for attr, label, direction, (r, c) in self.WALK_PAD:
+            btn = QPushButton(label)
+            btn.setAutoRepeat(False)
+            btn.setFixedSize(72, 48)
+            btn.setToolTip(attr.replace("_", " ").title())
+            btn.pressed.connect(lambda d=direction: self._pad_pressed(*d))
+            btn.released.connect(self._pad_released)
+            pad.addWidget(btn, r, c)
+            self._pad_buttons[attr] = btn
+        row.addLayout(pad)
+
+        side = QFormLayout()
+        side.setHorizontalSpacing(12)
+        self._walk_speed = QSpinBox()
+        self._walk_speed.setRange(10, 100)
+        self._walk_speed.setValue(60)
+        self._walk_speed.setSuffix(" %")
+        side.addRow("Walk speed", self._walk_speed)
+        legend = QLabel(
+            "\u25b2\u25bc forward/back   \u25c0\u25b6 sideways   \u21ba\u21bb turn\n"
+            "Uses the selected walking gait (Tripod if a posture is selected)."
+        )
+        legend.setStyleSheet(f"color: {DRACULA.comment};")
+        side.addRow(legend)
+        row.addLayout(side)
         row.addStretch(1)
-        form.addRow("", self._wrap(row))
         return box
 
     def _body_translation(self) -> QGroupBox:
@@ -1051,11 +1108,14 @@ class GaitLabPage(BasePage):
         self.service.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         if mode != "walk":
             self.service.set_gait(api.GAIT_STAND)
+            self._gait_buttons[api.GAIT_STAND].setChecked(True)
 
     def _hold_stand(self) -> None:
         self._zero_twist()
         self.service.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         self.service.stop_motion()
+        # STOP_MOTION resets the firmware gait to Stand; mirror that here.
+        self._gait_buttons[api.GAIT_STAND].setChecked(True)
 
     def _send_gait_params(self) -> None:
         self.service.set_gait_params(
@@ -1066,12 +1126,25 @@ class GaitLabPage(BasePage):
             self._param_spins["speed"].value(),
         )
 
-    def _send_twist(self) -> None:
-        self.service.set_body_twist(
-            self._twist_spins["vx"].value() / 100.0,
-            self._twist_spins["vy"].value() / 100.0,
-            self._twist_spins["wz"].value() / 100.0,
-        )
+    def _walking_gait(self) -> int:
+        """The checked walking gait, or Tripod when a posture is selected."""
+        for gait in self.WALKING_GAITS:
+            if self._gait_buttons[gait].isChecked():
+                return gait
+        return api.GAIT_TRIPOD
+
+    def _pad_pressed(self, vx: float, vy: float, wz: float) -> None:
+        # Always re-assert the walking gait: postures ignore twist, and Stop /
+        # mode switches silently reset the firmware to Stand behind the UI.
+        gait = self._walking_gait()
+        if not self._gait_buttons[gait].isChecked():
+            self._gait_buttons[gait].setChecked(True)
+        self.service.set_gait(gait)
+        magnitude = self._walk_speed.value() / 100.0
+        self.service.set_body_twist(vx * magnitude, vy * magnitude, wz * magnitude)
+
+    def _pad_released(self) -> None:
+        self.service.set_body_twist(0.0, 0.0, 0.0)
 
     def _send_translation(self) -> None:
         self.service.set_gait(api.GAIT_STAND)
@@ -1096,8 +1169,6 @@ class GaitLabPage(BasePage):
         )
 
     def _zero_twist(self) -> None:
-        for spin in self._twist_spins.values():
-            spin.setValue(0)
         self.service.set_body_twist(0.0, 0.0, 0.0)
 
     # --- reactions --------------------------------------------------------
@@ -1117,6 +1188,18 @@ class GaitLabPage(BasePage):
 
     def _on_session_busy(self, busy: bool) -> None:
         self._session_busy = busy
+        self._apply_session_gate()
+
+    def _on_simulation_mode(self, enabled: bool) -> None:
+        self._simulation_mode = enabled
+        if enabled:
+            self.session_box.setTitle("Simulation motion session")
+            self.start_btn.setText("Start simulation controls")
+            self.stop_session_btn.setText("Stop simulation")
+        else:
+            self.session_box.setTitle("Maintenance gait session")
+            self.start_btn.setText("Start gait test")
+            self.stop_session_btn.setText("Stop && torque off")
         self._apply_session_gate()
 
     def _on_session_changed(self, active: bool, detail: str) -> None:
@@ -1632,13 +1715,21 @@ class LegLabPage(BasePage):
 
 
 class ServoConfigPage(BasePage):
-    title = "Servo Map && Config"
+    title = "Robot Calibration && Config"
     subtitle = (
-        "View, edit, validate, diff, stage, and commit the EEPROM-backed servo "
-        "map. Export/import the full robot config as JSON."
+        "Calibrate servo zero/sign/travel, leg geometry, and foot sensors; then "
+        "validate, stage, commit, or export the EEPROM-backed robot config."
     )
 
     COLUMNS = ["ID", "Leg", "Joint", "Sign", "Trim", "Min tick", "Max tick"]
+    GEOMETRY_COLUMNS = [
+        "Leg",
+        "Mount X (mm)",
+        "Mount Y (mm)",
+        "Mount Z (mm)",
+        "Yaw (deg)",
+    ]
+    SENSOR_COLUMNS = ["Foot", "Baseline (raw)", "Near", "Touch", "Load", "Enabled"]
 
     # (column, attribute, lo, hi) for in-table validation of edited servo rows.
     FIELDS = [
@@ -1659,9 +1750,13 @@ class ServoConfigPage(BasePage):
         self._edited = None  # config last sent to the staging buffer
         self._connected = False
         self._lock_held = False
+        self._latest_pressure_raw = [None] * tlm.NUM_FEET
+        self._latest_pressure_time = 0.0
 
         self.content.addWidget(self._summary_box())
         self.content.addWidget(self._servo_table())
+        self.content.addWidget(self._geometry_editor())
+        self.content.addWidget(self._sensor_calibration_editor())
         self.content.addWidget(self._actions_box())
         self.content.addWidget(self._diff_box())
 
@@ -1671,6 +1766,7 @@ class ServoConfigPage(BasePage):
         self.service.config_staged.connect(self._on_config_staged)
         self.service.config_result.connect(self._on_config_result)
         self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self.service.telemetry.connect(self._on_telemetry)
         self._apply_gates()
 
     # --- groups -----------------------------------------------------------
@@ -1714,6 +1810,84 @@ class ServoConfigPage(BasePage):
         hint = QLabel(
             "Double-click a cell to edit. Sign must be +1 or -1; ticks are "
             "0\u20134095. Edits stay local until you stage and commit them."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DRACULA.comment};")
+        lay.addWidget(hint)
+        return box
+
+    def _geometry_editor(self) -> QGroupBox:
+        box = QGroupBox("Leg geometry")
+        lay = QVBoxLayout(box)
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(10)
+        self.link_spins = {
+            "coxa": self._mm_spin(0.01, 655.35),
+            "femur": self._mm_spin(0.01, 655.35),
+            "tibia": self._mm_spin(0.01, 655.35),
+        }
+        form.addRow("Coxa link", self.link_spins["coxa"])
+        form.addRow("Femur link", self.link_spins["femur"])
+        form.addRow("Tibia link", self.link_spins["tibia"])
+
+        self.home_radius_spin = self._mm_spin(0.01, 655.35)
+        self.home_foot_z_spin = self._mm_spin(-327.68, 327.67)
+        self.coxa_lift_spin = self._mm_spin(0.0, 655.35)
+        form.addRow("Home radius", self.home_radius_spin)
+        form.addRow("Home foot Z", self.home_foot_z_spin)
+        form.addRow("Coxa lift", self.coxa_lift_spin)
+        lay.addLayout(form)
+
+        self.geometry_table = QTableWidget(0, len(self.GEOMETRY_COLUMNS))
+        self.geometry_table.setHorizontalHeaderLabels(self.GEOMETRY_COLUMNS)
+        self.geometry_table.verticalHeader().setVisible(False)
+        self.geometry_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.geometry_table.setMinimumHeight(220)
+        lay.addWidget(self.geometry_table)
+
+        hint = QLabel(
+            "Edit the measured body-to-coxa mounts and hip yaw. The configured "
+            "neutral stance must remain inside the two-link reach envelope."
+        )
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color: {DRACULA.comment};")
+        lay.addWidget(hint)
+        return box
+
+    def _mm_spin(self, minimum: float, maximum: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(2)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(0.1)
+        spin.setSuffix(" mm")
+        return spin
+
+    def _sensor_calibration_editor(self) -> QGroupBox:
+        box = QGroupBox("Foot sensor calibration")
+        lay = QVBoxLayout(box)
+        self.sensor_table = QTableWidget(0, len(self.SENSOR_COLUMNS))
+        self.sensor_table.setHorizontalHeaderLabels(self.SENSOR_COLUMNS)
+        self.sensor_table.verticalHeader().setVisible(False)
+        self.sensor_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.sensor_table.setMinimumHeight(220)
+        lay.addWidget(self.sensor_table)
+
+        row = QHBoxLayout()
+        self.capture_baselines_btn = QPushButton("Copy live pressure baselines")
+        self.capture_baselines_btn.clicked.connect(self._capture_live_baselines)
+        row.addWidget(self.capture_baselines_btn)
+        row.addStretch(1)
+        self.sensor_capture_lbl = QLabel("Waiting for raw sensor telemetry.")
+        self.sensor_capture_lbl.setObjectName("MonoLabel")
+        row.addWidget(self.sensor_capture_lbl)
+        lay.addLayout(row)
+
+        hint = QLabel(
+            "Copy captures the latest raw pressure values into the local config. "
+            "Set nonzero near/touch/load thresholds before enabling a foot, then "
+            "stage, validate, and commit to apply and persist the calibration."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {DRACULA.comment};")
@@ -1782,6 +1956,53 @@ class ServoConfigPage(BasePage):
             ]
             for col, val in enumerate(values):
                 self.table.setItem(row, col, QTableWidgetItem(str(val)))
+        self._populate_geometry(config)
+        self._populate_sensor_calibration(config)
+
+    def _populate_geometry(self, config) -> None:
+        self.link_spins["coxa"].setValue(config.links.coxa_cmm / 100.0)
+        self.link_spins["femur"].setValue(config.links.femur_cmm / 100.0)
+        self.link_spins["tibia"].setValue(config.links.tibia_cmm / 100.0)
+        self.home_radius_spin.setValue(config.geometry.home_radius_cmm / 100.0)
+        self.home_foot_z_spin.setValue(config.geometry.home_foot_z_cmm / 100.0)
+        self.coxa_lift_spin.setValue(config.geometry.coxa_lift_cmm / 100.0)
+
+        self.geometry_table.setRowCount(len(config.legs))
+        for row, leg in enumerate(config.legs):
+            label = QTableWidgetItem(f"Leg {row + 1}")
+            label.setFlags(label.flags() & ~Qt.ItemIsEditable)
+            self.geometry_table.setItem(row, 0, label)
+            values = (
+                leg.mount_x_dmm / 10.0,
+                leg.mount_y_dmm / 10.0,
+                leg.mount_z_dmm / 10.0,
+                leg.mount_yaw_cdeg / 100.0,
+            )
+            for column, value in enumerate(values, start=1):
+                self.geometry_table.setItem(
+                    row, column, QTableWidgetItem(f"{value:.2f}")
+                )
+
+    def _populate_sensor_calibration(self, config) -> None:
+        self.sensor_table.setRowCount(len(config.feet))
+        for row, foot in enumerate(config.feet):
+            label = QTableWidgetItem(f"Foot {row + 1}")
+            label.setFlags(label.flags() & ~Qt.ItemIsEditable)
+            self.sensor_table.setItem(row, 0, label)
+            for column, value in enumerate(
+                (
+                    foot.pressure_baseline,
+                    foot.near_thresh,
+                    foot.touch_thresh,
+                    foot.load_thresh,
+                ),
+                start=1,
+            ):
+                self.sensor_table.setItem(row, column, QTableWidgetItem(str(value)))
+            enabled = QCheckBox()
+            enabled.setChecked(bool(foot.enabled))
+            enabled.setToolTip("Enable fused contact classification for this foot")
+            self.sensor_table.setCellWidget(row, 5, enabled)
 
     def _read_table(self):
         """Build a RobotConfig from the loaded base + edited servo rows.
@@ -1814,7 +2035,76 @@ class ServoConfigPage(BasePage):
                 setattr(s, attr, val)
             if s.min_tick >= s.max_tick:
                 return None, f"row {row}: min tick must be < max tick"
+        geometry_error = self._read_geometry(config)
+        if geometry_error is not None:
+            return None, geometry_error
+        sensor_error = self._read_sensor_calibration(config)
+        if sensor_error is not None:
+            return None, sensor_error
+        validation_errors = self._cfg.validate_robot_config(config)
+        if validation_errors:
+            return None, validation_errors[0]
         return config, None
+
+    def _read_geometry(self, config) -> str | None:
+        config.links.coxa_cmm = round(self.link_spins["coxa"].value() * 100)
+        config.links.femur_cmm = round(self.link_spins["femur"].value() * 100)
+        config.links.tibia_cmm = round(self.link_spins["tibia"].value() * 100)
+        config.geometry.home_radius_cmm = round(self.home_radius_spin.value() * 100)
+        config.geometry.home_foot_z_cmm = round(self.home_foot_z_spin.value() * 100)
+        config.geometry.coxa_lift_cmm = round(self.coxa_lift_spin.value() * 100)
+        if self.geometry_table.rowCount() != len(config.legs):
+            return "leg geometry row count does not match config"
+
+        fields = (
+            ("mount_x_dmm", "mount X", 10),
+            ("mount_y_dmm", "mount Y", 10),
+            ("mount_z_dmm", "mount Z", 10),
+            ("mount_yaw_cdeg", "yaw", 100),
+        )
+        for row, leg in enumerate(config.legs):
+            for column, (attribute, label, scale) in enumerate(fields, start=1):
+                item = self.geometry_table.item(row, column)
+                text = item.text().strip() if item is not None else ""
+                try:
+                    value = round(float(text) * scale)
+                except (OverflowError, ValueError):
+                    return f"leg {row + 1} {label}: '{text}' is not a number"
+                if not -0x8000 <= value <= 0x7FFF:
+                    return f"leg {row + 1} {label} is outside the signed range"
+                setattr(leg, attribute, value)
+        return None
+
+    def _read_sensor_calibration(self, config) -> str | None:
+        if self.sensor_table.rowCount() != len(config.feet):
+            return "foot calibration row count does not match config"
+        fields = (
+            ("pressure_baseline", "baseline", -0x80000000, 0x7FFFFFFF),
+            ("near_thresh", "near threshold", 0, 0xFFFF),
+            ("touch_thresh", "touch threshold", 0, 0xFFFF),
+            ("load_thresh", "load threshold", 0, 0xFFFF),
+        )
+        for row, foot in enumerate(config.feet):
+            for column, (attribute, label, minimum, maximum) in enumerate(
+                fields, start=1
+            ):
+                item = self.sensor_table.item(row, column)
+                text = item.text().strip() if item is not None else ""
+                try:
+                    value = int(text)
+                except ValueError:
+                    return f"foot {row + 1} {label}: '{text}' is not an integer"
+                if not minimum <= value <= maximum:
+                    return (
+                        f"foot {row + 1} {label}: {value} out of "
+                        f"[{minimum}, {maximum}]"
+                    )
+                setattr(foot, attribute, value)
+            enabled = self.sensor_table.cellWidget(row, 5)
+            if not isinstance(enabled, QCheckBox):
+                return f"foot {row + 1} enabled control is unavailable"
+            foot.enabled = 1 if enabled.isChecked() else 0
+        return None
 
     def _diff_lines(self, edited) -> list:
         lines = []
@@ -1829,6 +2119,50 @@ class ServoConfigPage(BasePage):
                 ov, nv = getattr(old, attr), getattr(new, attr)
                 if ov != nv:
                     lines.append(f"servo[{i}].{attr}: {ov} -> {nv}")
+        geometry_fields = (
+            ("links.coxa_cmm", self._loaded.links.coxa_cmm, edited.links.coxa_cmm),
+            ("links.femur_cmm", self._loaded.links.femur_cmm, edited.links.femur_cmm),
+            ("links.tibia_cmm", self._loaded.links.tibia_cmm, edited.links.tibia_cmm),
+            (
+                "geometry.home_radius_cmm",
+                self._loaded.geometry.home_radius_cmm,
+                edited.geometry.home_radius_cmm,
+            ),
+            (
+                "geometry.home_foot_z_cmm",
+                self._loaded.geometry.home_foot_z_cmm,
+                edited.geometry.home_foot_z_cmm,
+            ),
+            (
+                "geometry.coxa_lift_cmm",
+                self._loaded.geometry.coxa_lift_cmm,
+                edited.geometry.coxa_lift_cmm,
+            ),
+        )
+        for name, old, new in geometry_fields:
+            if old != new:
+                lines.append(f"{name}: {old} -> {new}")
+        for index, (old, new) in enumerate(zip(self._loaded.legs, edited.legs)):
+            for attribute in (
+                "mount_x_dmm",
+                "mount_y_dmm",
+                "mount_z_dmm",
+                "mount_yaw_cdeg",
+            ):
+                old_value, new_value = getattr(old, attribute), getattr(new, attribute)
+                if old_value != new_value:
+                    lines.append(f"leg[{index}].{attribute}: {old_value} -> {new_value}")
+        for index, (old, new) in enumerate(zip(self._loaded.feet, edited.feet)):
+            for attribute in (
+                "pressure_baseline",
+                "near_thresh",
+                "touch_thresh",
+                "load_thresh",
+                "enabled",
+            ):
+                old_value, new_value = getattr(old, attribute), getattr(new, attribute)
+                if old_value != new_value:
+                    lines.append(f"foot[{index}].{attribute}: {old_value} -> {new_value}")
         return lines
 
     # --- actions ----------------------------------------------------------
@@ -1850,6 +2184,26 @@ class ServoConfigPage(BasePage):
         self.diff_text.setPlainText(
             "\n".join(lines) if lines else "No changes vs loaded config."
         )
+
+    def _capture_live_baselines(self) -> None:
+        if self._loaded is None:
+            self.sensor_capture_lbl.setText("Load a config before capturing.")
+            return
+        if time.monotonic() - self._latest_pressure_time > 2.0:
+            self.sensor_capture_lbl.setText("Raw pressure telemetry is stale.")
+            return
+        copied = 0
+        for foot, pressure in enumerate(self._latest_pressure_raw):
+            if pressure is None or foot >= self.sensor_table.rowCount():
+                continue
+            self.sensor_table.item(foot, 1).setText(str(pressure))
+            copied += 1
+        if copied:
+            self.sensor_capture_lbl.setText(
+                f"Copied {copied} live baseline(s); stage and commit to persist."
+            )
+        else:
+            self.sensor_capture_lbl.setText("No raw pressure samples are available.")
 
     def _stage(self) -> None:
         edited, err = self._read_table()
@@ -1917,6 +2271,7 @@ class ServoConfigPage(BasePage):
         self._loaded = config
         self.name_edit.setText(config.robot_name)
         self._populate_table(config)
+        self._apply_gates()
         self.action_lbl.setText(f"imported {path} (stage to apply)")
         self.diff_text.setPlainText("Imported config loaded as the new base.")
 
@@ -1940,9 +2295,13 @@ class ServoConfigPage(BasePage):
         self._connected = connected
         if connected:
             self.service.load_config()
+            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
         else:
             self.table.setRowCount(0)
+            self.sensor_table.setRowCount(0)
             self._loaded = None
+            self._latest_pressure_raw = [None] * tlm.NUM_FEET
+            self._latest_pressure_time = 0.0
             self.schema_lbl.setText("--")
             self.persist_lbl.setText("--")
             self.action_lbl.setText("Load the config to begin.")
@@ -1958,6 +2317,15 @@ class ServoConfigPage(BasePage):
         for button in (self.reset_btn, self.stage_btn, self.commit_btn):
             button.setEnabled(allowed)
             button.setToolTip("" if allowed else why)
+        capture_allowed = (
+            self._connected
+            and self._loaded is not None
+            and any(value is not None for value in self._latest_pressure_raw)
+        )
+        self.capture_baselines_btn.setEnabled(capture_allowed)
+        self.capture_baselines_btn.setToolTip(
+            "" if capture_allowed else "Connect and wait for raw sensor telemetry."
+        )
 
     def _on_config_loaded(self, config) -> None:
         if config is None:
@@ -1971,6 +2339,7 @@ class ServoConfigPage(BasePage):
         self._populate_table(config)
         self.action_lbl.setText("config loaded")
         self.diff_text.setPlainText("")
+        self._apply_gates()
 
     def _on_config_summary(self, summary) -> None:
         if summary is None:
@@ -1997,6 +2366,17 @@ class ServoConfigPage(BasePage):
         if kind == "reset" and res.ok:
             # The firmware reloaded defaults into the staging buffer; pull them.
             self.service.load_config()
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id != int(tlm.StreamId.I2C_SENSORS_RAW):
+            return
+        self._latest_pressure_raw = [None] * tlm.NUM_FEET
+        for foot, raw in enumerate(record.feet):
+            if foot >= tlm.NUM_FEET:
+                break
+            self._latest_pressure_raw[foot] = raw.pressure_raw
+        self._latest_pressure_time = time.monotonic()
+        self._apply_gates()
 
     def _confirm(self, title: str, text: str) -> bool:
         return (
@@ -2451,8 +2831,8 @@ class ServoTuningPage(BasePage):
 class FootContactPage(BasePage):
     title = "Foot Contact && Leveling"
     subtitle = (
-        "Per-leg touchdown state, live proximity/pressure, threshold tuning, "
-        "and contact/leveling enable with reasons."
+        "Per-leg touchdown state, live proximity/pressure, runtime threshold "
+        "tuning, and contact/leveling enable with reasons."
     )
 
     COLUMNS = ["Leg", "State", "Conf", "Δpressure", "Proximity", "Pressure"]
@@ -2556,7 +2936,7 @@ class FootContactPage(BasePage):
         self.thr_load.setRange(0, 0xFFFF)
         form.addRow("Load (Δpressure)", self.thr_load)
 
-        write = QPushButton("Stage && write thresholds")
+        write = QPushButton("Apply runtime thresholds")
         write.setProperty("accent", True)
         write.clicked.connect(self._write_thresholds)
         form.addRow("", write)
@@ -2595,12 +2975,23 @@ class FootContactPage(BasePage):
     # --- actions ----------------------------------------------------------
 
     def _write_thresholds(self) -> None:
+        near = self.thr_near.value()
+        touch = self.thr_touch.value()
+        load = self.thr_load.value()
+        if not near or not touch or not load:
+            self.thr_result.setText(
+                "blocked: near, touch, and load thresholds must be nonzero"
+            )
+            return
+        if load < touch:
+            self.thr_result.setText("blocked: load threshold must be at least touch")
+            return
         self.thr_result.setText("writing…")
         self.service.set_contact_thresholds(
             self.thr_foot.value(),
-            self.thr_near.value(),
-            self.thr_touch.value(),
-            self.thr_load.value(),
+            near,
+            touch,
+            load,
         )
 
     def _calibrate(self) -> None:
@@ -2663,7 +3054,10 @@ class FootContactPage(BasePage):
 
     def _on_calibrate_result(self, res) -> None:
         if res.ok:
-            self.cal_result.setText(f"calibrated (mask 0x{res.mask:02X})")
+            self.cal_result.setText(
+                f"calibrated runtime (mask 0x{res.mask:02X}); copy and commit "
+                "baselines in Robot Calibration to persist"
+            )
         else:
             self.cal_result.setText(f"rejected (code {res.result})")
 
@@ -3765,6 +4159,16 @@ class PlotWorkbenchPage(BasePage):
         self._load_btn.setEnabled(False)
         controls.addWidget(self._load_btn)
 
+        self._export_csv_btn = QPushButton("Export selected CSV")
+        self._export_csv_btn.clicked.connect(self._choose_csv_export)
+        self._export_csv_btn.setEnabled(False)
+        controls.addWidget(self._export_csv_btn)
+
+        self._export_report_btn = QPushButton("Export session report")
+        self._export_report_btn.clicked.connect(self._choose_report_export)
+        self._export_report_btn.setEnabled(False)
+        controls.addWidget(self._export_report_btn)
+
         controls.addSpacing(16)
         controls.addWidget(QLabel("Window:"))
         self._window_spin = QSpinBox()
@@ -3939,6 +4343,7 @@ class PlotWorkbenchPage(BasePage):
             self._ensure_subscriptions()
         else:
             self._replot_replay()
+        self._update_export_gates()
 
     # --- mode --------------------------------------------------------------
 
@@ -3946,6 +4351,7 @@ class PlotWorkbenchPage(BasePage):
         self._mode = "live" if live_checked else "replay"
         self._load_btn.setEnabled(self._mode == "replay")
         self._clear()
+        self._update_export_gates()
         if self._mode == "live":
             self._ensure_subscriptions()
             self._status.setText(f"{len(self._selected)} signal(s) \u00b7 live mode")
@@ -4065,6 +4471,62 @@ class PlotWorkbenchPage(BasePage):
         if path:
             self.load_session(path)
 
+    def _choose_csv_export(self) -> None:
+        if self._replay is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export selected session signals",
+            str(self._replay.dir / "selected_signals.csv"),
+            "CSV (*.csv)",
+        )
+        if path:
+            self.export_selected_csv(path)
+
+    def _choose_report_export(self) -> None:
+        if self._replay is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export session report",
+            str(self._replay.dir / "session_summary.txt"),
+            "Text (*.txt)",
+        )
+        if path:
+            self.export_session_report(path)
+
+    def export_selected_csv(self, output_path) -> bool:
+        """Export selected replay signals to ``output_path`` for UI/tests."""
+        if self._replay is None or not self._selected:
+            self._status.setText("Load a replay and select at least one signal first.")
+            return False
+        from data.session_export import export_selected_csv
+
+        try:
+            rows = export_selected_csv(self._replay, self._selected, output_path)
+        except (OSError, ValueError) as exc:
+            self._status.setText(f"CSV export failed: {exc}")
+            return False
+        self._status.setText(f"Exported {rows} CSV row(s) to {output_path}")
+        return True
+
+    def export_session_report(self, output_path) -> bool:
+        """Export the loaded replay's human-readable report for UI/tests."""
+        if self._replay is None:
+            self._status.setText("Load a replay before exporting a report.")
+            return False
+        from data.session_export import write_session_summary
+
+        try:
+            summary = write_session_summary(self._replay, output_path)
+        except (OSError, ValueError) as exc:
+            self._status.setText(f"Report export failed: {exc}")
+            return False
+        self._status.setText(
+            f"Exported report for {summary['session_id']} to {output_path}"
+        )
+        return True
+
     def load_session(self, session_dir) -> None:
         """Load a recorded session directory and plot the selected signals."""
         from data.session_replay import SessionReplay
@@ -4077,6 +4539,18 @@ class PlotWorkbenchPage(BasePage):
             return
         self.set_mode("replay")
         self._replot_replay()
+        self._update_export_gates()
+
+    def _update_export_gates(self) -> None:
+        replay_loaded = self._mode == "replay" and self._replay is not None
+        self._export_csv_btn.setEnabled(replay_loaded and bool(self._selected))
+        self._export_report_btn.setEnabled(replay_loaded)
+        self._export_csv_btn.setToolTip(
+            "" if replay_loaded and self._selected else "Load a replay and select signals."
+        )
+        self._export_report_btn.setToolTip(
+            "" if replay_loaded else "Load a replay session first."
+        )
 
     def _replot_replay(self) -> None:
         if self._mode != "replay" or self._replay is None:

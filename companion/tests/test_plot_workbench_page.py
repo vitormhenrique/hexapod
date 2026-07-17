@@ -81,6 +81,22 @@ def test_replay_mode_plots_recorded_session(qtbot, tmp_path) -> None:
     assert "Replay:" in page._status.text()
 
 
+def test_replay_exports_selected_signals_and_session_report(qtbot, tmp_path) -> None:
+    page, _ = _make_page(qtbot)
+    page.select_signals(["servo.1.position"])
+    replay = build_sample_session(tmp_path / "session", frames_per_stream=2)
+    page.load_session(replay.dir)
+    csv_output = tmp_path / "selected.csv"
+    report_output = tmp_path / "summary.txt"
+
+    assert page._export_csv_btn.isEnabled()
+    assert page._export_report_btn.isEnabled()
+    assert page.export_selected_csv(csv_output)
+    assert page.export_session_report(report_output)
+    assert "servo.1.position" in csv_output.read_text(encoding="utf-8")
+    assert "Session report:" in report_output.read_text(encoding="utf-8")
+
+
 def test_clear_empties_buffers(qtbot) -> None:
     page, service = _make_page(qtbot)
     page.select_signals(["servo.1.position"])

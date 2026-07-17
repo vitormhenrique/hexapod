@@ -82,6 +82,11 @@ class RespondingStream:
         with self._lock:
             self._inbound.extend(encode_frame(header, payload))
 
+    def push_event(self, event_id: int, payload: bytes) -> None:
+        header = Header(msg_type=int(MsgType.EVENT), msg_id=event_id)
+        with self._lock:
+            self._inbound.extend(encode_frame(header, payload))
+
 
 def _ctrl_ok(state: int = 2, fault: int = 0):
     return lambda _p: (bytes([api.CTRL_OK, state, fault]), False)
@@ -104,6 +109,23 @@ def test_estop_roundtrip():
         res = client.estop()
         assert res is not None
         assert res.ok and res.state == 12
+        assert stream.tx_count == 1
+    finally:
+        client.stop()
+
+
+def test_jetson_heartbeat_uses_distinct_liveness_command():
+    seen = []
+
+    def heartbeat(payload):
+        seen.append(payload)
+        return b"\x78\x56\x34\x12\x07", False
+
+    client, stream = _make_client({api.MSG_JETSON_HEARTBEAT: heartbeat})
+    try:
+        result = client.jetson_heartbeat()
+        assert result == (0x12345678, 7)
+        assert seen == [b""]
         assert stream.tx_count == 1
     finally:
         client.stop()
@@ -252,6 +274,55 @@ def test_telemetry_dispatch_during_requests():
         # Give the reader a moment to drain the telemetry frame.
         _wait_for(lambda: received, timeout=1.0)
         assert received and received[0][0] == int(tlm_stream())
+    finally:
+        client.stop()
+
+
+def test_event_dispatch_does_not_interfere_with_request_responses():
+    received = []
+    client, stream = _make_client({api.MSG_ESTOP: _ctrl_ok()})
+    client.on_event(lambda event_id, payload, header: received.append((event_id, payload)))
+    try:
+        stream.push_event(0xA0, b"trace-fragment")
+        res = client.estop()
+        assert res is not None and res.ok
+        _wait_for(lambda: received, timeout=1.0)
+        assert received == [(0xA0, b"trace-fragment")]
+    finally:
+        client.stop()
+
+
+def test_hil_observer_client_methods_use_typed_response_parsers():
+    token = 0x11223344
+    handlers = {
+        api.MSG_HIL_GET_CAPABILITY: lambda _p: (
+            __import__("struct").pack("<BBBBIIIHB", 0, 0, 0, 1, 0, 0, 0, 1, 1),
+            False,
+        ),
+        api.MSG_HIL_OPEN_SESSION: lambda _p: (
+            __import__("struct").pack("<BIIHB", 0, 7, token, 1, 0x0F),
+            False,
+        ),
+        api.MSG_HIL_CAPTURE: lambda _p: (__import__("struct").pack("<BI", 0, 12), False),
+        api.MSG_HIL_HEARTBEAT: lambda _p: (bytes([api.HIL_OK]), False),
+        api.MSG_HIL_GET_SESSION_STATUS: lambda _p: (
+            __import__("struct").pack("<BBBBIIIHB", 0, 1, 1, 1, 7, 12, 1000, 1, 1),
+            False,
+        ),
+        api.MSG_HIL_CLOSE_SESSION: lambda _p: (bytes([api.HIL_OK]), False),
+    }
+    client, _ = _make_client(handlers)
+    try:
+        capability = client.hil_get_capability()
+        assert capability is not None and capability.available
+        opened = client.hil_open_session(0xAABBCCDD)
+        assert opened is not None and opened.ok and opened.session_token == token
+        capture = client.hil_capture(token, 1)
+        assert capture is not None and capture.ok and capture.capture_id == 12
+        assert client.hil_heartbeat(token).ok
+        status = client.hil_get_session_status(token)
+        assert status is not None and status.capture_active
+        assert client.hil_close_session(token).ok
     finally:
         client.stop()
 
@@ -412,11 +483,30 @@ def test_write_config_stages_every_block():
         assert edited is not None
         edited.robot_name = "Tweaked"
         edited.servos[0].trim_ticks = 17
+        edited.links.coxa_cmm = 5725
+        edited.geometry.home_radius_cmm = 12650
+        edited.legs[0].mount_yaw_cdeg = 13625
+        edited.feet[0].pressure_baseline = 123456
+        edited.feet[0].near_thresh = 100
+        edited.feet[0].touch_thresh = 200
+        edited.feet[0].load_thresh = 300
+        edited.feet[0].enabled = 1
         assert client.write_config(edited) is True
         # The staged buffer must now decode back to the edited config.
         staged = cfg_mod.decode_robot_config(bytes(fw.staged))
         assert staged.robot_name == "Tweaked"
         assert staged.servos[0].trim_ticks == 17
+        assert staged.links.coxa_cmm == 5725
+        assert staged.geometry.home_radius_cmm == 12650
+        assert staged.legs[0].mount_yaw_cdeg == 13625
+        assert staged.feet[0].pressure_baseline == 123456
+        assert staged.feet[0].load_thresh == 300
+        assert staged.feet[0].enabled == 1
+        assert client.cfg_validate().ok
+        assert client.cfg_commit().ok
+        persisted = cfg_mod.decode_robot_config(bytes(fw.payload))
+        assert persisted.feet[0].pressure_baseline == 123456
+        assert persisted.geometry.home_radius_cmm == 12650
     finally:
         client.stop()
 
@@ -506,8 +596,6 @@ def test_diagnostics_snapshot_counts_frames():
 
 # --- I2C topology / sensor status / poll rate -----------------------------
 def _topology_payload() -> bytes:
-    import struct
-
     # mux=1, eeprom=1, n=3 channels; ch0 present, ch1 missing, ch2 fault.
     body = bytes([1, 1, 3])
     body += bytes([1, 1, 1, 2, 1])  # scanned,vcnl,lps,count,state=present

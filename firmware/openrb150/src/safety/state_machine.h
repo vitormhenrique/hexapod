@@ -130,11 +130,17 @@ class StateMachine {
 
   State state() const { return state_; }
   FaultReason faultReason() const { return reason_; }
+  FaultReason lastFaultReason() const { return last_fault_reason_; }
+  uint32_t lastFaultTimestampMs() const { return last_fault_timestamp_ms_; }
 
  private:
+  void latchFault(FaultReason reason, uint32_t now_ms);
+
   StateParams params_{};
   State state_ = State::Boot;
   FaultReason reason_ = FaultReason::None;
+  FaultReason last_fault_reason_ = FaultReason::None;
+  uint32_t last_fault_timestamp_ms_ = 0;
   bool clear_fault_requested_ = false;
   // Battery-low debounce: timestamp of the first consecutive low sample.
   bool batt_low_active_ = false;

@@ -1,7 +1,7 @@
 #pragma once
 
 // ===========================================================================
-// Robotic Finger Sensor v2 reader (Arduino-only, Wire transactions).
+// Robotic Finger Sensor v2 reader (Arduino-only, bounded I2C transactions).
 //
 // Each foot board carries a VCNL4040 proximity sensor (0x60) and an LPS25HB
 // barometric pressure sensor (0x5C). The caller (i2cTask, the sole Wire owner)
@@ -24,16 +24,16 @@
 //     PRESS_OUT   0x28..0x2A (24-bit, auto-increment via MSB of sub-address)
 // ===========================================================================
 
-#include <Wire.h>
 #include <stdint.h>
 
 #include "contact_estimator.h"
+#include "i2c_bus.h"
 
 namespace sensors {
 
 class FingerSensorReader {
  public:
-  explicit FingerSensorReader(arduino::TwoWire& wire) : wire_(wire) {}
+  explicit FingerSensorReader(i2c::I2cBus& bus) : bus_(bus) {}
 
   // Power up + configure the VCNL4040 and LPS25HB on the CURRENTLY SELECTED mux
   // channel. Returns true only if both devices were configured. Call once per
@@ -56,7 +56,7 @@ class FingerSensorReader {
   bool readCmd16(uint8_t addr, uint8_t cmd, uint16_t& out);
   bool readRegs(uint8_t addr, uint8_t reg, uint8_t* buf, uint8_t len);
 
-  arduino::TwoWire& wire_;
+  i2c::I2cBus& bus_;
 };
 
 }  // namespace sensors

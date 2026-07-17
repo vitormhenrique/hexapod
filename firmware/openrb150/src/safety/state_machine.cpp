@@ -70,12 +70,20 @@ bool stateAllowsDxlPower(State s) {
 void StateMachine::reset() {
   state_ = State::Boot;
   reason_ = FaultReason::None;
+  last_fault_reason_ = FaultReason::None;
+  last_fault_timestamp_ms_ = 0;
   clear_fault_requested_ = false;
   batt_low_active_ = false;
   batt_low_since_ms_ = 0;
   arming_since_ms_ = 0;
   last_activity_ms_ = 0;
   arm_release_required_ = true;
+}
+
+void StateMachine::latchFault(FaultReason reason, uint32_t now_ms) {
+  if (reason == FaultReason::None || reason == reason_) return;
+  last_fault_reason_ = reason;
+  last_fault_timestamp_ms_ = now_ms;
 }
 
 State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
@@ -94,6 +102,7 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
   if (in.dxl_hard_fault) {
     arm_release_required_ = true;
     state_ = State::FaultHard;
+    latchFault(FaultReason::DxlHardware, now_ms);
     reason_ = FaultReason::DxlHardware;
     clear_fault_requested_ = false;
     return state_;
@@ -156,6 +165,7 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
   if (estop_reason != FaultReason::None) {
     arm_release_required_ = true;
     state_ = State::Estop;
+    latchFault(estop_reason, now_ms);
     reason_ = estop_reason;
     return state_;
   }
@@ -239,6 +249,7 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
       } else if ((now_ms - arming_since_ms_) >= params_.arming_timeout_ms) {
         arm_release_required_ = true;
         state_ = State::FaultSoft;
+        latchFault(FaultReason::ArmingTimeout, now_ms);
         reason_ = FaultReason::ArmingTimeout;
       }
       break;

@@ -5,7 +5,7 @@
         },
         "core": "arduino",
         "cpu": "cortex-m0plus",
-        "extra_flags": "-DARDUINO_OpenRB -D__SAMD21G18A__ -DUSE_ARDUINO_MKR_PIN_LAYOUT -D__OPENRB_150__",
+        "extra_flags": "-D__SAMD21G18A__ -DUSE_ARDUINO_MKR_PIN_LAYOUT -D__OPENRB_150__",
         "f_cpu": "48000000L",
         "hwids": [
             [

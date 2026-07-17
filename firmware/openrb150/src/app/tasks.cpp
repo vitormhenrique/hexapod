@@ -7,12 +7,20 @@
 #include "../board/board.h"
 #include "../config/config_api.h"
 #include "../config/eeprom_24lc32.h"
+#include "../controller/controller_core.h"
 #include "../dxl/dxl_bus.h"
 #include "../dxl/hold_targets.h"
 #include "../dxl/dxl_params.h"
+#include "../dxl/scan_cursor.h"
 #include "../dxl/servo_map.h"
 #include "../gait/gait_pipeline.h"
 #include "../gait/trick_engine.h"
+#include "../hil/observer_api.h"
+#include "../hil/output_guard.h"
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+#include "../hil/trace_codec.h"
+#include "../hil/trace_recorder.h"
+#endif
 #include "../input/controller_bridge.h"
 #include "../input/crsf_parser.h"
 #include "../protocol/api.h"
@@ -33,10 +41,12 @@
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
 #include "../safety/command_arbiter.h"
+#include "../safety/fault_capture.h"
 #include "../safety/state_machine.h"
 #include "../safety/system_state.h"
 #include "../safety/watchdog.h"
 #include "task_config.h"
+#include "controller_time_adapter.h"
 
 namespace app {
 namespace {
@@ -65,7 +75,6 @@ volatile uint32_t g_poseKnownMask = 0;
 volatile uint32_t g_servoReadinessConfigRev = 0;
 constexpr uint32_t kAllServoPosesKnown =
   (1u << config::kNumServos) - 1u;
-
 // CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial3).
 crsf::Parser g_crsfParser;
 crsf::RcStatus g_rcStatus;
@@ -96,22 +105,18 @@ RcDiagSnapshot g_rcDiag{};
 controller::ControllerBridge g_bridge;
 controller::ControllerCommand g_ctrlCmd;
 
-// Command-source arbiter (RC / Jetson / Mac). controlTask evaluates it each
-// cycle from the RC snapshot; apiTask feeds Jetson heartbeats, the Mac
-// maintenance lock, and host estop into it. The published authority gates the
-// DXL goal-write path (motion is denied unless a source owns it).
-safety::CommandArbiter g_arbiter;
 volatile uint8_t g_commandSource = 0;       // safety::CommandSource value
 volatile bool g_motionAuthorized = false;   // a source may drive servos
 volatile bool g_killActive = true;          // RC kill / host estop asserted
 
-// Authoritative safety state machine (AGENTS.md 5.3). controlTask advances it
-// each cycle from health/RC/arbiter inputs; the result is the single source of
-// truth for which states permit torque and goal writes. dxlTask enforces the
-// gate at the bus level.
-safety::StateMachine g_stateMachine;
+// Only controlTask advances this adapter clock. It translates the FreeRTOS
+// scheduler timestamp into the portable ControllerTime contract without making
+// the future ControllerCore depend on FreeRTOS.
+controller::ControllerClock g_controlClock;
 volatile uint8_t g_safetyState = static_cast<uint8_t>(safety::State::Boot);
 volatile uint8_t g_faultReason = 0;  // safety::FaultReason value
+volatile uint8_t g_lastFaultReason = 0;  // safety::FaultReason value
+volatile uint32_t g_lastFaultTimestampMs = 0;
 // True only when the current state permits motion AND a source owns authority.
 volatile bool g_motionGate = false;
 // True once i2cTask has finished its boot scan and seeded a (persisted or
@@ -126,6 +131,10 @@ volatile bool g_configReady = false;
 // starving healthTask's WDT pet -> hardware reset ~2 s after every host
 // request). All other tasks must read this snapshot, never the ADC.
 volatile uint16_t g_batteryMv = 0;
+volatile bool g_batteryValid = false;
+bool g_batterySampled = false;
+uint32_t g_lastBatterySampleMs = 0;
+constexpr uint32_t kBatterySamplePeriodMs = 100;
 
 // Telemetry subscription manager. apiTask routes the telemetry command range to
 // it and walks the streams each loop, emitting due telemetry frames over USB.
@@ -195,6 +204,16 @@ protocol::MaintTargetApi g_maintTargetApi;
 // writes the serialized result back for the host to poll via DXL_GET_RESULT.
 protocol::DxlJobApi g_dxlJobApi;
 
+// A DXL scan keeps the maintenance queue slot Running while it advances one
+// ping per dxlTask iteration. The queue remains single-slot, but absent IDs no
+// longer turn one host request into a watchdog-starving busy-wait burst.
+struct DxlScanJobState {
+  bool active = false;
+  uint8_t job_id = 0;
+  dxl::ScanCursor cursor;
+};
+DxlScanJobState g_dxlScanJob;
+
 // Host feature-flag command surface (FEATURE_GET/SET/GET_REASONS/RESET). Stores
 // the host's desired enable set; controlTask publishes per-feature availability
 // each cycle and consumes the desired set to drive the real toggles. Effective
@@ -229,6 +248,74 @@ protocol::PassiveApi g_passiveApi;
 // it directly). Also feeds the controller_state telemetry stream.
 protocol::ControllerApi g_controllerApi;
 
+// HIL observer commands are isolated from normal motion and maintenance
+// authority. The portable handler exists in every image so the normal target
+// answers the reserved command range with NotAvailable.
+hil::ObserverApi g_hilObserver;
+
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+// The recorder has one fixed producer/consumer record handoff. This separate
+// ring carries only tiny capture-control messages from apiTask to controlTask,
+// so a serial request never mutates recorder state directly.
+enum class HilTraceRequestType : uint8_t { Capture, Abort, Marker };
+
+struct HilTraceRequest {
+  HilTraceRequestType type = HilTraceRequestType::Capture;
+  uint32_t session_id = 0;
+  uint32_t capture_id = 0;
+  uint32_t value = 0;
+};
+
+class HilTraceRequestRing {
+ public:
+  static constexpr uint8_t kCapacity = 4;
+
+  bool hasSpace() const {
+    taskENTER_CRITICAL();
+    const bool available = count_ < kCapacity;
+    taskEXIT_CRITICAL();
+    return available;
+  }
+
+  bool push(const HilTraceRequest& request) {
+    taskENTER_CRITICAL();
+    if (count_ >= kCapacity) {
+      taskEXIT_CRITICAL();
+      return false;
+    }
+    entries_[write_index_] = request;
+    write_index_ = static_cast<uint8_t>((write_index_ + 1u) % kCapacity);
+    ++count_;
+    taskEXIT_CRITICAL();
+    return true;
+  }
+
+  bool pop(HilTraceRequest* request) {
+    if (request == nullptr) return false;
+    taskENTER_CRITICAL();
+    if (count_ == 0) {
+      taskEXIT_CRITICAL();
+      return false;
+    }
+    *request = entries_[read_index_];
+    read_index_ = static_cast<uint8_t>((read_index_ + 1u) % kCapacity);
+    --count_;
+    taskEXIT_CRITICAL();
+    return true;
+  }
+
+ private:
+  HilTraceRequest entries_[kCapacity] = {};
+  uint8_t read_index_ = 0;
+  uint8_t write_index_ = 0;
+  uint8_t count_ = 0;
+};
+
+hil::trace::TraceRecorder g_hilTrace;
+HilTraceRequestRing g_hilTraceRequests;
+uint16_t g_hilTraceEventSeq = 0;
+#endif
+
 // Published controller snapshots (single writer rcTask, reader apiTask). Raw
 // decoded ChannelPack inputs + the bridge's active binding map, copied each RC
 // cycle so apiTask can report them without touching the bridge.
@@ -261,16 +348,16 @@ volatile bool g_dxlHardFault = false;
 // CRSF runs at 420000 baud on the OpenRB-150 D14 TX / D13 RX UART (Serial3).
 constexpr uint32_t kCrsfBaud = 420000;
 
-// Single owner of the root I2C bus (Wire): TCA9548A mux, 24LC32 EEPROM, and the
+// Single owner of the root I2C bus (SERCOM0): TCA9548A mux, 24LC32 EEPROM, and the
 // muxed foot sensors. Only i2cTask touches this. Topology is the boot-scan
 // result describing which optional devices were found.
-i2c::I2cBus g_i2cBus(Wire);
+i2c::I2cBus g_i2cBus;
 i2c::I2cTopology g_i2cTopology;
 
-// Foot contact pipeline. The reader does the Wire/mux register I/O (Arduino),
+// Foot contact pipeline. The reader does bounded I2C/mux register I/O,
 // the estimator runs the portable contact state machine, and the published
 // snapshot is read by telemetry/safety consumers. All owned by i2cTask.
-sensors::FingerSensorReader g_finger(Wire);
+sensors::FingerSensorReader g_finger(g_i2cBus);
 sensors::ContactEstimator g_contact;
 sensors::LegContactState g_footState[sensors::kNumFeet];
 volatile uint8_t g_footPresentMask = 0;
@@ -278,20 +365,22 @@ volatile uint8_t g_footPresentMask = 0;
 // present boards stream raw proximity/pressure; contact classification stays
 // disabled per-foot until calibrated (FootSensorCal.enabled).
 volatile bool g_sensorPollingEnabled = true;
+volatile uint32_t g_i2cLastUpdateMs = 0;
+constexpr uint32_t kI2cStaleMs = 500;
 
 // Persistent robot config in the 24LC32 EEPROM (root bus). When the EEPROM is
 // missing or holds no valid slot the config is marked volatile and the firmware
 // must run on compiled defaults and reject commits (AGENTS.md 4.3). At boot the
 // i2cTask loads any valid slot and hands it to apiTask; thereafter the config
 // API (apiTask) edits a RAM shadow and routes CFG_COMMIT back to i2cTask.
-config::Eeprom24LC32 g_eeprom(Wire);
+config::Eeprom24LC32 g_eeprom(g_i2cBus);
 config::ConfigStore g_configStore(g_eeprom);
 bool g_configVolatile = true;
 
-// --- Cross-task config plumbing (AGENTS.md 5.1: only i2cTask touches Wire) ---
+// --- Cross-task config plumbing (AGENTS.md 5.1: only i2cTask touches I2C) ---
 //
 // The config API runs in apiTask (it parses USB frames), but the EEPROM commit
-// is a Wire transaction that only i2cTask is allowed to perform. So apiTask
+// is an I2C transaction that only i2cTask is allowed to perform. So apiTask
 // edits/validates a RAM shadow locally, and a CFG_COMMIT hands the validated
 // serialized payload to i2cTask through this mailbox and blocks (bounded) for
 // the result. A separate one-shot boot-load buffer lets i2cTask pass a valid
@@ -322,7 +411,9 @@ class TaskConfigPersistence : public config::ConfigPersistence {
   bool commitPayload(const uint8_t* payload, uint16_t len) override {
     if (g_commitMutex == nullptr || g_commitDone == nullptr) return false;
     if (len > sizeof(g_commit.payload)) return false;
-    xSemaphoreTake(g_commitMutex, portMAX_DELAY);
+    if (xSemaphoreTake(g_commitMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+      return false;
+    }
     memcpy(g_commit.payload, payload, len);
     g_commit.len = len;
     g_commit.ok = false;
@@ -332,7 +423,9 @@ class TaskConfigPersistence : public config::ConfigPersistence {
     if (xSemaphoreTake(g_commitDone, pdMS_TO_TICKS(1500)) != pdTRUE) {
       return false;  // timed out
     }
-    xSemaphoreTake(g_commitMutex, portMAX_DELAY);
+    if (xSemaphoreTake(g_commitMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+      return false;
+    }
     const bool ok = g_commit.ok;
     xSemaphoreGive(g_commitMutex);
     return ok;
@@ -343,17 +436,15 @@ class TaskConfigPersistence : public config::ConfigPersistence {
 TaskConfigPersistence g_configPersist;
 config::ConfigApi g_configApi(g_configPersist);
 
-// Gait -> servo goal pipeline (gait engine -> body IK -> servo map), owned by
-// controlTask (lmt.1). Declared after g_configApi so its captured config
-// reference is the live RAM shadow; the ServoMap stage reads the shadow by
-// reference, while the gait engine + body transform are re-seeded from config
-// on adopt/commit (lmt.7).
-gait::GaitPipeline g_pipeline(g_configApi.config());
-
-// Trick / choreography engine (oha.5), owned by controlTask. Plays the
-// controller bridge's edge-triggered TrickId as a bounded body-pose/twist
-// sequence through the same gait pipeline + safety gate (no raw servo writes).
-gait::TrickEngine g_trickEngine;
+// The portable controller owns algorithmic state. The snapshots below belong
+// to the FreeRTOS adapter and stay static so the 384-word control-task stack
+// is reserved for the existing gait/DXL call chains rather than large copies.
+controller::ControllerCore g_controllerCore;
+controller::RobotState g_controllerState;
+controller::ControllerIntent g_controllerIntent;
+controller::ControllerConfigSnapshot g_controllerConfig;
+controller::RobotCommand g_controllerCommand;
+uint32_t g_controllerConfigRevision = 0xFFFFFFFFu;
 
 void initDeviceInfo() {
   g_deviceInfo.fw_major = 0;
@@ -391,6 +482,24 @@ inline uint16_t put32(uint8_t* p, uint32_t v) {
   p[2] = static_cast<uint8_t>((v >> 16) & 0xFF);
   p[3] = static_cast<uint8_t>((v >> 24) & 0xFF);
   return 4;
+}
+
+uint8_t packHilFlags(const hil::OutputGuardStatus& status) {
+  uint8_t flags = 0;
+  if (status.output_disabled) flags |= protocol::api::hilflag::kOutputDisabled;
+  if (status.power_guard_active) {
+    flags |= protocol::api::hilflag::kPowerGuardActive;
+  }
+  if (status.torque_guard_active) {
+    flags |= protocol::api::hilflag::kTorqueGuardActive;
+  }
+  if (status.goal_guard_active) {
+    flags |= protocol::api::hilflag::kGoalGuardActive;
+  }
+  if (status.write_guard_active) {
+    flags |= protocol::api::hilflag::kWriteGuardActive;
+  }
+  return flags;
 }
 
 // Write one complete wire frame to USB CDC, reporting whether every byte was
@@ -436,6 +545,178 @@ bool txFrame(const uint8_t* frame, size_t n) {
   return true;
 }
 
+void refreshHilObserver(uint32_t now_ms,
+                        const hil::OutputGuardStatus& guard_status) {
+  g_hilObserver.setNow(now_ms);
+  g_hilObserver.setLiveState(g_safetyState);
+  g_hilObserver.setMaintenanceLock(g_maintApi.token(),
+                                    g_maintApi.lockHeld(now_ms));
+  g_hilObserver.setOutputGuard(guard_status);
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+  g_hilObserver.setTaskRequestCapacity(g_hilTraceRequests.hasSpace());
+#endif
+  g_hilObserver.tick();
+}
+
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+void queueHilObserverRequests() {
+  // apiTask is the only producer. The observer refuses a new state-changing
+  // command when this fixed ring has no space, so every successful take/push
+  // pair below is nonblocking and cannot silently lose a request.
+  while (g_hilTraceRequests.hasSpace()) {
+    hil::CaptureRequest capture;
+    if (g_hilObserver.takeCaptureRequest(&capture)) {
+      HilTraceRequest request;
+      request.type = HilTraceRequestType::Capture;
+      request.session_id = capture.session_id;
+      request.capture_id = capture.capture_id;
+      request.value = capture.step_count;
+      if (!g_hilTraceRequests.push(request)) return;
+      continue;
+    }
+    hil::CaptureAbortRequest abort;
+    if (g_hilObserver.takeAbortRequest(&abort)) {
+      HilTraceRequest request;
+      request.type = HilTraceRequestType::Abort;
+      request.session_id = abort.session_id;
+      request.capture_id = abort.capture_id;
+      request.value = static_cast<uint8_t>(abort.reason);
+      if (!g_hilTraceRequests.push(request)) return;
+      continue;
+    }
+    hil::MarkerRequest marker;
+    if (g_hilObserver.takeMarkerRequest(&marker)) {
+      HilTraceRequest request;
+      request.type = HilTraceRequestType::Marker;
+      request.capture_id = marker.capture_id;
+      request.value = marker.marker_id;
+      if (!g_hilTraceRequests.push(request)) return;
+      continue;
+    }
+    return;
+  }
+}
+
+void consumeHilTraceRequests(const hil::OutputGuardStatus& guard_status) {
+  HilTraceRequest request;
+  while (g_hilTraceRequests.pop(&request)) {
+    switch (request.type) {
+      case HilTraceRequestType::Capture: {
+        hil::CaptureRequest capture;
+        capture.session_id = request.session_id;
+        capture.capture_id = request.capture_id;
+        capture.step_count = static_cast<uint8_t>(request.value);
+        // The observer accepted this only after validating its token, state,
+        // guard, and bounded request. begin() is a static-memory operation and
+        // cannot open an alternate output or authority path.
+        (void)g_hilTrace.begin(capture, guard_status, &g_controllerConfig);
+        break;
+      }
+      case HilTraceRequestType::Abort:
+        if (g_hilTrace.summary().capture_id == request.capture_id) {
+          g_hilTrace.abort(
+              static_cast<hil::CaptureEndReason>(request.value), guard_status);
+        }
+        break;
+      case HilTraceRequestType::Marker:
+        if (g_hilTrace.active() &&
+            g_hilTrace.summary().capture_id == request.capture_id &&
+            !g_hilTrace.markNext(request.value)) {
+          g_hilTrace.abort(hil::CaptureEndReason::TransportOverflow,
+                           guard_status);
+        }
+        break;
+    }
+  }
+}
+
+bool emitHilTraceRecord(uint32_t now_ms, uint8_t* frame_out,
+                        size_t frame_out_cap) {
+  hil::trace::RecordView record;
+  if (!g_hilTrace.peek(&record)) return true;
+
+  const uint16_t fragment_data_capacity =
+      hil::trace::maxFragmentData(protocol::kMaxPayload);
+  if (fragment_data_capacity == 0) {
+    g_hilTrace.abandonCurrent(hil::CaptureEndReason::TransportOverflow,
+                              hil::outputGuard().status());
+    return false;
+  }
+  const uint8_t fragment_count = static_cast<uint8_t>(
+      (record.logical_length + fragment_data_capacity - 1u) /
+      fragment_data_capacity);
+  for (uint8_t fragment_index = 0; fragment_index < fragment_count;
+       ++fragment_index) {
+    const uint16_t offset = static_cast<uint16_t>(
+        static_cast<uint32_t>(fragment_index) * fragment_data_capacity);
+    const uint16_t remaining =
+        static_cast<uint16_t>(record.logical_length - offset);
+    const uint16_t fragment_length =
+        remaining < fragment_data_capacity ? remaining : fragment_data_capacity;
+    if (!g_hilTrace.copySlice(
+            record, offset, &frame_out[hil::trace::kFragmentPrefixBytes],
+            static_cast<uint16_t>(protocol::kMaxPayload -
+                                  hil::trace::kFragmentPrefixBytes),
+            fragment_length)) {
+      g_hilTrace.abandonCurrent(hil::CaptureEndReason::TransportOverflow,
+                                hil::outputGuard().status());
+      return false;
+    }
+
+    hil::trace::FragmentHeader fragment;
+    fragment.session_id = record.session_id;
+    fragment.capture_id = record.capture_id;
+    fragment.record_seq = record.record_seq;
+    fragment.record_type = record.type;
+    fragment.fragment_index = fragment_index;
+    fragment.fragment_count = fragment_count;
+    fragment.logical_length = record.logical_length;
+    fragment.logical_crc16 = record.logical_crc16;
+    uint16_t payload_length = 0;
+    if (!hil::trace::encodeFragmentSlice(
+            fragment, &frame_out[hil::trace::kFragmentPrefixBytes],
+            fragment_length, frame_out, protocol::kMaxPayload,
+            &payload_length)) {
+      g_hilTrace.abandonCurrent(hil::CaptureEndReason::TransportOverflow,
+                                hil::outputGuard().status());
+      return false;
+    }
+
+    protocol::Header header;
+    header.msg_type = static_cast<uint8_t>(protocol::MsgType::Event);
+    header.msg_id = record.type == hil::trace::RecordType::OutputBlocked
+                        ? hil::trace::kOutputBlockedEvent
+                        : hil::trace::kTraceFragmentEvent;
+    header.flags = protocol::api::flag::kFragment;
+    header.seq = g_hilTraceEventSeq++;
+    header.timestamp_ms = now_ms;
+    header.payload_len = payload_length;
+    // encodeFrame first copies payload bytes into a local body, so frame_out
+    // can safely serve as both the bounded fragment payload and wire output.
+    const size_t frame_length = protocol::encodeFrame(
+        header, frame_out, frame_out, frame_out_cap);
+    if (frame_length == 0 || !txFrame(frame_out, frame_length)) {
+      g_subs.noteTxBacklog();
+      g_hilTrace.abandonCurrent(hil::CaptureEndReason::TransportTimeout,
+                                hil::outputGuard().status());
+      return false;
+    }
+    g_hilTrace.noteFragmentsSent(1);
+  }
+  g_hilTrace.acknowledge(record);
+
+  uint32_t session_id = 0;
+  uint32_t capture_id = 0;
+  hil::CaptureEndReason reason = hil::CaptureEndReason::Complete;
+  if (g_hilTrace.takeCompletion(&session_id, &capture_id, &reason)) {
+    (void)session_id;
+    (void)reason;
+    g_hilObserver.noteCaptureFinished(capture_id);
+  }
+  return true;
+}
+#endif
+
 // Build the payload for telemetry `stream` into `p` (capacity kMaxPayload).
 // Returns the payload length. Reads only the published cross-task snapshots, so
 // it never touches a peripheral or blocks. Payloads stay within 256 bytes.
@@ -450,6 +731,16 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       p[o++] = g_faultReason;
       o += put32(&p[o], watchdog::missedMask());
       o += put16(&p[o], g_batteryMv);  // snapshot; ADC is controlTask-only
+      const hil::OutputGuardStatus guard_status = hil::outputGuard().status();
+      p[o++] = packHilFlags(guard_status);
+      o += put32(&p[o], guard_status.blocked_power_enable);
+      o += put32(&p[o], guard_status.blocked_torque_enable);
+      o += put32(&p[o], guard_status.blocked_goal_write);
+      o += put32(&p[o], guard_status.blocked_dxl_write);
+      o += put32(&p[o], guard_status.last_goal_sequence);
+      p[o++] = guard_status.last_goal_count;
+      p[o++] = g_lastFaultReason;
+      o += put32(&p[o], g_lastFaultTimestampMs);
       break;
     }
     case StreamId::ControlState: {
@@ -621,6 +912,24 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       p[o++] = static_cast<uint8_t>(ls.down_snr);
       break;
     }
+    case StreamId::HilStatus: {
+      const hil::OutputGuardStatus guard_status = hil::outputGuard().status();
+      hil::GoalTargetRecord goals[hil::kMaxRecordedGoalTargets] = {};
+      const uint8_t goal_count = hil::outputGuard().copyLastBlockedGoals(
+          goals, hil::kMaxRecordedGoalTargets);
+      p[o++] = packHilFlags(guard_status);
+      p[o++] = goal_count;
+      o += put32(&p[o], guard_status.last_goal_sequence);
+      o += put32(&p[o], guard_status.blocked_power_enable);
+      o += put32(&p[o], guard_status.blocked_torque_enable);
+      o += put32(&p[o], guard_status.blocked_goal_write);
+      o += put32(&p[o], guard_status.blocked_dxl_write);
+      for (uint8_t i = 0; i < goal_count; ++i) {
+        p[o++] = goals[i].id;
+        o += put32(&p[o], static_cast<uint32_t>(goals[i].tick));
+      }
+      break;
+    }
   }
   return o;
 }
@@ -642,12 +951,14 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
 //                        torque-off PassivePoseStream state).
 //   * JetsonControl   - Jetson heartbeat -> arbiter authority is wired
 //                        (lmt.13); available, defaults off, gated by RC.
-void updateFeatureFlags(uint32_t /*now_ms*/) {
+void updateFeatureFlags(uint32_t now_ms) {
   using protocol::Feature;
   using protocol::FeatureReason;
 
-  const bool mux = g_i2cTopology.mux_present;
-  const bool any_foot = g_footPresentMask != 0;
+  const bool i2c_fresh = g_i2cLastUpdateMs != 0 &&
+                         (now_ms - g_i2cLastUpdateMs) <= kI2cStaleMs;
+  const bool mux = i2c_fresh && g_i2cTopology.mux_present;
+  const bool any_foot = i2c_fresh && g_footPresentMask != 0;
 
   // SensorPolling: real toggle, available whenever the mux is present.
   g_featureApi.setAvailability(
@@ -695,19 +1006,6 @@ void updateFeatureFlags(uint32_t /*now_ms*/) {
 // --- Task bodies ----------------------------------------------------------
 // Each task runs a fixed-period loop with vTaskDelayUntil so timing does not
 // drift with body execution time. Bodies are stubs for the skeleton.
-
-// Map the 3-position CRSF gait switch (gait_index 0,1,2) to a gait id (lmt.3).
-// Position 0 is Stand so a centred switch never walks (priority:safety); the
-// upper two positions select walking gaits. Indices are clamped defensively.
-config::GaitId rcGaitToId(uint8_t gait_index) {
-  static const config::GaitId kMap[3] = {
-      config::GaitId::Stand,   // switch low: hold a stance, ignore sticks
-      config::GaitId::Tripod,  // switch mid: fast alternating-tripod walk
-      config::GaitId::Ripple,  // switch high: slower, more stable ripple
-  };
-  if (gait_index > 2) gait_index = 2;
-  return kMap[gait_index];
-}
 
 // Project the decoded ControllerCommand onto the legacy RcStatus the safety
 // FSM / arbiter / rc_input telemetry still consume (oha.3). The bridge is the
@@ -819,35 +1117,160 @@ bool verifyDiscoveredTorqueOff() {
   return true;
 }
 
+bool refreshControllerConfigSnapshot() {
+  const uint32_t revision = g_configApi.revision();
+  if (g_controllerConfig.valid &&
+      revision == g_controllerConfigRevision) {
+    return true;
+  }
+
+  if (!controller::makeControllerConfigSnapshot(
+          g_configApi.config(), revision, !g_configVolatile,
+          g_controllerConfig)) {
+    g_controllerConfig = controller::ControllerConfigSnapshot{};
+    g_controllerConfig.revision = revision;
+    g_controllerConfig.persistent = !g_configVolatile;
+    return false;
+  }
+  g_controllerConfigRevision = revision;
+  return true;
+}
+
+void collectControllerState(uint32_t now_ms) {
+  controller::RobotState& state = g_controllerState;
+  state = controller::RobotState{};
+  state.config_ready = g_configReady;
+
+  if (!g_batterySampled ||
+      (now_ms - g_lastBatterySampleMs) >= kBatterySamplePeriodMs) {
+    uint16_t battery_mv = 0;
+    g_batteryValid = board::readBatteryMilliVolts(battery_mv) &&
+                     battery_mv > 6000;
+    g_batteryMv = battery_mv;
+    g_lastBatterySampleMs = now_ms;
+    g_batterySampled = true;
+  }
+  state.battery.millivolts = g_batteryMv;
+  state.battery.valid = g_batteryValid;
+  state.battery.validity = state.battery.valid
+                               ? controller::SnapshotValidity::Fresh
+                               : controller::SnapshotValidity::Unknown;
+
+  uint8_t servo_count = g_servoStatusCount;
+  if (servo_count > config::kNumServos) servo_count = config::kNumServos;
+  state.dxl.servo_count = servo_count;
+  state.dxl.validity = controller::SnapshotValidity::Fresh;
+  state.dxl.configured_servo_coverage = g_configuredServoCoverage;
+  state.dxl.pose_known_mask = g_poseKnownMask;
+  state.dxl.config_revision = g_servoReadinessConfigRev;
+  state.dxl.torque_off = g_dxlTorqueOff;
+  state.dxl.hard_fault = g_dxlHardFault;
+  for (uint8_t index = 0; index < servo_count; ++index) {
+    state.dxl.servos[index] = g_servoStatus[index];
+  }
+
+  state.contact.present_mask = g_footPresentMask;
+  state.contact.validity = controller::SnapshotValidity::Fresh;
+  for (uint8_t leg = 0; leg < sensors::kNumFeet; ++leg) {
+    state.contact.feet[leg] = g_footState[leg];
+  }
+  state.watchdog_fault = watchdog::criticalStalled();
+}
+
+void collectControllerIntent(bool maintenance_held, bool host_disarm) {
+  controller::ControllerIntent& intent = g_controllerIntent;
+  intent = controller::ControllerIntent{};
+  intent.rc.command = g_ctrlCmd;
+  intent.rc.ever_seen = g_rcStatus.ever_seen;
+  intent.rc.kill = g_rcStatus.kill;
+  intent.rc.armed = g_rcStatus.armed;
+  intent.rc.failsafe = g_rcStatus.failsafe;
+  intent.rc.autonomy_enabled = g_rcStatus.autonomy;
+  intent.motion = g_motionApi.intent();
+  intent.maintenance.lock_held = maintenance_held;
+  intent.maintenance.lock_token = g_maintApi.token();
+  intent.maintenance.control_mode = g_maintTargetApi.controlMode();
+  intent.maintenance.targets = g_maintTargetApi.target();
+  intent.features.foot_contact_enabled =
+      g_featureApi.effectiveEnabled(protocol::Feature::FootContact);
+  intent.features.terrain_leveling_enabled =
+      g_featureApi.effectiveEnabled(protocol::Feature::TerrainLeveling);
+  intent.features.sensor_polling_enabled =
+      g_featureApi.effectiveEnabled(protocol::Feature::SensorPolling);
+  intent.features.jetson_control_enabled =
+      g_featureApi.effectiveEnabled(protocol::Feature::JetsonControl);
+  intent.features.passive_pose_enabled =
+      g_featureApi.effectiveEnabled(protocol::Feature::PassivePose);
+  intent.host_estop = g_controlApi.estopActive();
+  intent.host_disarm = host_disarm;
+  intent.clear_fault_requested = g_controlApi.consumeClearFault();
+  intent.passive_requested = g_passiveApi.requested();
+  intent.jetson_heartbeat_received = g_controlApi.consumeJetsonHeartbeat();
+}
+
+void publishControllerCommand(uint32_t now_ms) {
+  const controller::RobotCommand& command = g_controllerCommand;
+  g_commandSource = static_cast<uint8_t>(command.command_source);
+  g_motionAuthorized = command.motion_authorized;
+  g_killActive = g_controllerIntent.rc.kill || g_controllerIntent.host_estop;
+  g_safetyState = static_cast<uint8_t>(command.safety_state);
+  g_faultReason = static_cast<uint8_t>(command.fault_reason);
+  g_lastFaultReason =
+      static_cast<uint8_t>(g_controllerCore.lastFaultReason());
+  g_lastFaultTimestampMs = g_controllerCore.lastFaultTimestampMs();
+  watchdog::markSafetyState(g_safetyState);
+
+  if (command.diagnostics.clear_maintenance_lock) g_maintApi.revoke();
+  if (command.diagnostics.clear_passive_request) g_passiveApi.clear();
+  if (command.diagnostics.clear_maintenance_targets) {
+    g_maintTargetApi.clearTargets();
+    g_maintTargetApi.resetControlMode();
+  }
+
+  g_motionGate = command.motion_gate;
+  g_controlApi.setLiveState(g_safetyState, g_faultReason);
+  g_passiveApi.setLiveState(g_safetyState);
+  g_motionApi.setLiveState(g_safetyState, g_motionGate);
+
+  if (command.goal_valid) {
+    // Preserve the existing bounded publication behavior: never block the
+    // real-time controller if dxlTask is copying the prior goal frame.
+    if (g_goalMutex != nullptr && xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
+      g_goalFrame.count = command.goals.count;
+      for (uint8_t index = 0; index < command.goals.count; ++index) {
+        g_goalFrame.joints[index] = command.goals.joints[index];
+      }
+      g_goalClamped = command.diagnostics.any_goal_clamped;
+      ++g_goalSeq;
+      g_goalValid = true;
+      xSemaphoreGive(g_goalMutex);
+    }
+  } else {
+    // A closed gate or maintenance-entry edge must never leave a stale frame
+    // eligible for the Sync Write path.
+    g_goalValid = false;
+  }
+
+  const bool maintenance_held = g_maintApi.lockHeld(now_ms);
+  g_maintTargetApi.setLiveState(g_safetyState, maintenance_held);
+  g_dxlJobApi.setLiveState(g_safetyState, maintenance_held);
+}
+
 void controlTask(void*) {
+  fault_capture::markStartupStage(fault_capture::StartupStage::TasksRunning);
   TickType_t next = xTaskGetTickCount();
-  g_stateMachine.reset();
+  g_controllerCore.reset();
+  g_controlClock.reset();
+  g_controllerConfig = controller::ControllerConfigSnapshot{};
+  g_controllerConfigRevision = 0xFFFFFFFFu;
+
   for (;;) {
     tick(watchdog::TaskId::Control);
 
-    // Arbitrate command authority from the latest RC snapshot. rcTask owns the
-    // RC state; we only read a copy of the few fields the arbiter needs. The
-    // arbiter is the single source of truth for who (if anyone) may move the
-    // robot this cycle; the result gates the DXL goal-write path in dxlTask.
-    const uint32_t now_ms =
-        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
-    // Forward a fresh Jetson autonomy heartbeat (JETSON_HEARTBEAT USB command)
-    // into the arbiter, but only while the host has enabled the JetsonControl
-    // feature (a software master-enable, default off). The arbiter still
-    // requires RC armed + the RC autonomy switch before it ever hands authority
-    // to the Jetson, and any RC kill / disarm revokes it immediately
-    // (AGENTS.md 1.1 / 6.4). The feature gate reads the prior cycle's effective
-    // state (refreshed at the loop tail); a one-tick lag is negligible against
-    // the 250 ms heartbeat TTL. Always consume so a stale flag cannot linger.
-    if (g_controlApi.consumeJetsonHeartbeat() &&
-        g_featureApi.effectiveEnabled(protocol::Feature::JetsonControl)) {
-      g_arbiter.jetsonHeartbeat(now_ms);
-    }
-    safety::RcInputs rc_in;
-    rc_in.ever_seen = g_rcStatus.ever_seen;
-    rc_in.kill = g_rcStatus.kill;
-    rc_in.armed = g_rcStatus.armed;
-    rc_in.autonomy_enabled = g_rcStatus.autonomy;
+    const controller::ControllerTime cycle_time =
+        controllerTimeFromFreeRtos(g_controlClock);
+    const uint32_t now_ms = cycle_time.now_ms;
+
     // A host force-disarm is latched until SET_ARMING(arm) releases it. Revoke
     // any bench-mode intents at their owners so they cannot re-enter
     // maintenance/passive from Disarmed on the next control cycle.
@@ -877,399 +1300,30 @@ void controlTask(void*) {
       }
     }
     const bool maint_held = g_maintApi.lockHeld(now_ms);
-    g_arbiter.setExternalMacLock(maint_held, g_maintApi.token());
-    const safety::ArbiterOutput& arb = g_arbiter.update(rc_in, now_ms);
-    g_commandSource = static_cast<uint8_t>(arb.source);
-    g_motionAuthorized = arb.motion_authorized;
-    g_killActive = arb.kill_active;
 
-    // Advance the safety state machine. It owns the boot/arm/walk/maintenance/
-    // fault/estop transitions and decides whether torque and goal writes are
-    // permitted this cycle. Inputs are sampled from the published snapshots so
-    // the machine never blocks on a peripheral.
-    const uint16_t batt_mv = board::readBatteryMilliVolts();
-    g_batteryMv = batt_mv;  // publish for apiTask (sole-ADC-owner rule above)
-    safety::StateInputs si;
-    si.config_loaded = g_configReady;
-    si.battery_mv = batt_mv;
-    // A real 3S pack is >= ~9 V; below 6 V there is no pack on the sense pin
-    // (USB-only bench power) so the reading is not a trustworthy voltage. Both
-    // this floor and the FSM E-stop threshold assume the divider ratio is
-    // HIL-calibrated (board.h kBatteryDividerRatio); an uncalibrated ratio
-    // shifts both bounds together.
-    si.battery_valid = batt_mv > 6000;  // below this = no pack sense (USB bench)
-    si.watchdog_fault = watchdog::criticalStalled();
-    si.dxl_hard_fault = g_dxlHardFault;  // servo HW error / dead bus (lmt.5)
-    si.host_estop = g_arbiter.hostEstop() || g_controlApi.estopActive();
-    si.rc_kill = g_rcStatus.kill;
-    si.rc_failsafe = g_rcStatus.failsafe;
-    si.rc_ever_seen = g_rcStatus.ever_seen;
-    si.rc_armed = g_rcStatus.armed;
-    // Arming gate (lmt.5): leaving ArmingChecks for StandReady (the energised RC
-    // walk path) requires the full preconditions, not just a loaded config. The
-    // bench maintenance/passive paths enter from Disarmed directly, so this does
-    // not block torque-off bench work. Require: config loaded, a real pack
-    // reading (a present-but-low pack already E-stops in the FSM), the full
-    // servo set scanned, fresh present-position reads for every joint (so we
-    // know the pose before energising), and no active hard fault.
-    const bool readiness_current =
-      g_servoReadinessConfigRev == g_configApi.revision();
-    const bool servo_coverage = readiness_current && g_configuredServoCoverage;
-    const bool pose_known =
-      readiness_current && g_poseKnownMask == kAllServoPosesKnown;
-    si.arming_checks_pass = g_configReady && si.battery_valid && servo_coverage &&
-                            pose_known && !si.dxl_hard_fault;
-    si.host_disarm = host_disarm;
-    si.command_source = g_commandSource;
-    si.jetson_fresh = g_arbiter.jetsonFresh(now_ms);
-    si.rc_autonomy = g_rcStatus.autonomy;
-    si.mac_lock_held = g_arbiter.macLockHeld(now_ms);
-    // The maintenance lock is owned by the USB MaintenanceApi; a held, fresh
-    // lock is both the maintenance request and the lock-held input the FSM
-    // keys on to enter/hold MacMaintenance (AGENTS.md 6.4). maint_held was
-    // sampled above (and mirrored into the arbiter) this cycle.
-    si.mac_lock_held = si.mac_lock_held || maint_held;
-    si.maintenance_request = maint_held;
-    si.passive_request = g_passiveApi.requested();
-    si.torque_off = g_dxlTorqueOff;
-    // Contact-aware terrain gate (lmt.5): expose the live FootContact feature
-    // state and an aggregate confidence so the tested StandReady->ContactTerrain
-    // transition is reachable. "Confident" requires a solid stance set: enough
-    // feet whose sensor is neither stale nor faulted and whose fused confidence
-    // clears a margin. Below that we stay in nominal RcManual gait.
-    constexpr uint8_t kContactConfMin = 128;   // half-scale of the 0..255 conf
-    constexpr uint8_t kMinStanceFeet = 4;      // > tripod, for a safety margin
-    const bool contact_feature_on =
-        g_featureApi.effectiveEnabled(protocol::Feature::FootContact);
-    uint8_t confident_feet = 0;
-    for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
-      const sensors::LegContactState& f = g_footState[i];
-      if (!f.stale && !f.fault && f.confidence >= kContactConfMin) {
-        ++confident_feet;
-      }
-    }
-    si.contact_enabled = contact_feature_on;
-    si.contact_confident =
-        contact_feature_on && (confident_feet >= kMinStanceFeet);
-    // Idle auto-disarm activity feed: any deliberate RC stick/pose input, a
-    // running trick, or a fresh host motion intent counts as activity. Quiet
-    // cycles let the FSM's idle timer expire, dropping an untouched armed
-    // robot to Disarmed (cutting DXL power) instead of holding torque on 18
-    // servos indefinitely.
-    {
-      const controller::ControllerCommand cc = g_ctrlCmd;
-      const bool rc_active =
-          cc.valid &&
-          (fabsf(cc.twist_vx) > 0.05f || fabsf(cc.twist_vy) > 0.05f ||
-           fabsf(cc.twist_wz) > 0.05f || fabsf(cc.pose_x_mm) > 2.0f ||
-           fabsf(cc.pose_y_mm) > 2.0f || fabsf(cc.pose_z_mm) > 2.0f ||
-           fabsf(cc.pose_roll) > 0.02f || fabsf(cc.pose_pitch) > 0.02f ||
-           fabsf(cc.pose_yaw) > 0.02f ||
-           cc.trick != controller::TrickId::None);
-      static uint32_t idle_seen_intent_seq = 0xFFFFFFFFu;
-      const uint32_t intent_seq = g_motionApi.intent().seq;
-      const bool host_active = intent_seq != idle_seen_intent_seq;
-      idle_seen_intent_seq = intent_seq;
-      si.motion_active =
-          rc_active || host_active || g_trickEngine.output().active;
-    }
-    // Honor a host CLEAR_FAULT pulse before advancing the machine.
-    if (g_controlApi.consumeClearFault()) {
-      g_stateMachine.requestClearFault();
-    }
-    const safety::State state = g_stateMachine.update(si, now_ms);
-    g_safetyState = static_cast<uint8_t>(state);
-    watchdog::markSafetyState(g_safetyState);
-    g_faultReason = static_cast<uint8_t>(g_stateMachine.faultReason());
-    // Force-revoke the maintenance lock once the robot is in a fault/E-stop
-    // state so a stale Mac client cannot retain bench authority across a fault.
-    if (g_safetyState >= static_cast<uint8_t>(safety::State::FaultSoft)) {
-      g_maintApi.revoke();
-      g_passiveApi.clear();
-    }
-    // Publish the live state/fault so control-command responses can echo it.
-    g_controlApi.setLiveState(g_safetyState, g_faultReason);
-    // Echo the live safety state to the passive handler so PASSIVE_ENTER can
-    // gate on a maintenance-safe state and responses echo it.
-    g_passiveApi.setLiveState(g_safetyState);
-    // The motion gate is the conjunction of "the state allows movement" and
-    // "a command source owns authority". dxlTask uses it to keep torque off and
-    // suppress goal writes unless both hold. Goal generation (gait/IK) lands in
-    // a later task; this enforces the safety contract for it up front.
-    g_motionGate = safety::stateAllowsMotion(state) && arb.motion_authorized;
+    refreshControllerConfigSnapshot();
+  #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+    // HIL observer requests arrive through the API-owned fixed ring and are
+    // consumed here, after the firmware-owned config snapshot is current but
+    // before the next ControllerCore boundary.
+    consumeHilTraceRequests(hil::outputGuard().status());
+  #endif
+    collectControllerState(now_ms);
+    collectControllerIntent(maint_held, host_disarm);
 
-    // Echo the live motion gate to the motion handler so SET_GAIT/twist/pose
-    // responses tell the host whether the stored intent is being honored now or
-    // parked until the robot is armed/authorised.
-    g_motionApi.setLiveState(g_safetyState, g_motionGate);
-
-    // --- Gait -> servo goal generation (lmt.1 / lmt.3) ----------------------
-    // Translate the active motion intent into concrete goal ticks and publish a
-    // frame for dxlTask (gait engine -> body IK -> servo map). The pipeline is
-    // built once from the active config (rebuilt on config adopt/commit by
-    // lmt.7). It is only advanced and published while motion is gated open; the
-    // phase is reset on the rising edge of the gate so each (re)authorisation
-    // starts from a clean cycle, and the frame is invalidated when the gate
-    // closes so the bus-write path (lmt.2) holds position instead of replaying a
-    // stale goal.
-    //
-    // Command source (lmt.3): when RC owns motion the 3-position gait switch
-    // selects the gait and the pitch/roll/yaw sticks drive the body twist;
-    // otherwise the host's stored MotionApi intent (Mac/Jetson) drives. Shape
-    // params (stride/step/height/duty/speed) always come from the host intent,
-    // which is seeded from the config gait defaults at boot, so RC reuses the
-    // calibrated walk shape.
-    static uint32_t applied_intent_seq = 0xFFFFFFFFu;
-    static uint8_t applied_gait = 0xFF;
-    static bool prev_motion_gate = false;
-
-    // Re-apply the active config to the pipeline when it changes (boot adopt /
-    // CFG_COMMIT, lmt.7). The pipeline caches link lengths + leg geometry by
-    // value, so rebuild its body IK from the new known-good config and force the
-    // gait intent (gait id + shape params) to be re-seeded on the next motion
-    // cycle. controlTask is the sole owner of g_pipeline, so this stays a
-    // single-task operation.
-    static uint32_t applied_cfg_rev = 0xFFFFFFFFu;
-    const uint32_t cfg_rev = g_configApi.revision();
-    if (cfg_rev != applied_cfg_rev) {
-      g_pipeline.reconfigure();
-      applied_intent_seq = 0xFFFFFFFFu;
-      applied_gait = 0xFF;
-      applied_cfg_rev = cfg_rev;
-    }
-
-    // Tracks whether the previous cycle ran under MacMaintenance authority so
-    // the entry edge can clear stale bench targets (see below).
-    static bool prev_maint_authority = false;
-    const bool maint_authority =
-      g_motionGate && arb.source == safety::CommandSource::MacMaintenance;
-
-    // Every new maintenance session starts in explicit joint-target mode. A
-    // host must opt into the gait pipeline after the state transition, so an
-    // old gait intent can never replay merely because a new lock was acquired.
-    if (maint_authority && !prev_maint_authority) {
-      g_maintTargetApi.clearTargets();
-      g_maintTargetApi.resetControlMode();
-    }
-
-    if (maint_authority &&
-      g_maintTargetApi.controlMode() ==
-        protocol::MaintControlMode::JointTargets) {
-      // --- Maintenance actuation (lmt.4) ----------------------------------
-      // On each entry into maintenance authority, forget any joint/leg targets
-      // stored by a previous bench session so enabling torque can never replay
-      // stale motion; servos hold their seed pose until a fresh command lands.
-      prev_maint_authority = true;
-      // Bench control: actuate the stored per-joint maintenance target ticks
-      // directly (no gait). Only joints the operator has explicitly commanded
-      // (set[][]) and that map to a servo are written; uncommanded joints hold
-      // the pose dxlTask latched when it enabled torque (it seeds goal :=
-      // present position before torque-on), so nothing snaps. The same
-      // g_goalFrame -> dxlTask Sync-Write path actuates these under
-      // MacMaintenance authority + a held maintenance lock (both already
-      // required for the arbiter to report this source).
-      const dxl::ServoMap map(g_configApi.config());
-      const protocol::MaintTargetSet& tgt = g_maintTargetApi.target();
-      if (g_goalMutex != nullptr && xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
-        uint8_t count = 0;
-        bool any_clamped = false;
-        for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
-          for (uint8_t j = 0; j < config::kJointsPerLeg; ++j) {
-            if (!tgt.set[leg][j]) continue;
-            const config::ServoConfig* sc = map.servoFor(leg, j);
-            if (sc == nullptr) continue;
-            gait::PipelineJoint& pj = g_goalFrame.joints[count++];
-            pj.id = sc->id;
-            pj.tick = tgt.tick[leg][j];
-            pj.leg = leg;
-            pj.joint = j;
-            pj.clamped = tgt.clamped[leg][j];
-            if (pj.clamped) any_clamped = true;
-          }
-        }
-        g_goalFrame.count = count;
-        g_goalClamped = any_clamped;
-        ++g_goalSeq;
-        // Only present a valid frame once a joint is commanded; until then the
-        // servos simply hold the torque-on seed pose (no goal write).
-        g_goalValid = (count > 0);
-        xSemaphoreGive(g_goalMutex);
-      }
-      // Keep the gait pipeline parked so a later walking authorisation restarts
-      // from a clean cycle (mirrors the gate-closed reset below).
-      g_trickEngine.cancel();
-      applied_intent_seq = 0xFFFFFFFFu;
-      applied_gait = 0xFF;
-    } else if (g_motionGate) {
-      prev_maint_authority = maint_authority;
-      const protocol::MotionIntent& intent = g_motionApi.intent();
-      const bool rc_drives = (arb.source == safety::CommandSource::Rc);
-
-      // Effective gait + body twist from the active source.
-      uint8_t eff_gait = intent.gait;
-      float eff_vx = intent.twist_vx;
-      float eff_vy = intent.twist_vy;
-      float eff_wz = intent.twist_wz;
-      gait::BodyPose body_pose;
-      if (!rc_drives) {
-        // Mac/Jetson pose commands are already range-checked by MotionApi.
-        // Feed all six fields into the same body-IK path used by RC body mode.
-        body_pose.x_mm = intent.pose_x_mm;
-        body_pose.y_mm = intent.pose_y_mm;
-        body_pose.z_mm = intent.pose_z_mm;
-        body_pose.roll = intent.pose_roll;
-        body_pose.pitch = intent.pose_pitch;
-        body_pose.yaw = intent.pose_yaw;
-      }
-      if (rc_drives) {
-        // The controller bridge is the RC command source (oha.3). Snapshot it
-        // once so a mid-cycle rcTask write cannot tear the read.
-        const controller::ControllerCommand cc = g_ctrlCmd;
-
-        // --- Trick / choreography engine (oha.5) ---------------------------
-        // The bridge emits a one-shot TrickId on a single rising-edge frame.
-        // Fire the engine on the None->trick transition of the snapshot so a
-        // held duplicate does not re-trigger, while distinct presses (always
-        // separated by a None frame) each arm their choreography.
-        static controller::TrickId prev_snap_trick = controller::TrickId::None;
-        if (cc.trick != controller::TrickId::None &&
-            prev_snap_trick == controller::TrickId::None) {
-          g_trickEngine.trigger(cc.trick, cc.body_height, now_ms);
-        }
-        prev_snap_trick = cc.trick;
-        // Any deliberate stick / pose input reclaims control and cancels the
-        // trick (the bridge already applied deadbands, so a centred stick reads
-        // ~0). E-stop / gate close cancels via the branches below.
-        const bool sticks_active =
-            fabsf(cc.twist_vx) > 0.12f || fabsf(cc.twist_vy) > 0.12f ||
-            fabsf(cc.twist_wz) > 0.12f || fabsf(cc.pose_x_mm) > 5.0f ||
-            fabsf(cc.pose_y_mm) > 5.0f || fabsf(cc.pose_z_mm) > 5.0f ||
-            fabsf(cc.pose_roll) > 0.05f || fabsf(cc.pose_pitch) > 0.05f ||
-            fabsf(cc.pose_yaw) > 0.05f;
-        const gait::TrickOutput& tk =
-            g_trickEngine.update(period_ms::kControl, sticks_active);
-
-        // Body-height fraction fed to setParams: the live POT2 knob, unless a
-        // trick is overriding height (stand/sit/crouch/stretch/dance).
-        float height_frac = cc.body_height;
-        if (tk.active) {
-          // Choreography drives the body; the sticks are ignored until it
-          // finishes or is cancelled. It only shapes gait/twist/pose/height,
-          // so IK + servo-map + the safety gate still validate every joint.
-          eff_gait = static_cast<uint8_t>(tk.gait);
-          eff_vx = tk.twist_vx;
-          eff_vy = tk.twist_vy;
-          eff_wz = tk.twist_wz;
-          body_pose = tk.pose;
-          if (tk.override_height) height_frac = tk.body_height_frac;
-        } else if (cc.mode == controller::ControlMode::Walk) {
-          // WALK: gimbals -> gait body twist, SW_F selects the gait family.
-          eff_gait = static_cast<uint8_t>(rcGaitToId(cc.gait_index));
-          eff_vx = cc.twist_vx;  // forward/back
-          eff_vy = cc.twist_vy;  // lateral
-          eff_wz = cc.twist_wz;  // yaw
-        } else {
-          // TRANSLATE/ROTATE-BODY: feet planted (Stand) and the core moves via
-          // a body pose offset -- "move the core without moving the legs".
-          eff_gait = static_cast<uint8_t>(config::GaitId::Stand);
-          eff_vx = eff_vy = eff_wz = 0.0f;
-          body_pose.x_mm = cc.pose_x_mm;
-          body_pose.y_mm = cc.pose_y_mm;
-          body_pose.z_mm = cc.pose_z_mm;
-          body_pose.roll = cc.pose_roll;
-          body_pose.pitch = cc.pose_pitch;
-          body_pose.yaw = cc.pose_yaw;
-        }
-        // NAV1 pose trim adds a persistent lean on top of a manual RC mode, but
-        // never fights an active trick.
-        if (!tk.active) {
-          body_pose.roll += cc.trim_roll;
-          body_pose.pitch += cc.trim_pitch;
-        }
-        // RC knobs drive the gait shape live (POT1 speed, POT2 body height,
-        // ENC1 stride, ENC2 step height). POT2 maps through the reach-safe
-        // envelope: centre = neutral stance height, both ends inside the leg
-        // workspace so height changes keep the feet planted (no reach-clamp
-        // slide). Stride/step map onto the config-validated safe ranges; duty
-        // stays on the host/config value.
-        const uint16_t bh =
-            static_cast<uint16_t>(gait::rcBodyHeightMm(height_frac) + 0.5f);
-        const uint16_t st =
-            static_cast<uint16_t>(cc.stride * config::kMaxGaitStrideMm);
-        const uint16_t sh =
-            static_cast<uint16_t>(cc.step_height * config::kMaxGaitStepMm);
-        const uint8_t sp = static_cast<uint8_t>(cc.speed * 255.0f);
-        g_pipeline.setParams(bh, st, sh, intent.duty_x255, sp);
-        applied_intent_seq = 0xFFFFFFFFu;  // force host re-seed when RC yields
-      } else if (intent.seq != applied_intent_seq) {
-        // Host (Mac/Jetson) drives: tricks are RC-only, so cancel any runner.
-        g_trickEngine.cancel();
-        // re-seed shape params when its intent changes.
-        g_pipeline.setParams(intent.body_height_mm, intent.stride_len_mm,
-                             intent.step_height_mm, intent.duty_x255,
-                             intent.speed_x255);
-        applied_intent_seq = intent.seq;
-      } else {
-        // Host drives, intent unchanged: keep any RC trick cancelled.
-        g_trickEngine.cancel();
-      }
-
-      // Apply the body pose every cycle (neutral restores the normal walk path).
-      g_pipeline.setBodyPose(body_pose);
-      // Apply the gait only when it actually changes (avoid per-cycle churn).
-      if (eff_gait != applied_gait) {
-        g_pipeline.setGait(static_cast<config::GaitId>(eff_gait));
-        applied_gait = eff_gait;
-      }
-      // Twist tracks the sticks/intent every cycle (cheap: stores three floats).
-      g_pipeline.setTwist(eff_vx, eff_vy, eff_wz);
-
-      if (!prev_motion_gate) {
-        g_pipeline.resetPhase();
-        // Seed the goal slew limiter from the latest present-position reads so
-        // the first authorised goals ramp from the servos' actual pose instead
-        // of snapping to the stance in one write. dxlTask refreshed these while
-        // preparing torque-on hold targets, so they are bench-fresh here.
-        for (uint8_t s = 0; s < g_servoStatusCount; ++s) {
-          if (!g_servoStatus[s].ok) continue;
-          const int32_t p = g_servoStatus[s].present_position;
-          if (p < 0 || p > config::kServoMaxTick) continue;
-          g_pipeline.seedGoal(g_servoStatus[s].id, static_cast<uint16_t>(p));
-        }
-      }
-      gait::PipelineOutput goals;
-      watchdog::markControlProgress(80);
-      g_pipeline.update(period_ms::kControl, goals);
-      watchdog::markControlProgress(81);
-      // Publish for dxlTask under a zero-wait lock: if dxlTask momentarily holds
-      // it, skip this frame (keep the previous) rather than block controlTask.
-      if (g_goalMutex != nullptr && xSemaphoreTake(g_goalMutex, 0) == pdTRUE) {
-        g_goalFrame.count = goals.count;
-        bool any_clamped = false;
-        for (uint8_t i = 0; i < goals.count; ++i) {
-          g_goalFrame.joints[i] = goals.joints[i];
-          if (goals.joints[i].clamped) any_clamped = true;
-        }
-        g_goalClamped = any_clamped;
-        ++g_goalSeq;
-        g_goalValid = true;
-        xSemaphoreGive(g_goalMutex);
-      }
-    } else {
-      prev_maint_authority = false;
-      g_goalValid = false;
-      g_trickEngine.cancel();            // gate closed / E-stop: drop any trick
-      applied_intent_seq = 0xFFFFFFFFu;  // force re-apply on next authorisation
-      applied_gait = 0xFF;               // force gait re-apply on next auth
-    }
-    prev_motion_gate = g_motionGate;
-
-    // Gate maintenance leg/joint targets on the live MacMaintenance state +
-    // held lock so a foot/joint nudge is only accepted on the bench.
-    g_maintTargetApi.setLiveState(g_safetyState, g_maintApi.lockHeld(now_ms));
-    // Same gate for the DXL maintenance command queue: scans/pings/torque/
-    // profile jobs are only accepted on the bench (MacMaintenance + lock).
-    g_dxlJobApi.setLiveState(g_safetyState, g_maintApi.lockHeld(now_ms));
+    watchdog::markControlProgress(80);
+    g_controllerCore.step(g_controllerState, g_controllerIntent,
+                          g_controllerConfig, cycle_time, g_controllerCommand);
+    watchdog::markControlProgress(81);
+  #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+    // This is the parity capture point: the portable core has produced final
+    // calibrated tick goals, while adapter-owned power/torque/goal effects
+    // have not yet been published to the DXL boundary.
+    g_hilTrace.captureStep(g_controllerState, g_controllerIntent,
+                 g_controllerConfig, cycle_time, g_controllerCommand,
+                 hil::outputGuard().status());
+  #endif
+    publishControllerCommand(now_ms);
 
     // --- Feature flags: publish availability and consume host intent --------
     // Reflect what the current hardware/state permits so FEATURE_SET can only
@@ -1363,11 +1417,58 @@ protocol::dxljob::Code writeParamChecked(uint8_t id, dxl::LogicalParam param,
   return verified ? Code::Ok : Code::VerifyFailed;
 }
 
-// Execute one queued DXL maintenance job against the bus (dxlTask context only)
-// and write the serialized result back to the queue. No-op when the queue is
-// empty. Bus access requires DXL power on; when it is off the job is reported
-// PowerOff rather than silently returning nothing.
+void clearServoStatusSnapshot();
+
+void completeDxlScanJob(uint8_t job_id) {
+  uint8_t data[protocol::dxljob::kMaxResult];
+  uint8_t len = 0;
+  const uint8_t found = g_dxlBus.servoCount();
+  data[len++] = found;
+  for (uint8_t i = 0; i < found; ++i) {
+    if (static_cast<uint8_t>(len + 6) > protocol::dxljob::kMaxResult) break;
+    len = appendCompactServo(data, len, g_dxlBus.profile(i));
+  }
+  g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::Ok, data, len);
+}
+
+// Advance a running maintenance scan by exactly one ID. Returning true means
+// the queue slot was owned by a scan (whether it completed this cycle), so the
+// caller must not claim another job.
+bool advanceDxlScanJob() {
+  if (!g_dxlScanJob.active) return false;
+
+  if (g_dxlJobApi.queue().slotState() != protocol::dxljob::Slot::Running ||
+      g_dxlJobApi.queue().currentJobId() != g_dxlScanJob.job_id) {
+    g_dxlScanJob.active = false;
+    g_dxlScanJob.cursor.reset();
+    return false;
+  }
+
+  if (!board::dxlPowerEnabled()) {
+    g_dxlJobApi.queue().complete(g_dxlScanJob.job_id,
+                                 protocol::dxljob::Code::PowerOff, nullptr, 0);
+    g_dxlScanJob.active = false;
+    g_dxlScanJob.cursor.reset();
+    return true;
+  }
+
+  watchdog::markProgress(21);
+  g_dxlBus.discoverId(g_dxlScanJob.cursor.currentId());
+  if (!g_dxlScanJob.cursor.advanceAfterPing()) {
+    completeDxlScanJob(g_dxlScanJob.job_id);
+    g_dxlScanJob.active = false;
+  }
+  return true;
+}
+
+// Execute one bounded DXL maintenance operation against the bus (dxlTask
+// context only) and write the serialized result back to the queue. No-op when
+// the queue is empty. A scan remains Running while advanceDxlScanJob() processes
+// one ID per task cycle. Bus access requires DXL power on; when it is off the
+// job is reported PowerOff rather than silently returning nothing.
 void runQueuedDxlJob() {
+  if (advanceDxlScanJob()) return;
+
   protocol::DxlJobRequest job;
   uint8_t job_id = 0;
   if (!g_dxlJobApi.queue().claim(job, job_id)) {
@@ -1377,6 +1478,50 @@ void runQueuedDxlJob() {
   uint8_t data[protocol::dxljob::kMaxResult];
   uint8_t len = 0;
   protocol::dxljob::Code code = protocol::dxljob::Code::Ok;
+
+  // The output-disabled image rejects every DXL state-changing maintenance
+  // request before a bus transaction. Count the logical operation that would
+  // have reached the lower guard so GET_STATUS/health remains auditable.
+  if (hil::outputDisabled()) {
+    switch (job.type) {
+      case protocol::dxljob::Type::Power:
+        if (job.arg0 != 0) {
+          board::setDxlPower(true);
+          data[len++] = 0;
+          data[len++] = board::hasDxlPowerControl() ? 1 : 0;
+          g_dxlJobApi.queue().complete(
+              job_id, protocol::dxljob::Code::OutputDisabled, data, len);
+          return;
+        }
+        break;
+      case protocol::dxljob::Type::Torque:
+        if (job.arg0 != 0) {
+          hil::outputGuard().allowGoalWrite();
+          hil::outputGuard().allowTorque(true);
+          data[len++] = 1;
+          data[len++] = 0;
+          g_dxlJobApi.queue().complete(
+              job_id, protocol::dxljob::Code::OutputDisabled, data, len);
+          return;
+        }
+        // The unpowered HIL image is already torque-off. Preserve the normal
+        // safety-reducing operation as an explicit successful no-op.
+        data[len++] = 0;
+        data[len++] = 0;
+        g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::Ok, data,
+                                     len);
+        return;
+      case protocol::dxljob::Type::SetParam:
+      case protocol::dxljob::Type::SetLimits:
+      case protocol::dxljob::Type::WriteReg:
+        hil::outputGuard().allowDxlWrite();
+        g_dxlJobApi.queue().complete(
+            job_id, protocol::dxljob::Code::OutputDisabled, nullptr, 0);
+        return;
+      default:
+        break;
+    }
+  }
 
   // The DXL power toggle is the one job allowed to run with power off: it owns
   // the power FET (board:: HAL). Handle it before the power-on gate below.
@@ -1406,19 +1551,15 @@ void runQueuedDxlJob() {
 
   switch (job.type) {
     case protocol::dxljob::Type::Scan: {
-      const uint8_t found = g_dxlBus.scan(job.arg0, job.arg1);
-      g_servoStatusCount = 0;  // status snapshot is stale after a rescan
-      // Clear the cached detail fields: indices now map to different servos, so
-      // the round-robin readStatus must repopulate them from scratch (eax.6).
-      for (uint8_t i = 0; i < dxl::DxlBus::kMaxServos; ++i) {
-        g_servoStatus[i] = dxl::ServoStatus{};
+      g_dxlBus.beginDiscovery();
+      clearServoStatusSnapshot();
+      g_dxlScanJob.job_id = job_id;
+      g_dxlScanJob.active = g_dxlScanJob.cursor.begin(job.arg0, job.arg1);
+      if (!g_dxlScanJob.active) {
+        g_dxlJobApi.queue().complete(job_id, protocol::dxljob::Code::Unsupported,
+                                     nullptr, 0);
       }
-      data[len++] = found;
-      for (uint8_t i = 0; i < found; ++i) {
-        if (static_cast<uint8_t>(len + 6) > protocol::dxljob::kMaxResult) break;
-        len = appendCompactServo(data, len, g_dxlBus.profile(i));
-      }
-      break;
+      return;
     }
     case protocol::dxljob::Type::Ping: {
       dxl::ServoProfile p;
@@ -1717,11 +1858,11 @@ void dxlTask(void*) {
       arming_discovery_index = 0;
     }
 
-    // Execute at most one queued DXL maintenance job per cycle. dxlTask is the
-    // sole owner of the bus, so all scan/ping/torque/profile work funnels here;
-    // apiTask only enqueues (gated on MacMaintenance + lock) and polls the
-    // result. Running one job per loop keeps the present-position streaming
-    // below responsive and bounds the per-cycle bus time.
+    // Execute at most one bounded DXL maintenance operation per cycle. A scan
+    // stays in the queue's Running state and advances one ping per loop, so
+    // absent IDs cannot starve the watchdog or lower-priority tasks. dxlTask
+    // remains the sole bus owner; apiTask only enqueues (gated on
+    // MacMaintenance + lock) and polls the result.
     watchdog::markProgress(20);
     runQueuedDxlJob();
     publishServoReadiness();
@@ -1845,7 +1986,7 @@ void dxlTask(void*) {
     static uint16_t consec_zero_reads = 0;  // dead-bus counter (lmt.5)
     const bool arming_reads_ready =
         !arming || (arming_discovery_finished && g_configuredServoCoverage);
-    if (g_dxlBus.servoCount() > 0 && board::dxlPowerEnabled() &&
+    if (!g_dxlScanJob.active && g_dxlBus.servoCount() > 0 && board::dxlPowerEnabled() &&
         arming_reads_ready) {
       watchdog::markProgress(70);
       const uint8_t n =
@@ -1934,6 +2075,7 @@ void rcTask(void*) {
   Serial3.begin(kCrsfBaud);
 #endif
   TickType_t next = xTaskGetTickCount();
+  constexpr uint16_t kMaxBytesPerCycle = 128;
   for (;;) {
     tick(watchdog::TaskId::Rc);
     const uint32_t now_ms =
@@ -1941,8 +2083,11 @@ void rcTask(void*) {
     crsf::ChannelData frame;
     bool fresh = false;
 #if defined(PIN_SERIAL3_RX)
-    while (Serial3.available() > 0) {
+    uint16_t bytes_processed = 0;
+    while (Serial3.available() > 0 &&
+           bytes_processed < kMaxBytesPerCycle) {
       const uint8_t b = static_cast<uint8_t>(Serial3.read());
+      ++bytes_processed;
       if (g_crsfParser.push(b, frame)) {
         // Feed the raw 11-bit ChannelPack ticks to the bridge decoder.
         g_bridge.update(frame.channels, /*link_up=*/true, now_ms);
@@ -1986,6 +2131,11 @@ void rcTask(void*) {
     g_rcDiag.last_frame_ms = g_rcStatus.last_frame_ms;
     g_rcDiag.ever_seen = g_rcStatus.ever_seen;
     g_rcDiag.failsafe = g_rcStatus.failsafe;
+    const TickType_t now_ticks = xTaskGetTickCount();
+    if (static_cast<int32_t>(now_ticks - next) >=
+        static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kRc))) {
+      next = now_ticks;
+    }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kRc));
   }
 }
@@ -2011,6 +2161,8 @@ void apiTask(void*) {
   g_dxlJobApi.setRawRegisterEnabled(true);
 #endif
   TickType_t next = xTaskGetTickCount();
+  constexpr uint8_t kMaxFramesPerCycle = 4;
+  constexpr uint16_t kMaxBytesPerCycle = protocol::kMaxWireFrame;
 #ifdef HEXAPOD_DEBUG_SERIAL_HEARTBEAT
   // Debug aid: emit a plaintext "alive" line ~1 Hz so a plain serial monitor
   // (pio device monitor / screen / Arduino) can confirm the USB CDC link works
@@ -2022,6 +2174,13 @@ void apiTask(void*) {
 #endif
   for (;;) {
     tick(watchdog::TaskId::Api);
+
+    const uint32_t api_loop_now_ms =
+      static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    refreshHilObserver(api_loop_now_ms, hil::outputGuard().status());
+  #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+    queueHilObserverRequests();
+  #endif
 
 #ifdef HEXAPOD_DEBUG_SERIAL_HEARTBEAT
     {
@@ -2048,11 +2207,17 @@ void apiTask(void*) {
     }
 
     // Drain any received bytes, framing them into complete request bodies.
-    while (Serial.available() > 0) {
+    uint8_t frames_processed = 0;
+    uint16_t bytes_processed = 0;
+    while (Serial.available() > 0 &&
+           frames_processed < kMaxFramesPerCycle &&
+           bytes_processed < kMaxBytesPerCycle) {
       const uint8_t b = static_cast<uint8_t>(Serial.read());
+      ++bytes_processed;
       if (!g_frameReader.push(b)) {
         continue;
       }
+      ++frames_processed;
 
       // Refresh the live status snapshot for this request.
       protocol::api::StatusSnapshot st;
@@ -2075,6 +2240,31 @@ void apiTask(void*) {
       st.last_reset_control_progress = watchdog::lastResetControlProgress();
       st.last_reset_safety_state = watchdog::lastResetSafetyState();
       st.dxl_power_transitions = board::dxlPowerTransitions();
+      const hil::OutputGuardStatus guard_status = hil::outputGuard().status();
+      st.hil_flags = packHilFlags(guard_status);
+      st.blocked_power_enable = guard_status.blocked_power_enable;
+      st.blocked_torque_enable = guard_status.blocked_torque_enable;
+      st.blocked_goal_write = guard_status.blocked_goal_write;
+      st.blocked_dxl_write = guard_status.blocked_dxl_write;
+      st.last_goal_sequence = guard_status.last_goal_sequence;
+      st.last_goal_count = guard_status.last_goal_count;
+      st.last_fault_reason = g_lastFaultReason;
+      st.last_fault_timestamp_ms = g_lastFaultTimestampMs;
+            const fault_capture::Snapshot& fatal = fault_capture::lastSnapshot();
+            st.last_fatal_reason = static_cast<uint8_t>(fatal.reason);
+            st.last_fatal_stage = static_cast<uint8_t>(fatal.stage);
+            memcpy(st.last_fatal_task_name, fatal.task_name,
+              sizeof(st.last_fatal_task_name));
+            st.last_fault_stack_pointer = fatal.stack_pointer;
+            st.last_fault_exception_return = fatal.exception_return;
+            st.last_fault_registers[0] = fatal.r0;
+            st.last_fault_registers[1] = fatal.r1;
+            st.last_fault_registers[2] = fatal.r2;
+            st.last_fault_registers[3] = fatal.r3;
+            st.last_fault_registers[4] = fatal.r12;
+            st.last_fault_registers[5] = fatal.lr;
+            st.last_fault_registers[6] = fatal.pc;
+            st.last_fault_registers[7] = fatal.xpsr;
 
       // Give the maintenance lock the current time + live state so ENTER can
       // gate on a safe state and TTL/heartbeat use the same clock as the
@@ -2082,12 +2272,22 @@ void apiTask(void*) {
       g_maintApi.setNow(st.uptime_ms);
       g_maintApi.setLiveState(g_safetyState);
 
-        const bool config_lock =
-          g_safetyState ==
-            static_cast<uint8_t>(safety::State::MacMaintenance) &&
+      const bool config_lock =
+          g_safetyState == static_cast<uint8_t>(safety::State::MacMaintenance) &&
           g_maintApi.lockHeld(st.uptime_ms);
-        g_configApi.setMutationPolicy(config_lock,
-                      config_lock && g_dxlTorqueOff);
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+      // A trace references one immutable config revision. Captures are short
+      // and configuration remains readable, but staging/commit is rejected
+      // until the terminal trace record has been delivered.
+      const bool trace_locks_config =
+          g_hilObserver.captureActive() || g_hilTrace.active() ||
+          g_hilTrace.terminalPending();
+#else
+      const bool trace_locks_config = false;
+#endif
+      g_configApi.setMutationPolicy(config_lock && !trace_locks_config,
+                                    config_lock && !trace_locks_config &&
+                                        g_dxlTorqueOff);
 
       // Refresh the passive handler's live state so PASSIVE_ENTER gates on the
       // current safety state (control task also keeps this current each cycle).
@@ -2104,13 +2304,30 @@ void apiTask(void*) {
       // == Feature enum order), so GET_CAPABILITIES is no longer a zero stub
       // (4sa.4). g_deviceInfo is only touched by this task.
       g_deviceInfo.feature_bits = g_featureApi.availableMask();
+      g_deviceInfo.build_flags =
+          (st.hil_flags & protocol::api::hilflag::kOutputDisabled) != 0
+          ? protocol::api::capabilityflag::kHilOutputDisabled
+          : 0;
+
+      // Update the observer immediately before dispatching a HIL command so
+      // its independent TTL and the maintenance token are evaluated from this
+      // exact request-time snapshot. Generic/API activity never refreshes
+      // either maintenance or Jetson authority.
+      refreshHilObserver(st.uptime_ms, guard_status);
+    #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+      queueHilObserverRequests();
+    #endif
 
       protocol::DecodeStatus decode_st = protocol::DecodeStatus::Ok;
       const size_t n = protocol::api::handleRequest(
           g_frameReader.body(), g_frameReader.length(), g_deviceInfo, st, out,
           sizeof(out), &g_configApi, &g_subs, &g_controlApi, &g_motionApi,
           &g_maintApi, &g_maintTargetApi, &g_dxlJobApi, &g_featureApi,
-          &g_sensorApi, &g_passiveApi, &g_controllerApi, &decode_st);
+          &g_sensorApi, &g_passiveApi, &g_controllerApi, &decode_st,
+          &g_hilObserver);
+    #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+      queueHilObserverRequests();
+    #endif
       if (decode_st != protocol::DecodeStatus::Ok) {
         ++g_apiRxBad;  // corrupt frame: count it so api_stats makes it visible
       }
@@ -2136,10 +2353,24 @@ void apiTask(void*) {
     // manager enforces each stream's rate and counts missed slots as dropped;
     // when the USB CDC TX buffer cannot accept a frame we count a backlog drop
     // instead of blocking the task (AGENTS.md 6.3 rate-limited subscriptions).
-    const uint32_t now_ms =
-        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    const uint32_t now_ms = api_loop_now_ms;
+  #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+    // The trace transport has priority and never runs from controlTask. A
+    // failed fragment turns into an explicit terminal failure; it never causes
+    // a controller step to be delayed, decimated, or silently dropped.
+    (void)emitHilTraceRecord(now_ms, out, sizeof(out));
+    const bool suppress_optional_telemetry =
+      g_hilObserver.captureActive() || g_hilTrace.active() ||
+      g_hilTrace.terminalPending();
+  #endif
     for (uint8_t i = 0; i < protocol::kNumStreams; ++i) {
       const protocol::StreamId s = static_cast<protocol::StreamId>(i);
+  #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+      if (suppress_optional_telemetry && s != protocol::StreamId::Health &&
+        s != protocol::StreamId::HilStatus) {
+      continue;
+      }
+  #endif
       if (!g_subs.shouldEmit(s, now_ms)) continue;
       uint8_t payload[protocol::kMaxPayload];
       const uint16_t plen = buildTelemetry(s, payload, now_ms);
@@ -2159,6 +2390,11 @@ void apiTask(void*) {
       }
     }
 
+    const TickType_t now_ticks = xTaskGetTickCount();
+    if (static_cast<int32_t>(now_ticks - next) >=
+        static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kApi))) {
+      next = now_ticks;
+    }
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kApi));
   }
 }
@@ -2215,6 +2451,8 @@ void i2cTask(void*) {
   g_i2cBus.scanAll(g_i2cTopology);
   g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
   publishTopologySnapshot();
+  g_i2cLastUpdateMs = static_cast<uint32_t>(xTaskGetTickCount()) *
+                      portTICK_PERIOD_MS;
 
   // Seed the contact estimator with the compiled-default foot calibration so it
   // is usable immediately (per-foot classification stays disabled until a
@@ -2272,18 +2510,20 @@ void i2cTask(void*) {
     // of Wire/EEPROM, so the transactional store write happens here.
     bool do_commit = false;
     if (g_commitMutex != nullptr) {
-      xSemaphoreTake(g_commitMutex, portMAX_DELAY);
-      do_commit = g_commit.requested;
-      xSemaphoreGive(g_commitMutex);
+      if (xSemaphoreTake(g_commitMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        do_commit = g_commit.requested;
+        xSemaphoreGive(g_commitMutex);
+      }
     }
     if (do_commit) {
       const bool ok = g_configStore.commit(g_commit.payload, g_commit.len);
-      xSemaphoreTake(g_commitMutex, portMAX_DELAY);
-      g_commit.ok = ok;
-      g_commit.requested = false;
-      xSemaphoreGive(g_commitMutex);
-      if (ok) g_configVolatile = false;  // a valid slot now exists
-      xSemaphoreGive(g_commitDone);
+      if (xSemaphoreTake(g_commitMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        g_commit.ok = ok;
+        g_commit.requested = false;
+        xSemaphoreGive(g_commitMutex);
+        if (ok) g_configVolatile = false;  // a valid slot now exists
+        xSemaphoreGive(g_commitDone);
+      }
     }
 
     // Re-apply the active config to i2c-owned consumers when it changes (boot
@@ -2423,6 +2663,8 @@ void i2cTask(void*) {
     }
     // Mirror the fused foot state into the SensorApi snapshot (SENSOR_GET_STATUS).
     publishStatusSnapshot();
+    g_i2cLastUpdateMs = static_cast<uint32_t>(xTaskGetTickCount()) *
+              portTICK_PERIOD_MS;
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(i2c_period_ms));
   }
@@ -2448,7 +2690,9 @@ void healthTask(void*) {
     // driven by blinkTask as the FreeRTOS liveness indicator. USB CDC is owned
     // by the api task per AGENTS.md 5.1, so the host reads health via the
     // GET_STATUS command rather than text printed here.)
+  #if !defined(HEXAPOD_WATCHDOG_HOLD_PROBE)
     watchdog::evaluate();
+  #endif
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }
@@ -2470,31 +2714,56 @@ void start() {
   // Guards the controlTask -> dxlTask servo goal frame (lmt.1).
   g_goalMutex = xSemaphoreCreateMutex();
 
-  // Route FreeRTOS fault reporting to the USER LED and USB CDC.
+  // Fatal hooks run with scheduler/peripheral state unknown. Never let them
+  // block forever flushing USB; the library's LED code remains deterministic.
   vSetErrorLed(board::pinUserLed(), HIGH);
-  vSetErrorSerial(&Serial);
+  vSetErrorSerial(nullptr);
 
   // Task stacks are allocated once here, at boot, before the scheduler runs;
   // there is no runtime heap churn afterward (AGENTS.md 1.2).
+  const BaseType_t control_created =
   xTaskCreate(controlTask, "control", stack_words::kControl, nullptr,
               priority::kControl, &g_handles[static_cast<uint8_t>(watchdog::TaskId::Control)]);
+  const BaseType_t dxl_created =
   xTaskCreate(dxlTask, "dxl", stack_words::kDxl, nullptr,
               priority::kDxl, &g_handles[static_cast<uint8_t>(watchdog::TaskId::Dxl)]);
+  const BaseType_t rc_created =
   xTaskCreate(rcTask, "rc", stack_words::kRc, nullptr,
               priority::kRc, &g_handles[static_cast<uint8_t>(watchdog::TaskId::Rc)]);
+  const BaseType_t api_created =
   xTaskCreate(apiTask, "api", stack_words::kApi, nullptr,
               priority::kApi, &g_handles[static_cast<uint8_t>(watchdog::TaskId::Api)]);
+  const BaseType_t i2c_created =
   xTaskCreate(i2cTask, "i2c", stack_words::kI2c, nullptr,
               priority::kI2c, &g_handles[static_cast<uint8_t>(watchdog::TaskId::I2c)]);
+  const BaseType_t health_created =
   xTaskCreate(healthTask, "health", stack_words::kHealth, nullptr,
               priority::kHealth, &g_handles[static_cast<uint8_t>(watchdog::TaskId::Health)]);
 
   // Standalone FreeRTOS liveness test task (USER LED @ 5 Hz). Not tracked by
   // the watchdog; handle discarded.
+  const BaseType_t blink_created =
   xTaskCreate(blinkTask, "blink", stack_words::kBlink, nullptr,
               priority::kBlink, nullptr);
 
+  const bool allocations_ok = g_commitMutex != nullptr &&
+                              g_commitDone != nullptr &&
+                              g_goalMutex != nullptr &&
+                              control_created == pdPASS && dxl_created == pdPASS &&
+                              rc_created == pdPASS && api_created == pdPASS &&
+                              i2c_created == pdPASS && health_created == pdPASS &&
+                              blink_created == pdPASS;
+  if (!allocations_ok) {
+    board::setDxlPower(false);
+    for (;;) {
+      board::toggleUserLed();
+      delay(100);
+    }
+  }
+
   // Hands the CPU to the scheduler; does not return.
+  fault_capture::markStartupStage(
+      fault_capture::StartupStage::SchedulerStarting);
   vTaskStartScheduler();
 }
 

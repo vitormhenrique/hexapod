@@ -149,6 +149,21 @@ def test_mode_safety_page_constructs(qtbot) -> None:
     assert page is not None
 
 
+def test_mode_safety_disables_hardware_controls_in_simulation(qtbot) -> None:
+    from ui.pages import ModeSafetyPage
+
+    service = _service()
+    page = ModeSafetyPage(service)
+    qtbot.addWidget(page)
+
+    service._set_simulation_mode(True)
+    service.connected.emit(True)
+
+    assert not page.enter_maint_btn.isEnabled()
+    assert not page.enter_passive_btn.isEnabled()
+    assert not any(button.isEnabled() for button in page._bench_buttons)
+
+
 def test_diagnostics_page_shows_telemetry(qtbot) -> None:
     from ui.pages import DiagnosticsPage
 

@@ -7,7 +7,9 @@ works before the GUI is installed.
 
 from __future__ import annotations
 
+import json
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -15,11 +17,13 @@ from typing import Optional
 import typer
 
 from hexapod_protocol import api
+from hexapod_protocol import hil
 from hexapod_protocol import telemetry as tlm
 
-from transport import list_serial_ports, open_serial
+from transport import list_serial_ports, open_transport
 from transport.protocol_client import ProtocolClient
-from data import SessionLogger
+from data import SessionLogger, SessionReplay, export_selected_csv, write_session_summary
+from data.plot_signals import build_signal_registry, registry_by_key
 
 app = typer.Typer(add_completion=False, help="Hexapod companion CLI.")
 
@@ -35,6 +39,17 @@ RESET_CAUSE_NAMES = {
     0x10: "EXT",
     0x20: "WDT",
     0x40: "SYST",
+}
+
+FATAL_REASON_NAMES = {1: "HardFault", 2: "StackOverflow", 3: "MallocFailed"}
+STARTUP_STAGE_NAMES = {
+    0: "Reset",
+    1: "SetupEntered",
+    2: "BoardInitialized",
+    3: "SerialStarted",
+    4: "AppStarting",
+    5: "SchedulerStarting",
+    6: "TasksRunning",
 }
 
 
@@ -70,7 +85,7 @@ def _connect(port: Optional[str], baud: int) -> ProtocolClient:
             raise typer.Exit(code=2)
         port = chosen[0].device
         typer.secho(f"Using port {port}", fg=typer.colors.BLUE)
-    link = open_serial(port, baud=baud)
+    link = open_transport(port, baud=baud)
     if link is None:
         _err(f"Could not open {port}.")
         raise typer.Exit(code=2)
@@ -118,12 +133,30 @@ def status(
                 f"last_reset_dxl_progress={st.last_reset_progress_marker} "
                 f"last_reset_control_progress={st.last_reset_control_progress} "
                 f"last_reset_state={st.last_reset_safety_state} "
-                f"dxl_power_transitions={st.dxl_power_transitions}"
+                f"dxl_power_transitions={st.dxl_power_transitions} "
+                f"last_fault={tlm.FAULT_REASON_NAMES.get(st.last_fault_reason, st.last_fault_reason)} "
+                f"last_fault_time_ms={st.last_fault_timestamp_ms}"
             )
             typer.echo(
                 f"  stack_free_words: control={st.control_stack_free_words} "
                 f"dxl={st.dxl_stack_free_words}"
             )
+            if st.last_fatal_reason:
+                typer.echo(
+                    "  retained_fatal: "
+                    f"reason={FATAL_REASON_NAMES.get(st.last_fatal_reason, st.last_fatal_reason)} "
+                    f"stage={STARTUP_STAGE_NAMES.get(st.last_fatal_stage, st.last_fatal_stage)} "
+                    f"task={st.last_fatal_task_name or '(none)'} "
+                    f"sp=0x{st.last_fault_stack_pointer:08X} "
+                    f"exc_return=0x{st.last_fault_exception_return:08X}"
+                )
+                typer.echo(
+                    "  retained_frame: "
+                    f"r0=0x{st.last_fault_r0:08X} r1=0x{st.last_fault_r1:08X} "
+                    f"r2=0x{st.last_fault_r2:08X} r3=0x{st.last_fault_r3:08X} "
+                    f"r12=0x{st.last_fault_r12:08X} lr=0x{st.last_fault_lr:08X} "
+                    f"pc=0x{st.last_fault_pc:08X} xpsr=0x{st.last_fault_xpsr:08X}"
+                )
             typer.echo(f"  feature_bits=0x{caps.feature_bits:08X}")
             avail = [
                 api.FEATURE_NAMES[i] for i in api.capability_features(caps.feature_bits)
@@ -240,6 +273,7 @@ def log(
         else None
     )
     logger = SessionLogger(out_dir=out, robot_name=name, firmware=fw)
+    client.on_raw_frame(logger.log_raw_frame)
     typer.secho(f"recording -> {logger.dir}", fg=typer.colors.BLUE)
 
     def on_tel(stream_id: int, record: object, header) -> None:
@@ -262,6 +296,251 @@ def log(
     typer.secho(
         f"done: {logger._meta.record_count} records, "  # noqa: SLF001
         f"{logger._meta.frame_count} raw frames.",
+        fg=typer.colors.GREEN,
+    )
+
+
+@app.command("export-csv")
+def export_csv(
+    session_dir: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
+    signals: str = typer.Option(
+        ...,
+        "--signals",
+        "-s",
+        help="Comma-separated signal keys, e.g. health.battery_mv,servo.1.position.",
+    ),
+    out: Optional[Path] = typer.Option(None, "--out", help="CSV output path."),
+) -> None:
+    """Export selected recorded telemetry signals to a timestamped CSV."""
+    requested = [key.strip() for key in signals.split(",") if key.strip()]
+    registry = registry_by_key(build_signal_registry())
+    unknown = [key for key in requested if key not in registry]
+    if not requested:
+        _err("Select at least one signal with --signals.")
+        raise typer.Exit(code=2)
+    if unknown:
+        _err(f"Unknown signal key(s): {', '.join(unknown)}")
+        raise typer.Exit(code=2)
+
+    target = out or session_dir / "selected_signals.csv"
+    try:
+        rows = export_selected_csv(
+            SessionReplay(session_dir), [registry[key] for key in requested], target
+        )
+    except (OSError, ValueError) as exc:
+        _err(f"CSV export failed: {exc}")
+        raise typer.Exit(code=1)
+    typer.secho(f"exported {rows} CSV row(s) -> {target}", fg=typer.colors.GREEN)
+
+
+@app.command("export-report")
+def export_report(
+    session_dir: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
+    out: Optional[Path] = typer.Option(None, "--out", help="Text report output path."),
+) -> None:
+    """Write a human-readable health, stream, and event summary for a session."""
+    target = out or session_dir / "session_summary.txt"
+    try:
+        summary = write_session_summary(SessionReplay(session_dir), target)
+    except (OSError, ValueError) as exc:
+        _err(f"Report export failed: {exc}")
+        raise typer.Exit(code=1)
+    typer.secho(
+        f"wrote report for {summary['session_id']} -> {target}", fg=typer.colors.GREEN
+    )
+
+
+@app.command("hil-decode")
+def hil_decode(
+    session_dir: Path = typer.Argument(..., exists=True, file_okay=False, dir_okay=True),
+    out: Optional[Path] = typer.Option(None, "--out", help="Decoded JSON artifact path."),
+    session_id: Optional[int] = typer.Option(
+        None, "--session-id", help="Require this nonzero HIL observer session ID."
+    ),
+) -> None:
+    """Decode retained raw HIL trace events into an offline parity artifact."""
+    try:
+        replay = SessionReplay(session_dir)
+        trace = hil.decode_trace_frames(
+            (frame for _, frame in replay.iter_raw_frames()),
+            expected_session_id=session_id,
+        )
+    except (OSError, ValueError, hil.TraceDecodeError) as exc:
+        _err(f"Could not decode HIL trace: {exc}")
+        raise typer.Exit(code=1)
+
+    output = out or session_dir / "hil_trace.json"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(hil.trace_to_artifact(trace), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.secho(
+        f"decoded {len(trace.steps)} controller step(s) -> {output}",
+        fg=typer.colors.GREEN,
+    )
+    if trace.end.reason is not hil.CaptureEndReason.COMPLETE:
+        _err(
+            f"Trace ended with {trace.end.reason.name}; artifact is diagnostic only "
+            "and cannot be used for controller parity."
+        )
+        raise typer.Exit(code=1)
+
+
+@app.command("hil-capture")
+def hil_capture(
+    steps: int = typer.Option(1, "--steps", min=1, max=32),
+    out: Path = typer.Option(Path("data/sessions"), "--out"),
+    name: str = typer.Option("hil", "--name"),
+    timeout: float = typer.Option(5.0, "--timeout", min=1.0),
+    port: Optional[str] = typer.Option(None, "--port", "-p"),
+    baud: int = typer.Option(115200, "--baud"),
+) -> None:
+    """Capture output-disabled HIL trace records into a lossless session."""
+    client = _connect(port, baud)
+    logger: Optional[SessionLogger] = None
+    maintenance_token = 0
+    session_token = 0
+    result_error: Optional[str] = None
+    completed = None
+
+    try:
+        capabilities = _retry_request(client, "GET_CAPABILITIES", client.get_capabilities)
+        if not capabilities.hil_output_disabled:
+            raise RuntimeError("firmware image is not output-disabled HIL")
+        observer_capability = _retry_request(
+            client, "HIL_GET_CAPABILITY", client.hil_get_capability
+        )
+        if (
+            not observer_capability.ok
+            or not observer_capability.available
+            or not observer_capability.output_disabled
+        ):
+            raise RuntimeError("HIL observer capability is unavailable")
+        if observer_capability.trace_schema_version != hil.TRACE_SCHEMA_VERSION:
+            raise RuntimeError(
+                "firmware HIL trace schema does not match this host decoder"
+            )
+        status = _retry_request(client, "GET_STATUS", client.get_status)
+        if not status.hil_output_disabled or status.dxl_power:
+            raise RuntimeError("DXL power is enabled; refusing HIL capture")
+
+        maintenance = _retry_request(
+            client, "ENTER_MAINTENANCE", client.enter_maintenance
+        )
+        if not maintenance.ok or maintenance.token == 0:
+            raise RuntimeError(f"maintenance lock rejected: result={maintenance.result}")
+        maintenance_token = maintenance.token
+
+        opened = _retry_request(
+            client,
+            "HIL_OPEN_SESSION",
+            lambda: client.hil_open_session(maintenance_token),
+        )
+        if not opened.ok or opened.session_token == 0:
+            raise RuntimeError(f"HIL observer session rejected: result={opened.result}")
+        session_token = opened.session_token
+
+        logger = SessionLogger(
+            out_dir=out,
+            robot_name=name,
+            firmware={
+                "device": capabilities.device_name,
+                "protocol": f"{capabilities.proto_major}.{capabilities.proto_minor}",
+                "hil_session_id": opened.session_id,
+                "trace_schema_version": opened.trace_schema_version,
+            },
+        )
+        client.on_raw_frame(logger.log_raw_frame)
+        logger.mark_event(
+            "hil_session_opened",
+            session_id=opened.session_id,
+            trace_schema_version=opened.trace_schema_version,
+            requested_steps=steps,
+        )
+        assembler = hil.TraceAssembler(expected_session_id=opened.session_id)
+        capture_done = threading.Event()
+        decode_error: list[str] = []
+
+        def on_event(event_id: int, payload: bytes, _header) -> None:
+            try:
+                parsed = assembler.accept_event(event_id, payload)
+                if parsed is not None:
+                    logger.log_record("hil_trace", parsed)
+                    if isinstance(parsed, hil.TraceEnd):
+                        capture_done.set()
+            except hil.TraceDecodeError as exc:
+                decode_error.append(str(exc))
+                capture_done.set()
+
+        client.on_event(on_event)
+        try:
+            capture = _retry_request(
+                client,
+                "HIL_CAPTURE",
+                lambda: client.hil_capture(session_token, steps),
+            )
+            if not capture.ok or capture.capture_id == 0:
+                raise RuntimeError(f"HIL capture rejected: result={capture.result}")
+            logger.mark_event(
+                "hil_capture_requested",
+                capture_id=capture.capture_id,
+                requested_steps=steps,
+            )
+
+            deadline = time.monotonic() + timeout
+            next_heartbeat = time.monotonic() + 0.2
+            while not capture_done.wait(timeout=0.02):
+                now = time.monotonic()
+                if now >= deadline:
+                    raise RuntimeError("timed out waiting for HIL TraceEnd")
+                if now >= next_heartbeat:
+                    heartbeat = client.hil_heartbeat(session_token)
+                    if heartbeat is None or not heartbeat.ok:
+                        raise RuntimeError("HIL observer heartbeat failed")
+                    maintenance_heartbeat = client.maint_heartbeat(maintenance_token)
+                    if maintenance_heartbeat is None or not maintenance_heartbeat.ok:
+                        raise RuntimeError("maintenance heartbeat failed")
+                    next_heartbeat = now + 0.2
+            if decode_error:
+                raise RuntimeError(f"HIL trace decode failed: {decode_error[0]}")
+            completed = assembler.finalize()
+            if completed.end.reason is not hil.CaptureEndReason.COMPLETE:
+                raise RuntimeError(
+                    f"HIL capture ended {completed.end.reason.name}; retained session is diagnostic only"
+                )
+            logger.mark_event(
+                "hil_capture_complete",
+                capture_id=capture.capture_id,
+                recorded_steps=len(completed.steps),
+                emitted_fragment_count=completed.end.emitted_fragment_count,
+            )
+        finally:
+            client.remove_event(on_event)
+    except Exception as exc:  # noqa: BLE001
+        result_error = str(exc)
+        if logger is not None:
+            logger.mark_event("hil_capture_error", result_error)
+    finally:
+        if session_token:
+            client.hil_close_session(session_token)
+        if maintenance_token:
+            client.exit_maintenance(maintenance_token)
+        if logger is not None:
+            logger.close()
+        client.stop()
+
+    if result_error is not None:
+        _err(result_error)
+        raise typer.Exit(code=1)
+    assert logger is not None and completed is not None
+    artifact = logger.dir / "hil_trace.json"
+    artifact.write_text(
+        json.dumps(hil.trace_to_artifact(completed), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    typer.secho(
+        f"captured {len(completed.steps)} controller step(s) -> {logger.dir}",
         fg=typer.colors.GREEN,
     )
 

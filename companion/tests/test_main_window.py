@@ -85,6 +85,29 @@ def test_literal_ampersands_are_escaped_for_qt_mnemonics(qtbot) -> None:
     assert mode_page.title == "Mode && Safety Center"
 
 
+def test_simulation_disables_hardware_only_navigation(qtbot) -> None:
+    from main_window import MainWindow
+
+    window = MainWindow()
+    qtbot.addWidget(window)
+
+    window.service._set_simulation_mode(True)
+
+    for key in (
+        "foot_contact",
+        "passive_pose",
+        "leg_lab",
+        "servo_config",
+        "servo_tuning",
+        "sensors",
+        "rc_troubleshooting",
+    ):
+        assert not window.nav._buttons[key].isEnabled()
+        assert "ROS simulated firmware" in window.nav._buttons[key].toolTip()
+    assert window.nav._buttons["gait_lab"].isEnabled()
+    assert window.stack.currentIndex() == window._pages["gait_lab"]
+
+
 def test_app_main_entry_point_launches_headless(monkeypatch) -> None:
     """Exercise the hexapod-companion entry point end-to-end without blocking.
 

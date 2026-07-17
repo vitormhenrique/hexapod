@@ -14,15 +14,15 @@
 //   * After a page write the device is busy (~5 ms); completion is detected by
 //     ACK polling rather than a fixed delay.
 //
-// Owned exclusively by the I2C task (shares Wire with i2c::I2cBus; all EEPROM
+// Owned exclusively by the I2C task (shares the bounded SERCOM transport; all EEPROM
 // access happens with every mux channel deselected, i.e. on the root bus).
 // ===========================================================================
 
 #include <Arduino.h>
-#include <Wire.h>
 #include <stdint.h>
 
 #include "config_store.h"
+#include "../sensors/i2c_bus.h"
 
 namespace config {
 
@@ -33,11 +33,11 @@ class Eeprom24LC32 : public ConfigBackend {
   static constexpr uint8_t kPageSize = 32;
   static constexpr uint8_t kWritePollTries = 25;  // ~25 ms worst case
 
-  Eeprom24LC32(arduino::TwoWire& wire, uint8_t addr = kI2cAddr)
-      : wire_(wire), addr_(addr) {}
+    Eeprom24LC32(i2c::I2cBus& bus, uint8_t addr = kI2cAddr)
+      : bus_(bus), addr_(addr) {}
 
-  // ConfigBackend: sequential read across the device (auto-chunked to the Wire
-  // RX buffer). Returns false on any I2C error or out-of-range access.
+  // ConfigBackend: sequential read across the device in bounded chunks.
+  // Returns false on any I2C error or out-of-range access.
   bool read(uint16_t addr, uint8_t* buf, uint16_t len) override;
 
   // ConfigBackend: write across the device, split on 32-byte page boundaries
@@ -53,7 +53,7 @@ class Eeprom24LC32 : public ConfigBackend {
   // Write up to one page (must not cross a page boundary).
   bool writePage(uint16_t addr, const uint8_t* buf, uint8_t len);
 
-  arduino::TwoWire& wire_;
+  i2c::I2cBus& bus_;
   uint8_t addr_;
 };
 

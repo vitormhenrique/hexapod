@@ -15,19 +15,29 @@
 //   HELLO            (21B): proto_major, proto_minor, fw_major, fw_minor,
 //                           fw_patch, name[16]
 //   HEARTBEAT         (5B): uptime_ms(4), state(1)
-//   GET_STATUS       (28B): uptime_ms(4), state(1), status_flags(1),
+//   GET_STATUS      (113B): uptime_ms(4), state(1), status_flags(1),
 //                           battery_mv(2), watchdog_missed(4), reset_cause(1),
 //                           last_reset_watchdog_missed(4), reset_progress(1),
 //                           control_stack_free(2), dxl_stack_free(2),
 //                           reset_control_progress(1), reset_state(1),
-//                           dxl_power_transitions(4)
-//   GET_CAPABILITIES (25B): proto_major, proto_minor, fw_major, fw_minor,
+//                           dxl_power_transitions(4), hil_flags(1),
+//                           blocked_power_enable(4), blocked_torque_enable(4),
+//                           blocked_goal_write(4), blocked_dxl_write(4),
+//                           last_goal_sequence(4), last_goal_count(1),
+//                           last_fault_reason(1), last_fault_timestamp_ms(4),
+//                           last_fatal_reason(1), last_fatal_stage(1),
+//                           last_fatal_task_name[16], fault_sp(4),
+//                           fault_exc_return(4), stacked_r0/r1/r2/r3/r12/
+//                           lr/pc/xpsr(4 each)
+//   GET_CAPABILITIES (26B): proto_major, proto_minor, fw_major, fw_minor,
 //                           fw_patch, feature_bits(4), name[16]
 //                           feature_bits: per-Feature availability bitmask,
-//                           bit i == Feature i available (see feature_api.h).
+//                           bit i == Feature i available (see feature_api.h),
+//                           build_flags(1).
 //   error frame       (1B): error_code  (header flags has kError set)
 //
-//   status_flags: bit0 = dxl_power, bit1 = dxl_power_control
+//   status_flags: bit0 = dxl_power, bit1 = dxl_power_control,
+//                 bit2 = output-disabled HIL image
 // ===========================================================================
 
 #include <stddef.h>
@@ -125,6 +135,14 @@ namespace protocol {
 class ControllerApi;
 }
 
+// Forward declaration: the output-disabled HIL observer command group is
+// implemented by a portable state holder in hil/observer_api.h. It is an
+// optional dispatcher dependency so normal firmware images can reject the
+// reserved command range without gaining any output-control surface.
+namespace hil {
+class ObserverApi;
+}
+
 namespace protocol {
 namespace api {
 
@@ -147,6 +165,24 @@ constexpr uint8_t kError = 0x02;
 constexpr uint8_t kFragment = 0x04;
 }  // namespace flag
 
+namespace statusflag {
+constexpr uint8_t kDxlPower = 0x01;
+constexpr uint8_t kDxlPowerControl = 0x02;
+constexpr uint8_t kHilOutputDisabled = 0x04;
+}  // namespace statusflag
+
+namespace hilflag {
+constexpr uint8_t kOutputDisabled = 0x01;
+constexpr uint8_t kPowerGuardActive = 0x02;
+constexpr uint8_t kTorqueGuardActive = 0x04;
+constexpr uint8_t kGoalGuardActive = 0x08;
+constexpr uint8_t kWriteGuardActive = 0x10;
+}  // namespace hilflag
+
+namespace capabilityflag {
+constexpr uint8_t kHilOutputDisabled = hilflag::kOutputDisabled;
+}  // namespace capabilityflag
+
 enum class Error : uint8_t {
   None = 0,
   UnknownMsg = 1,
@@ -161,6 +197,12 @@ constexpr uint8_t kConfigMsgLast = 0x25;
 // Telemetry subscription command msg-id range, mirrored from protocol::telemsg.
 constexpr uint8_t kTelemetryMsgFirst = 0x10;
 constexpr uint8_t kTelemetryMsgLast = 0x13;
+
+// Output-disabled HIL observer command range (0x14..0x1B), mirrored from
+// hil::observermsg so api.cpp can recognize it without coupling this header to
+// the HIL implementation.
+constexpr uint8_t kHilObserverMsgFirst = 0x14;
+constexpr uint8_t kHilObserverMsgLast = 0x1B;
 
 // Safety control command msg-id range, mirrored from protocol::ctrlmsg.
 constexpr uint8_t kControlMsgFirst = 0x30;
@@ -214,6 +256,7 @@ struct DeviceInfo {
   // protocol::Feature / FeatureApi::availableMask). 0 == nothing available yet.
   uint32_t feature_bits = 0;
   char device_name[kDeviceNameLen] = {0};
+  uint8_t build_flags = 0;
 };
 
 // Live status snapshot, refreshed by the caller before each handleRequest().
@@ -232,6 +275,21 @@ struct StatusSnapshot {
   uint8_t last_reset_control_progress = 0;
   uint8_t last_reset_safety_state = 0;
   uint32_t dxl_power_transitions = 0;
+  uint8_t hil_flags = 0;
+  uint32_t blocked_power_enable = 0;
+  uint32_t blocked_torque_enable = 0;
+  uint32_t blocked_goal_write = 0;
+  uint32_t blocked_dxl_write = 0;
+  uint32_t last_goal_sequence = 0;
+  uint8_t last_goal_count = 0;
+  uint8_t last_fault_reason = 0;
+  uint32_t last_fault_timestamp_ms = 0;
+  uint8_t last_fatal_reason = 0;
+  uint8_t last_fatal_stage = 0;
+  char last_fatal_task_name[16] = {0};
+  uint32_t last_fault_stack_pointer = 0;
+  uint32_t last_fault_exception_return = 0;
+  uint32_t last_fault_registers[8] = {0};
 };
 
 // Decode one COBS-encoded request body (bytes between 0x00 delimiters),
@@ -259,7 +317,8 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
                      SensorApi* sensors = nullptr,
                      PassiveApi* passive = nullptr,
                      ControllerApi* controller = nullptr,
-                     DecodeStatus* decode_status = nullptr);
+                     DecodeStatus* decode_status = nullptr,
+                     hil::ObserverApi* hil_observer = nullptr);
 
 }  // namespace api
 }  // namespace protocol

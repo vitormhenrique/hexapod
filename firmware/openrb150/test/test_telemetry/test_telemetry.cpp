@@ -242,6 +242,15 @@ void test_rc_diagnostics_stream_is_subscribable() {
   TEST_ASSERT_TRUE(m.shouldEmit(StreamId::RcDiagnostics, 0));  // primes + emits
 }
 
+void test_hil_status_stream_is_subscribable() {
+  SubscriptionManager m;
+  TEST_ASSERT_EQUAL_UINT16(10, SubscriptionManager::maxRateHz(StreamId::HilStatus));
+  const uint16_t eff = m.subscribe(StreamId::HilStatus, 200);
+  TEST_ASSERT_EQUAL_UINT16(10, eff);
+  TEST_ASSERT_TRUE(m.enabled(StreamId::HilStatus));
+  TEST_ASSERT_TRUE(m.shouldEmit(StreamId::HilStatus, 0));
+}
+
 void test_leg_state_stream_is_subscribable() {
   // The commanded foot-target stream (eax.3) is stream id 9, appended without
   // renumbering, and caps at 50 Hz like the other servo-rate streams.
@@ -275,5 +284,6 @@ int main(int, char**) {
   RUN_TEST(test_leg_state_stream_is_subscribable);
   RUN_TEST(test_controller_state_stream_is_subscribable);
   RUN_TEST(test_rc_diagnostics_stream_is_subscribable);
+  RUN_TEST(test_hil_status_stream_is_subscribable);
   return UNITY_END();
 }

@@ -48,38 +48,48 @@ constexpr uint32_t kCriticalMask =
 bool g_hwArmed = false;
 
 #if defined(ARDUINO_ARCH_SAMD)
+constexpr uint32_t kPeripheralSyncWaitIterations = 200000u;
+
+bool waitForGclkSync() {
+  for (uint32_t i = 0; i < kPeripheralSyncWaitIterations; ++i) {
+    if (!GCLK->STATUS.bit.SYNCBUSY) return true;
+  }
+  return false;
+}
+
+bool waitForWdtSync() {
+  for (uint32_t i = 0; i < kPeripheralSyncWaitIterations; ++i) {
+    if (!WDT->STATUS.bit.SYNCBUSY) return true;
+  }
+  return false;
+}
+
 // SAMD21 hardware watchdog. Clocked from the always-on ultra-low-power 32.768
 // kHz oscillator (OSCULP32K) via GCLK generator 2 divided to ~1.024 kHz, so the
 // WDT keeps running even if the main clock/PLL fails. Normal-mode timeout is
 // ~2.0 s (2048 cycles); the health task pets every 500 ms, giving a 4x margin
 // against scheduling jitter while still resetting within ~2 s of a true hang.
-void hwEnable() {
+bool hwEnable() {
   // GCLK2 = OSCULP32K / 32 = 1.024 kHz (DIVSEL=1 -> divide by 2^(DIV+1)).
   GCLK->GENDIV.reg = GCLK_GENDIV_ID(2) | GCLK_GENDIV_DIV(4);
-  while (GCLK->STATUS.bit.SYNCBUSY) {
-  }
+  if (!waitForGclkSync()) return false;
   GCLK->GENCTRL.reg = GCLK_GENCTRL_ID(2) | GCLK_GENCTRL_SRC_OSCULP32K |
                       GCLK_GENCTRL_DIVSEL | GCLK_GENCTRL_GENEN;
-  while (GCLK->STATUS.bit.SYNCBUSY) {
-  }
+  if (!waitForGclkSync()) return false;
   // Route GCLK2 to the WDT peripheral clock.
   GCLK->CLKCTRL.reg =
       GCLK_CLKCTRL_ID_WDT | GCLK_CLKCTRL_GEN_GCLK2 | GCLK_CLKCTRL_CLKEN;
-  while (GCLK->STATUS.bit.SYNCBUSY) {
-  }
+  if (!waitForGclkSync()) return false;
 
   // Disable before (re)configuring, then set the timeout period and clear.
   WDT->CTRL.reg = 0;
-  while (WDT->STATUS.bit.SYNCBUSY) {
-  }
+  if (!waitForWdtSync()) return false;
   WDT->INTENCLR.reg = WDT_INTENCLR_EW;  // no early-warning interrupt; reset only
   WDT->CONFIG.bit.PER = 0x8;            // 2048 cycles @ 1.024 kHz ~= 2.0 s
   WDT->CLEAR.reg = WDT_CLEAR_CLEAR_KEY;
-  while (WDT->STATUS.bit.SYNCBUSY) {
-  }
+  if (!waitForWdtSync()) return false;
   WDT->CTRL.reg = WDT_CTRL_ENABLE;
-  while (WDT->STATUS.bit.SYNCBUSY) {
-  }
+  return waitForWdtSync();
 }
 
 void hwPet() {
@@ -93,7 +103,7 @@ void hwPet() {
 #else
 // Host build: hardware steps compile to no-ops so the liveness logic stays
 // testable on the native target.
-void hwEnable() {}
+bool hwEnable() { return true; }
 void hwPet() {}
 #endif
 
@@ -152,14 +162,6 @@ void checkIn(TaskId id) {
 }
 
 void evaluate() {
-  // Arm the hardware WDT on the first pass: by now the scheduler is running and
-  // the health task has executed at least once, so no long boot operation can
-  // trip the timer. Establish the baseline (pet) on the same pass.
-  if (!g_hwArmed) {
-    hwEnable();
-    g_hwArmed = true;
-  }
-
   uint32_t missed = 0;
   for (uint8_t i = 0; i < kTaskCount; ++i) {
     const uint32_t now = g_beats[i];
@@ -175,11 +177,21 @@ void evaluate() {
   g_retainedState.missed_mask_inverse = ~missed;
 #endif
 
+  // The health task starts before lower-priority tasks. Do not arm until both
+  // motion-critical tasks have produced a heartbeat and advanced during this
+  // evaluation window. This keeps peripheral startup outside the hardware WDT
+  // deadline and avoids manufacturing a reset loop from normal task ordering.
+  if (!g_hwArmed && (missed & kCriticalMask) == 0 &&
+      g_beats[static_cast<uint8_t>(TaskId::Control)] != 0 &&
+      g_beats[static_cast<uint8_t>(TaskId::Dxl)] != 0) {
+    g_hwArmed = hwEnable();
+  }
+
   // Drive the hardware WDT: pet while the motion-critical tasks are live, and
   // withhold the pet when one has stalled so the WDT times out and resets the
   // MCU into a safe (de-energised) state. A total health-task hang also stops
   // the pet (evaluate() simply stops being called), giving the same backstop.
-  if ((missed & kCriticalMask) == 0) {
+  if (g_hwArmed && (missed & kCriticalMask) == 0) {
     hwPet();
   }
 }

@@ -278,6 +278,27 @@ bool validateRobotConfig(const RobotConfig& cfg) {
   // foot-Z and coxa lift may legitimately be zero, so they are unconstrained.
   if (cfg.geometry.home_radius_cmm == 0) return false;
 
+  // The all-zero joint pose is seeded from this neutral coxa-frame foot
+  // target. Reject a configuration that places it outside the femur/tibia
+  // annulus instead of accepting a calibration that the IK can only clamp.
+  // All values remain in centi-mm here; use signed 64-bit intermediates so
+  // even a syntactically valid max-width config cannot overflow the squares.
+  const int64_t home_planar_cmm =
+      static_cast<int64_t>(cfg.geometry.home_radius_cmm) -
+      static_cast<int64_t>(cfg.links.coxa_cmm);
+  const int64_t home_z_cmm = cfg.geometry.home_foot_z_cmm;
+  const int64_t home_distance_sq =
+      home_planar_cmm * home_planar_cmm + home_z_cmm * home_z_cmm;
+  int64_t reach_min_cmm = static_cast<int64_t>(cfg.links.femur_cmm) -
+                          static_cast<int64_t>(cfg.links.tibia_cmm);
+  if (reach_min_cmm < 0) reach_min_cmm = -reach_min_cmm;
+  const int64_t reach_max_cmm = static_cast<int64_t>(cfg.links.femur_cmm) +
+                                static_cast<int64_t>(cfg.links.tibia_cmm);
+  if (home_distance_sq < reach_min_cmm * reach_min_cmm ||
+      home_distance_sq > reach_max_cmm * reach_max_cmm) {
+    return false;
+  }
+
   // Gait selection must be a known gait, and the persisted gait defaults must
   // sit inside the gait engine's safe envelope -- not merely be clampable to it.
   // A persisted default the engine would have to clamp back is a configuration

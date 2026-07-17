@@ -71,6 +71,21 @@ def test_motion_controls_require_ready_session(qtbot) -> None:
     assert page.gait_box.isEnabled()
 
 
+def test_simulation_session_enables_direct_high_level_motion(qtbot) -> None:
+    service, page = _page(qtbot)
+
+    service._set_simulation_mode(True)
+    service.connected.emit(True)
+    service.gait_test_changed.emit(True, "running in ROS simulation")
+
+    assert page.session_box.title() == "Simulation motion session"
+    assert page.start_btn.text() == "Start simulation controls"
+    assert page.stop_session_btn.text() == "Stop simulation"
+    assert page.gait_box.isEnabled()
+    assert page.params_box.isEnabled()
+    assert page.walk_box.isEnabled()
+
+
 def test_start_session_uses_current_gait_parameters(qtbot) -> None:
     service, page = _page(qtbot)
     calls = []
@@ -103,24 +118,51 @@ def test_apply_params_sends_gait_params(qtbot) -> None:
     assert calls == [(45, 70, 25, 120, 200)]
 
 
-def test_send_twist_normalises_percentages(qtbot) -> None:
+def test_pad_press_sends_walking_gait_then_scaled_twist(qtbot) -> None:
+    service, page = _page(qtbot)
+    calls = []
+    service.set_gait = lambda g: calls.append(("gait", g))  # type: ignore[method-assign]
+    service.set_body_twist = lambda *a: calls.append(("twist", *a))  # type: ignore[method-assign]
+    page._gait_buttons[api.GAIT_RIPPLE].setChecked(True)
+    page._walk_speed.setValue(50)
+    page._pad_buttons["forward"].pressed.emit()
+    page._pad_buttons["forward"].released.emit()
+    assert calls == [
+        ("gait", api.GAIT_RIPPLE),
+        ("twist", 0.5, 0.0, 0.0),
+        ("twist", 0.0, 0.0, 0.0),
+    ]
+
+
+def test_pad_press_auto_selects_tripod_when_posture_checked(qtbot) -> None:
+    service, page = _page(qtbot)
+    calls = []
+    service.set_gait = lambda g: calls.append(("gait", g))  # type: ignore[method-assign]
+    service.set_body_twist = lambda *a: calls.append(("twist", *a))  # type: ignore[method-assign]
+    page._gait_buttons[api.GAIT_STAND].setChecked(True)
+    page._walk_speed.setValue(100)
+    page._pad_buttons["left"].pressed.emit()
+    assert calls == [("gait", api.GAIT_TRIPOD), ("twist", 0.0, 1.0, 0.0)]
+    assert page._gait_buttons[api.GAIT_TRIPOD].isChecked()
+
+
+def test_pad_directions_cover_lateral_and_yaw(qtbot) -> None:
+    service, page = _page(qtbot)
+    calls = []
+    service.set_gait = lambda g: None  # type: ignore[method-assign]
+    service.set_body_twist = lambda *a: calls.append(a)  # type: ignore[method-assign]
+    page._gait_buttons[api.GAIT_WAVE].setChecked(True)
+    page._walk_speed.setValue(100)
+    page._pad_buttons["left"].pressed.emit()
+    page._pad_buttons["yaw_cw"].pressed.emit()
+    assert calls == [(0.0, 1.0, 0.0), (0.0, 0.0, -1.0)]
+
+
+def test_zero_twist_commands_zero(qtbot) -> None:
     service, page = _page(qtbot)
     calls = []
     service.set_body_twist = lambda *a: calls.append(a)  # type: ignore[method-assign]
-    page._twist_spins["vx"].setValue(50)
-    page._twist_spins["vy"].setValue(-25)
-    page._twist_spins["wz"].setValue(100)
-    page._send_twist()
-    assert calls == [(0.5, -0.25, 1.0)]
-
-
-def test_zero_button_resets_and_commands_zero(qtbot) -> None:
-    service, page = _page(qtbot)
-    calls = []
-    service.set_body_twist = lambda *a: calls.append(a)  # type: ignore[method-assign]
-    page._twist_spins["vx"].setValue(80)
     page._zero_twist()
-    assert page._twist_spins["vx"].value() == 0
     assert calls == [(0.0, 0.0, 0.0)]
 
 

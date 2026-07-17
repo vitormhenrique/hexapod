@@ -95,6 +95,86 @@ def test_read_table_min_max_ordering(qtbot) -> None:
     assert err is not None and "min tick" in err
 
 
+def test_geometry_edits_stage_into_the_shared_config(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    _load_default(service, page)
+    page.link_spins["coxa"].setValue(57.25)
+    page.home_radius_spin.setValue(126.5)
+    page.geometry_table.item(0, 1).setText("-70.50")
+    page.geometry_table.item(0, 4).setText("136.25")
+
+    edited, err = page._read_table()
+
+    assert err is None
+    assert edited.links.coxa_cmm == 5725
+    assert edited.geometry.home_radius_cmm == 12650
+    assert edited.legs[0].mount_x_dmm == -705
+    assert edited.legs[0].mount_yaw_cdeg == 13625
+    page._show_diff()
+    assert "links.coxa_cmm" in page.diff_text.toPlainText()
+    assert "leg[0].mount_yaw_cdeg" in page.diff_text.toPlainText()
+
+
+def test_sensor_calibration_edits_stage_into_the_shared_config(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    _load_default(service, page)
+    page.sensor_table.item(0, 1).setText("123456")
+    page.sensor_table.item(0, 2).setText("100")
+    page.sensor_table.item(0, 3).setText("200")
+    page.sensor_table.item(0, 4).setText("300")
+    enabled = page.sensor_table.cellWidget(0, 5)
+    assert enabled is not None
+    enabled.setChecked(True)
+
+    edited, err = page._read_table()
+
+    assert err is None
+    assert edited.feet[0].pressure_baseline == 123456
+    assert edited.feet[0].near_thresh == 100
+    assert edited.feet[0].touch_thresh == 200
+    assert edited.feet[0].load_thresh == 300
+    assert edited.feet[0].enabled == 1
+    page._show_diff()
+    assert "foot[0].pressure_baseline" in page.diff_text.toPlainText()
+
+
+def test_sensor_calibration_rejects_invalid_enabled_thresholds(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    _load_default(service, page)
+    enabled = page.sensor_table.cellWidget(0, 5)
+    assert enabled is not None
+    enabled.setChecked(True)
+    page.sensor_table.item(0, 2).setText("100")
+    page.sensor_table.item(0, 3).setText("300")
+    page.sensor_table.item(0, 4).setText("200")
+
+    _edited, err = page._read_table()
+
+    assert err is not None and "load threshold" in err
+
+
+def test_sensor_baseline_capture_uses_latest_raw_telemetry(qtbot) -> None:
+    from hexapod_protocol import telemetry as tlm
+
+    service, page = _make_page(qtbot)
+    _load_default(service, page)
+    service.telemetry.emit(
+        int(tlm.StreamId.I2C_SENSORS_RAW),
+        tlm.I2cSensorsRawTelemetry(
+            feet=[
+                tlm.FootRaw(proximity=100 + foot, pressure_raw=1000 + foot)
+                for foot in range(tlm.NUM_FEET)
+            ]
+        ),
+    )
+
+    page._capture_live_baselines()
+
+    assert page.sensor_table.item(0, 1).text() == "1000"
+    assert page.sensor_table.item(5, 1).text() == "1005"
+    assert "Copied 6" in page.sensor_capture_lbl.text()
+
+
 def test_staged_ok_updates_base(qtbot) -> None:
     service, page = _make_page(qtbot)
     _load_default(service, page)
@@ -126,8 +206,16 @@ def test_config_result_routing(qtbot) -> None:
 def test_export_import_roundtrip(qtbot, tmp_path) -> None:
     service, page = _make_page(qtbot)
     config = _load_default(service, page)
-    # Export the current (default) config straight to a file, bypassing the
-    # file dialog by writing what _export would serialize.
+    page.link_spins["femur"].setValue(66.75)
+    page.geometry_table.item(1, 2).setText("-93.40")
+    page.sensor_table.item(0, 1).setText("123456")
+    page.sensor_table.item(0, 2).setText("100")
+    page.sensor_table.item(0, 3).setText("200")
+    page.sensor_table.item(0, 4).setText("300")
+    page.sensor_table.cellWidget(0, 5).setChecked(True)
+
+    # Export the calibrated local config straight to a file, bypassing the
+    # file dialog while preserving the same dataclass JSON structure.
     import dataclasses
 
     edited, err = page._read_table()
@@ -141,8 +229,13 @@ def test_export_import_roundtrip(qtbot, tmp_path) -> None:
     assert restored.robot_name == config.robot_name
     assert len(restored.servos) == len(config.servos)
     assert restored.servos[3].id == config.servos[3].id
+    assert restored.links.femur_cmm == 6675
+    assert restored.legs[1].mount_y_dmm == -934
+    assert restored.feet[0].pressure_baseline == 123456
+    assert restored.feet[0].load_thresh == 300
+    assert restored.feet[0].enabled == 1
     # Encoding the restored config must match the original wire payload.
-    assert cfg.encode_robot_config(restored) == cfg.encode_robot_config(config)
+    assert cfg.encode_robot_config(restored) == cfg.encode_robot_config(edited)
 
 
 def test_actions_safe_when_disconnected(qtbot) -> None:

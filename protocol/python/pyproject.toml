@@ -12,7 +12,11 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pyright>=1.1.407"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["hexapod_protocol"]
+
+[tool.pyright]
+include = ["hexapod_protocol"]
+pythonVersion = "3.10"

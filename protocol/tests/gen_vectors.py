@@ -16,7 +16,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "protocol" / "python"))
 
-from hexapod_protocol import crc16, cobs_encode, Header, encode_frame  # noqa: E402
+from hexapod_protocol import (  # noqa: E402
+    VERSION_MAJOR,
+    VERSION_MINOR,
+    Header,
+    cobs_encode,
+    crc16,
+    encode_frame,
+)
 from hexapod_protocol.framing import MsgType  # noqa: E402
 from hexapod_protocol import api as api_mod  # noqa: E402
 from hexapod_protocol import config as config_mod  # noqa: E402
@@ -31,6 +38,7 @@ API_DEVICE = {
     "fw_patch": 0,
     "feature_bits": 0,
     "device_name": "OpenRB150-Hex",
+    "build_flags": 0x01,
 }
 API_STATUS = {
     "uptime_ms": 123456,
@@ -47,6 +55,21 @@ API_STATUS = {
     "last_reset_control_progress": 80,
     "last_reset_safety_state": 5,
     "dxl_power_transitions": 7,
+    "hil_flags": 0x1F,
+    "blocked_power_enable": 11,
+    "blocked_torque_enable": 12,
+    "blocked_goal_write": 13,
+    "blocked_dxl_write": 14,
+    "last_goal_sequence": 15,
+    "last_goal_count": 2,
+    "last_fault_reason": 4,
+    "last_fault_timestamp_ms": 120000,
+    "last_fatal_reason": 2,
+    "last_fatal_stage": 6,
+    "last_fatal_task_name": "control",
+    "last_fault_stack_pointer": 0x20007100,
+    "last_fault_exception_return": 0xFFFFFFFD,
+    "last_fault_registers": [0x1000 + index for index in range(8)],
 }
 
 
@@ -60,8 +83,9 @@ def _api_response(msg_id: int, seq: int) -> bytes:
     dev, st = API_DEVICE, API_STATUS
     flags = 0
     if msg_id == api_mod.MSG_HELLO:
-        # proto_major=0, proto_minor=1 (kVersionMajor/Minor)
-        payload = bytes([0, 1, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]])
+        payload = bytes(
+            [VERSION_MAJOR, VERSION_MINOR, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]]
+        )
         payload += _name_bytes(dev["device_name"])
     elif msg_id == api_mod.MSG_HEARTBEAT:
         payload = struct.pack("<I", st["uptime_ms"]) + bytes([st["state"]])
@@ -72,6 +96,8 @@ def _api_response(msg_id: int, seq: int) -> bytes:
         sflags = (0x01 if st["dxl_power"] else 0) | (
             0x02 if st["dxl_power_control"] else 0
         )
+        if st["hil_flags"] & 0x01:
+            sflags |= 0x04
         payload = (
             struct.pack("<I", st["uptime_ms"])
             + bytes([st["state"], sflags])
@@ -86,11 +112,28 @@ def _api_response(msg_id: int, seq: int) -> bytes:
                 [st["last_reset_control_progress"], st["last_reset_safety_state"]]
             )
             + struct.pack("<I", st["dxl_power_transitions"])
+            + bytes([st["hil_flags"]])
+            + struct.pack("<I", st["blocked_power_enable"])
+            + struct.pack("<I", st["blocked_torque_enable"])
+            + struct.pack("<I", st["blocked_goal_write"])
+            + struct.pack("<I", st["blocked_dxl_write"])
+            + struct.pack("<I", st["last_goal_sequence"])
+            + bytes([st["last_goal_count"]])
+            + bytes([st["last_fault_reason"]])
+            + struct.pack("<I", st["last_fault_timestamp_ms"])
+            + bytes([st["last_fatal_reason"], st["last_fatal_stage"]])
+            + _name_bytes(st["last_fatal_task_name"])
+            + struct.pack("<I", st["last_fault_stack_pointer"])
+            + struct.pack("<I", st["last_fault_exception_return"])
+            + struct.pack("<8I", *st["last_fault_registers"])
         )
     elif msg_id == api_mod.MSG_GET_CAPABILITIES:
-        payload = bytes([0, 1, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]])
+        payload = bytes(
+            [VERSION_MAJOR, VERSION_MINOR, dev["fw_major"], dev["fw_minor"], dev["fw_patch"]]
+        )
         payload += struct.pack("<I", dev["feature_bits"])
         payload += _name_bytes(dev["device_name"])
+        payload += bytes([dev["build_flags"]])
     else:
         raise ValueError(msg_id)
 
