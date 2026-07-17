@@ -433,6 +433,18 @@ void test_api_routes_hil_observer_commands() {
                     &payload_length));
     TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(hil::ObserverResult::NotAvailable), payload[0]);
+
+    const size_t absent_length = api::handleRequest(
+      wire + 1, request_length - 2, makeInfo(), makeStatus(), response,
+      sizeof(response), nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
+      nullptr, nullptr, nullptr, nullptr, nullptr, &decode_status, nullptr);
+    TEST_ASSERT_TRUE(absent_length > 0);
+    TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+            decodeFrameBody(response + 1, absent_length - 2,
+                    &response_header, payload, sizeof(payload),
+                    &payload_length));
+    TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(hil::ObserverResult::NotAvailable), payload[0]);
 }
 
 }  // namespace

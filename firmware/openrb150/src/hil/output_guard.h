@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "../config/config_schema.h"
+
 namespace hil {
 
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
@@ -29,7 +31,15 @@ struct GoalTargetRecord {
   int32_t tick = 0;
 };
 
-constexpr uint8_t kMaxRecordedGoalTargets = 24;
+constexpr uint8_t kMaxRecordedGoalTargets = config::kNumServos;
+
+// Goal snapshots are only consumed by the physical-output-disabled HIL image.
+// Host tests retain them so OutputGuard(true) stays fully testable.
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED) || !defined(ARDUINO_ARCH_SAMD)
+#define HEXAPOD_OUTPUT_GUARD_RECORD_GOALS 1
+#else
+#define HEXAPOD_OUTPUT_GUARD_RECORD_GOALS 0
+#endif
 
 class OutputGuard {
  public:
@@ -57,7 +67,9 @@ class OutputGuard {
   volatile uint32_t last_goal_sequence_ = 0;
   volatile uint8_t last_goal_count_ = 0;
   volatile bool goal_capture_in_progress_ = false;
+#if HEXAPOD_OUTPUT_GUARD_RECORD_GOALS
   GoalTargetRecord last_blocked_goals_[kMaxRecordedGoalTargets] = {};
+#endif
 };
 
 OutputGuard& outputGuard();

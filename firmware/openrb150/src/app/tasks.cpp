@@ -51,12 +51,40 @@
 namespace app {
 namespace {
 
+constexpr size_t kHeapAlignmentBytes = 8;
+constexpr size_t kHeapBlockHeaderBytes = 8;
+constexpr size_t kHeapReserveBytes = 512;
+
+constexpr size_t heapBlockBytes(size_t requested) {
+  return (requested + kHeapBlockHeaderBytes + kHeapAlignmentBytes - 1u) &
+     ~(kHeapAlignmentBytes - 1u);
+}
+
+constexpr size_t taskHeapBytes(uint16_t stack_words) {
+  return heapBlockBytes(static_cast<size_t>(stack_words) * sizeof(StackType_t)) +
+     heapBlockBytes(sizeof(StaticTask_t));
+}
+
+constexpr size_t kStartupTaskHeapBytes =
+  taskHeapBytes(stack_words::kControl) + taskHeapBytes(stack_words::kDxl) +
+  taskHeapBytes(stack_words::kRc) + taskHeapBytes(stack_words::kApi) +
+  taskHeapBytes(stack_words::kI2c) + taskHeapBytes(stack_words::kHealth) +
+  taskHeapBytes(configMINIMAL_STACK_SIZE);
+constexpr size_t kStartupSemaphoreHeapBytes =
+  3u * heapBlockBytes(sizeof(StaticSemaphore_t));
+
+static_assert(priority::kHealth < configMAX_PRIORITIES,
+        "FreeRTOS priority table must include healthTask");
+static_assert(configUSE_TIMERS == 0,
+        "unused FreeRTOS timer daemon must stay disabled");
+static_assert(configTOTAL_HEAP_SIZE >=
+          kStartupTaskHeapBytes + kStartupSemaphoreHeapBytes +
+            kHeapReserveBytes + (kHeapAlignmentBytes - 1u),
+        "FreeRTOS heap no longer covers boot allocations plus reserve");
+
 // Task handles, indexed by watchdog::TaskId, so the health task can read each
 // task's stack high-water mark.
 TaskHandle_t g_handles[watchdog::kTaskCount] = {nullptr};
-
-// Per-task loop counters (single producer each), reported by the health task.
-volatile uint32_t g_loops[watchdog::kTaskCount] = {0};
 
 // Static description of this firmware build, reported by HELLO/GET_CAPABILITIES.
 protocol::api::DeviceInfo g_deviceInfo;
@@ -248,10 +276,11 @@ protocol::PassiveApi g_passiveApi;
 // it directly). Also feeds the controller_state telemetry stream.
 protocol::ControllerApi g_controllerApi;
 
-// HIL observer commands are isolated from normal motion and maintenance
-// authority. The portable handler exists in every image so the normal target
-// answers the reserved command range with NotAvailable.
+// HIL observer state exists only in the output-disabled image. The normal
+// image answers the reserved command range statelessly with NotAvailable.
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 hil::ObserverApi g_hilObserver;
+#endif
 
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 // The recorder has one fixed producer/consumer record handoff. This separate
@@ -464,8 +493,6 @@ void initDeviceInfo() {
 }
 
 inline void tick(watchdog::TaskId id) {
-  const uint8_t i = static_cast<uint8_t>(id);
-  g_loops[i]++;
   watchdog::checkIn(id);
 }
 
@@ -545,6 +572,7 @@ bool txFrame(const uint8_t* frame, size_t n) {
   return true;
 }
 
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 void refreshHilObserver(uint32_t now_ms,
                         const hil::OutputGuardStatus& guard_status) {
   g_hilObserver.setNow(now_ms);
@@ -558,7 +586,6 @@ void refreshHilObserver(uint32_t now_ms,
   g_hilObserver.tick();
 }
 
-#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 void queueHilObserverRequests() {
   // apiTask is the only producer. The observer refuses a new state-changing
   // command when this fixed ring has no space, so every successful take/push
@@ -2163,40 +2190,15 @@ void apiTask(void*) {
   TickType_t next = xTaskGetTickCount();
   constexpr uint8_t kMaxFramesPerCycle = 4;
   constexpr uint16_t kMaxBytesPerCycle = protocol::kMaxWireFrame;
-#ifdef HEXAPOD_DEBUG_SERIAL_HEARTBEAT
-  // Debug aid: emit a plaintext "alive" line ~1 Hz so a plain serial monitor
-  // (pio device monitor / screen / Arduino) can confirm the USB CDC link works
-  // independently of the binary COBS/CRC protocol. This intentionally corrupts
-  // the framed stream, so it is OFF unless HEXAPOD_DEBUG_SERIAL_HEARTBEAT is
-  // defined at build time. Disconnect the companion app while using it.
-  uint32_t dbg_hb_count = 0;
-  uint32_t dbg_next_ms = 0;
-#endif
   for (;;) {
     tick(watchdog::TaskId::Api);
 
     const uint32_t api_loop_now_ms =
       static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
-    refreshHilObserver(api_loop_now_ms, hil::outputGuard().status());
   #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+    refreshHilObserver(api_loop_now_ms, hil::outputGuard().status());
     queueHilObserverRequests();
   #endif
-
-#ifdef HEXAPOD_DEBUG_SERIAL_HEARTBEAT
-    {
-      const uint32_t hb_now_ms =
-          static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
-      if (hb_now_ms >= dbg_next_ms) {
-        dbg_next_ms = hb_now_ms + 1000;
-        Serial.print("hexapod alive t=");
-        Serial.print(hb_now_ms);
-        Serial.print("ms n=");
-        Serial.print(dbg_hb_count++);
-        Serial.print(" state=");
-        Serial.println(g_safetyState);
-      }
-    }
-#endif
 
     // Adopt a persisted config once i2cTask has loaded one at boot. Done here
     // (not at task start) because i2cTask's scan may finish after this task
@@ -2313,8 +2315,8 @@ void apiTask(void*) {
       // its independent TTL and the maintenance token are evaluated from this
       // exact request-time snapshot. Generic/API activity never refreshes
       // either maintenance or Jetson authority.
-      refreshHilObserver(st.uptime_ms, guard_status);
     #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+      refreshHilObserver(st.uptime_ms, guard_status);
       queueHilObserverRequests();
     #endif
 
@@ -2324,7 +2326,11 @@ void apiTask(void*) {
           sizeof(out), &g_configApi, &g_subs, &g_controlApi, &g_motionApi,
           &g_maintApi, &g_maintTargetApi, &g_dxlJobApi, &g_featureApi,
           &g_sensorApi, &g_passiveApi, &g_controllerApi, &decode_st,
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
           &g_hilObserver);
+#else
+          nullptr);
+#endif
     #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
       queueHilObserverRequests();
     #endif
@@ -2670,29 +2676,12 @@ void i2cTask(void*) {
   }
 }
 
-// Minimal FreeRTOS liveness test: toggle the USER LED every 100 ms. If the LED
-// blinks at 5 Hz the scheduler is running and ticking correctly. This owns the
-// LED so no other task should write it. Not part of the watchdog set.
-void blinkTask(void*) {
-  TickType_t next = xTaskGetTickCount();
-  for (;;) {
-    board::toggleUserLed();
-    vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kBlink));
-  }
-}
-
 void healthTask(void*) {
   TickType_t next = xTaskGetTickCount();
   for (;;) {
     tick(watchdog::TaskId::Health);
 
-    // Evaluate the software watchdog over the elapsed window. (The USER LED is
-    // driven by blinkTask as the FreeRTOS liveness indicator. USB CDC is owned
-    // by the api task per AGENTS.md 5.1, so the host reads health via the
-    // GET_STATUS command rather than text printed here.)
-  #if !defined(HEXAPOD_WATCHDOG_HOLD_PROBE)
     watchdog::evaluate();
-  #endif
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }
@@ -2740,19 +2729,12 @@ void start() {
   xTaskCreate(healthTask, "health", stack_words::kHealth, nullptr,
               priority::kHealth, &g_handles[static_cast<uint8_t>(watchdog::TaskId::Health)]);
 
-  // Standalone FreeRTOS liveness test task (USER LED @ 5 Hz). Not tracked by
-  // the watchdog; handle discarded.
-  const BaseType_t blink_created =
-  xTaskCreate(blinkTask, "blink", stack_words::kBlink, nullptr,
-              priority::kBlink, nullptr);
-
   const bool allocations_ok = g_commitMutex != nullptr &&
                               g_commitDone != nullptr &&
                               g_goalMutex != nullptr &&
                               control_created == pdPASS && dxl_created == pdPASS &&
                               rc_created == pdPASS && api_created == pdPASS &&
-                              i2c_created == pdPASS && health_created == pdPASS &&
-                              blink_created == pdPASS;
+                              i2c_created == pdPASS && health_created == pdPASS;
   if (!allocations_ok) {
     board::setDxlPower(false);
     for (;;) {

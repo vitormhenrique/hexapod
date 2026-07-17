@@ -26,10 +26,11 @@ void checkInAll() {
   checkIn(TaskId::Health);
 }
 
-// Establish a clean baseline: init, one full window, evaluate. After this every
-// task is "live" and the missed mask is clear.
+// Establish a clean baseline and one complete healthy observation window.
 void primeHealthy() {
   init();
+  checkInAll();
+  evaluate();
   checkInAll();
   evaluate();
 }
@@ -45,10 +46,21 @@ void test_init_clears_state() {
   TEST_ASSERT_FALSE(criticalStalled());
 }
 
-// First evaluate() with no heartbeats at all marks every task missed (the
-// counters never moved off their zero baseline).
-void test_no_heartbeats_marks_all_missed() {
+// The highest-priority health task evaluates before lower-priority tasks run
+// at scheduler startup, so the first call must establish a baseline instead of
+// briefly reporting a false critical fault.
+void test_first_evaluate_primes_without_startup_fault() {
   init();
+  evaluate();
+  TEST_ASSERT_EQUAL_UINT32(0u, missedMask());
+  TEST_ASSERT_FALSE(criticalStalled());
+}
+
+// Once the baseline exists, a full scheduling window with no heartbeats is a
+// genuine failure and marks every task missed.
+void test_no_heartbeats_after_baseline_marks_all_missed() {
+  init();
+  evaluate();
   evaluate();
   const uint32_t all = bit(TaskId::Control) | bit(TaskId::Dxl) |
                        bit(TaskId::Rc) | bit(TaskId::Api) | bit(TaskId::I2c) |
@@ -60,6 +72,8 @@ void test_no_heartbeats_marks_all_missed() {
 // A full window of heartbeats clears the missed mask.
 void test_full_window_is_live() {
   init();
+  checkInAll();
+  evaluate();
   checkInAll();
   evaluate();
   TEST_ASSERT_EQUAL_UINT32(0u, missedMask());
@@ -141,7 +155,8 @@ void test_checkin_out_of_range_ignored() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_init_clears_state);
-  RUN_TEST(test_no_heartbeats_marks_all_missed);
+  RUN_TEST(test_first_evaluate_primes_without_startup_fault);
+  RUN_TEST(test_no_heartbeats_after_baseline_marks_all_missed);
   RUN_TEST(test_full_window_is_live);
   RUN_TEST(test_control_stall_is_critical);
   RUN_TEST(test_dxl_stall_is_critical);

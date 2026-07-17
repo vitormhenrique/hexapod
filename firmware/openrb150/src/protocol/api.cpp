@@ -202,8 +202,13 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       // HIL observer sessions are read-only trace controls. The adapter only
       // supplies this optional handler for the immutable output-disabled image;
       // a normal image has no path from these IDs to actuator control.
-      if (hil_observer != nullptr && req.msg_id >= kHilObserverMsgFirst &&
+      if (req.msg_id >= kHilObserverMsgFirst &&
           req.msg_id <= kHilObserverMsgLast) {
+        if (hil_observer == nullptr) {
+          payload[0] = static_cast<uint8_t>(hil::ObserverResult::NotAvailable);
+          payload_len = 1;
+          break;
+        }
         uint16_t hil_len = 0;
         uint8_t hil_flags = 0;
         if (hil_observer->handle(req.msg_id, req_payload,

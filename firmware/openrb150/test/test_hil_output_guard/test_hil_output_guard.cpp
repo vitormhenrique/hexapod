@@ -77,6 +77,28 @@ void test_reset_preserves_mode_and_clears_counters() {
   TEST_ASSERT_EQUAL_UINT8(0, status.last_goal_count);
 }
 
+void test_goal_capture_keeps_every_physical_servo_target() {
+  hil::OutputGuard guard(true);
+
+  TEST_ASSERT_FALSE(guard.allowGoalWrite(config::kNumServos + 1));
+  for (uint8_t index = 0; index < config::kNumServos; ++index) {
+    guard.recordBlockedGoal(index, static_cast<uint8_t>(index + 1),
+                            2000 + index);
+  }
+  guard.finishBlockedGoalWrite();
+
+  const hil::OutputGuardStatus status = guard.status();
+  TEST_ASSERT_EQUAL_UINT8(config::kNumServos, status.last_goal_count);
+  hil::GoalTargetRecord goals[hil::kMaxRecordedGoalTargets];
+  TEST_ASSERT_EQUAL_UINT8(config::kNumServos,
+                          guard.copyLastBlockedGoals(
+                              goals, hil::kMaxRecordedGoalTargets));
+  TEST_ASSERT_EQUAL_UINT8(config::kNumServos,
+                          goals[config::kNumServos - 1].id);
+  TEST_ASSERT_EQUAL_INT32(2000 + config::kNumServos - 1,
+                          goals[config::kNumServos - 1].tick);
+}
+
 }  // namespace
 
 void setUp() {}
@@ -87,5 +109,6 @@ int main(int, char**) {
   RUN_TEST(test_output_disabled_blocks_all_actuating_operations);
   RUN_TEST(test_normal_build_guard_leaves_output_paths_available);
   RUN_TEST(test_reset_preserves_mode_and_clears_counters);
+  RUN_TEST(test_goal_capture_keeps_every_physical_servo_target);
   return UNITY_END();
 }

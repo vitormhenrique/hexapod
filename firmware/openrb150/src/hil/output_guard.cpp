@@ -15,9 +15,11 @@ void OutputGuard::reset() {
   last_goal_sequence_ = 0;
   last_goal_count_ = 0;
   goal_capture_in_progress_ = false;
+#if HEXAPOD_OUTPUT_GUARD_RECORD_GOALS
   for (uint8_t i = 0; i < kMaxRecordedGoalTargets; ++i) {
     last_blocked_goals_[i] = GoalTargetRecord{};
   }
+#endif
 }
 
 bool OutputGuard::allowPowerEnable() {
@@ -44,8 +46,13 @@ bool OutputGuard::allowGoalWrite(uint8_t goal_count) {
 
 void OutputGuard::recordBlockedGoal(uint8_t index, uint8_t id, int32_t tick) {
   if (!output_disabled_ || index >= last_goal_count_) return;
+#if HEXAPOD_OUTPUT_GUARD_RECORD_GOALS
   last_blocked_goals_[index].id = id;
   last_blocked_goals_[index].tick = tick;
+#else
+  (void)id;
+  (void)tick;
+#endif
 }
 
 void OutputGuard::finishBlockedGoalWrite() {
@@ -56,11 +63,16 @@ void OutputGuard::finishBlockedGoalWrite() {
 uint8_t OutputGuard::copyLastBlockedGoals(GoalTargetRecord* out,
                                           uint8_t out_cap) const {
   if (out == nullptr || goal_capture_in_progress_) return 0;
+#if HEXAPOD_OUTPUT_GUARD_RECORD_GOALS
   const uint8_t count = last_goal_count_ < out_cap ? last_goal_count_ : out_cap;
   for (uint8_t i = 0; i < count; ++i) {
     out[i] = last_blocked_goals_[i];
   }
   return count;
+#else
+  (void)out_cap;
+  return 0;
+#endif
 }
 
 bool OutputGuard::allowDxlWrite() {

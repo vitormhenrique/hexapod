@@ -42,11 +42,13 @@ void init(uint8_t reset_cause = 0);
 // Task heartbeat. Each task calls this every iteration. Single producer per id.
 void checkIn(TaskId id);
 
-// Snapshot heartbeats since the previous call. Updates the missed-task bitmask
-// for any task that did not check in during the window, then drives the SAMD21
-// hardware WDT: arms it on the first call, pets it while all motion-critical
-// tasks are live, and withholds the pet (forcing an MCU reset) when a critical
-// task has stalled. On host builds the hardware steps are no-ops.
+// The first call captures a startup baseline. Later calls snapshot heartbeats
+// since the previous evaluation, update the missed-task bitmask for any task
+// that did not check in during the completed window, then drive the SAMD21
+// hardware WDT. The WDT arms only after a healthy observed window, is petted
+// while all motion-critical tasks are live, and is withheld (forcing an MCU
+// reset) when a critical task has stalled. On host builds the hardware steps
+// are no-ops.
 void evaluate();
 
 // Bitmask of tasks that missed their heartbeat at the last evaluate().

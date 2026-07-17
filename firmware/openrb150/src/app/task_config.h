@@ -21,9 +21,10 @@ namespace app {
 // give comfortable headroom that the health task verifies via high-water marks.
 namespace stack_words {
 // Armed RC motion runs gait + body IK + six leg IK solves in this task. Live
-// high-water tracing showed only 75 words free with the old 256-word stack;
-// retain enough margin for deeper commanded-pose and trick paths.
-constexpr uint16_t kControl = 384;
+// high-water tracing showed only 31 words free with a 384-word stack during
+// production startup. Leave 95 words of margin at that observed peak for
+// deeper commanded-pose and trick paths.
+constexpr uint16_t kControl = 448;
 // dxl: Dynamixel2Arduino call chains (syncRead/readControlTableItem parsing)
 // plus the 160-byte maintenance-job result buffer run on this stack; 256 words
 // hard-faulted the MCU on the first status cycle after a real-servo scan
@@ -31,10 +32,15 @@ constexpr uint16_t kControl = 384;
 // usage.
 constexpr uint16_t kDxl = 512;
 constexpr uint16_t kRc = 192;
-constexpr uint16_t kApi = 1024;  // framing + decode buffers live on this stack
+// Request/response buffers are static; static stack analysis bounds the normal
+// dispatcher below 576 words. HIL trace fragmentation adds a separate path.
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+constexpr uint16_t kApi = 768;
+#else
+constexpr uint16_t kApi = 576;
+#endif
 constexpr uint16_t kI2c = 384;   // boot: scanAll() + config load; deep call chain
 constexpr uint16_t kHealth = 256;
-constexpr uint16_t kBlink = 96;   // tiny LED test task
 }  // namespace stack_words
 
 // FreeRTOS task priorities. tskIDLE_PRIORITY == 0.
@@ -45,7 +51,6 @@ constexpr uint8_t kRc = 3;
 constexpr uint8_t kApi = 2;
 constexpr uint8_t kI2c = 1;
 constexpr uint8_t kHealth = 4;
-constexpr uint8_t kBlink = 1;
 }  // namespace priority
 
 // Nominal loop periods in milliseconds for the skeleton. Real rates are tuned
@@ -57,7 +62,6 @@ constexpr uint32_t kRc = 10;        // 100 Hz
 constexpr uint32_t kApi = 5;        // 200 Hz poll
 constexpr uint32_t kI2c = 20;       // 50 Hz
 constexpr uint32_t kHealth = 500;   // 2 Hz reporting + watchdog evaluate
-constexpr uint32_t kBlink = 100;    // 5 Hz LED toggle (FreeRTOS liveness test)
 
 // Runtime-tunable bounds for the i2c/sensor poll loop period (SENSOR_SET_RATE,
 // lmt.9). The host requests a poll rate in Hz; the i2c task derives its loop

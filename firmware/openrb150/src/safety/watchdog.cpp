@@ -46,6 +46,7 @@ constexpr uint32_t kCriticalMask =
 // the scheduler and health task are confirmed running. Owned by the health
 // task (single writer), so no synchronisation is required.
 bool g_hwArmed = false;
+bool g_windowPrimed = false;
 
 #if defined(ARDUINO_ARCH_SAMD)
 constexpr uint32_t kPeripheralSyncWaitIterations = 200000u;
@@ -152,6 +153,7 @@ void init(uint8_t reset_cause) {
   }
   g_missedMask = 0;
   g_hwArmed = false;
+  g_windowPrimed = false;
 }
 
 void checkIn(TaskId id) {
@@ -162,6 +164,22 @@ void checkIn(TaskId id) {
 }
 
 void evaluate() {
+  // healthTask runs before its lower-priority peers at scheduler start. The
+  // first call therefore establishes a baseline instead of manufacturing a
+  // startup watchdog fault from counters that have not run yet.
+  if (!g_windowPrimed) {
+    for (uint8_t i = 0; i < kTaskCount; ++i) {
+      g_lastSeen[i] = g_beats[i];
+    }
+    g_missedMask = 0;
+#if defined(ARDUINO_ARCH_SAMD)
+    g_retainedState.missed_mask = 0;
+    g_retainedState.missed_mask_inverse = ~0u;
+#endif
+    g_windowPrimed = true;
+    return;
+  }
+
   uint32_t missed = 0;
   for (uint8_t i = 0; i < kTaskCount; ++i) {
     const uint32_t now = g_beats[i];

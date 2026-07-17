@@ -178,12 +178,16 @@ SERCOM sercom0(SERCOM0);
 SERCOM sercom1(SERCOM1);
 SERCOM sercom2(SERCOM2);
 SERCOM sercom3(SERCOM3);
+#if defined(HEXAPOD_ENABLE_SERIAL2)
 SERCOM sercom4(SERCOM4);
+#endif
 SERCOM sercom5(SERCOM5);
 
 // Serial1
 Uart Serial1(&sercom2, PIN_SERIAL1_RX, PIN_SERIAL1_TX, PAD_SERIAL1_RX, PAD_SERIAL1_TX);
+#if defined(HEXAPOD_ENABLE_SERIAL2)
 Uart Serial2(&sercom4, PIN_SERIAL2_RX, PIN_SERIAL2_TX, PAD_SERIAL2_RX, PAD_SERIAL2_TX);
+#endif
 Uart Serial3(&sercom5, PIN_SERIAL3_RX, PIN_SERIAL3_TX, PAD_SERIAL3_RX, PAD_SERIAL3_TX);
 
 void SERCOM2_Handler()
@@ -191,10 +195,12 @@ void SERCOM2_Handler()
   Serial1.IrqHandler();
 }
 
+#if defined(HEXAPOD_ENABLE_SERIAL2)
 void SERCOM4_Handler()
 {
   Serial2.IrqHandler();
 }
+#endif
 
 void SERCOM5_Handler()
 {

@@ -22,6 +22,7 @@
 #include <Dynamixel2Arduino.h>
 #include <stdint.h>
 
+#include "../config/config_schema.h"
 #include "dxl_model.h"
 #include "dxl_status.h"
 #include "dxl_sync.h"
@@ -42,8 +43,8 @@ struct BusStats {
 
 class DxlBus {
  public:
-  // Storage for discovered servos. The hexapod has 18; keep headroom.
-  static constexpr uint8_t kMaxServos = 24;
+  // Storage for every physical actuator in this fixed 6-leg, 3-DOF robot.
+  static constexpr uint8_t kMaxServos = config::kNumServos;
   static constexpr uint8_t kMaxServoId = 252;  // 253/0xFE is broadcast
   static constexpr uint32_t kDefaultBaud = 57600;  // DXL factory default
 

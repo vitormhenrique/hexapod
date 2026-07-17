@@ -169,7 +169,9 @@ extern SERCOM sercom0;
 extern SERCOM sercom1;
 extern SERCOM sercom2;
 extern SERCOM sercom3;
+#if defined(HEXAPOD_ENABLE_SERIAL2)
 extern SERCOM sercom4;
+#endif
 extern SERCOM sercom5;
 
 // Serial1
@@ -183,12 +185,16 @@ extern Uart Serial1;
 #define PAD_SERIAL1_TX (UART_TX_PAD_0)
 #define PAD_SERIAL1_RX (SERCOM_RX_PAD_1)
 
-// Serial2 4pin uart
+// Serial2 4pin UART is opt-in to avoid reserving its buffers in the default
+// USB/CRSF/DXL firmware image. Define HEXAPOD_ENABLE_SERIAL2 for an external
+// host or Jetson UART deployment.
+#if defined(HEXAPOD_ENABLE_SERIAL2)
 extern Uart Serial2;
 #define PIN_SERIAL2_TX (28ul)
 #define PIN_SERIAL2_RX (29ul)
 #define PAD_SERIAL2_TX (UART_TX_PAD_2)
 #define PAD_SERIAL2_RX (SERCOM_RX_PAD_3)
+#endif
 
 // Serial3 exp uart
 extern Uart Serial3;
