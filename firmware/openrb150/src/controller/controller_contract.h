@@ -46,12 +46,14 @@ enum class SnapshotValidity : uint8_t {
 
 // Monotonic controller time. `now_ms` and `dt_ms` use unsigned milliseconds;
 // `valid` is false until an adapter has established a trustworthy monotonic
-// timeline. The core must fail closed for invalid time instead of inferring a
-// clock from FreeRTOS, ROS, or wall time.
+// timeline. `overrun` marks a valid elapsed interval that exceeded the
+// adapter's nominal control period. The core must fail closed for invalid time
+// instead of inferring a clock from FreeRTOS, ROS, or wall time.
 struct ControllerTime {
   uint32_t now_ms = 0;
   uint32_t dt_ms = 0;
   bool valid = false;
+  bool overrun = false;
 };
 
 struct BatterySnapshot {

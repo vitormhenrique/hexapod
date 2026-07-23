@@ -1,11 +1,70 @@
-You are modifying an existing RC-controlled hexapod robot codebase.
+You are planning work on an existing RC-controlled hexapod robot codebase.
 
 Primary goal:
-Remove jerky motion while preserving responsive RC control. Implement a conservative first version that smooths RC inputs, limits command dynamics, prevents gait discontinuities, generates smooth foot paths, protects against IK/joint jumps, and updates all servos synchronously.
+Remove jerky motion while preserving responsive RC control. Do NOT implement everything in one shot. Instead, create a new Beads epic (`bd create "Remove jerky motion from RC control pipeline" -t epic -p 1 -l "area:firmware,priority:safety"`) and break ALL of the work described in this document into individual child issues under that epic, with dependencies, labels, priorities, and per-issue acceptance criteria. The technical sections below are the specification each issue must reference.
+
+## Unified Execution Plan (2026-07-22)
+
+This document remains the detailed behavioral specification. The source-backed
+baseline and confirmed risks are in
+[docs/firmware_controller_to_servo_review_2026-07-22.md](docs/firmware_controller_to_servo_review_2026-07-22.md).
+Beads epic `hexapod_src-22l.15` is the implementation source of truth; its
+dependency graph, not this Markdown file, determines what is actionable.
+
+The current firmware already has a fixed-rate task split, high-level
+gimbal-to-body commands, local Cartesian gait/IK, configured joint travel
+clamps, and one DYNAMIXEL Sync Write owner. The plan extends those seams rather
+than replacing them.
+
+### Reconciled Decisions
+
+- Preserve the current ChannelPack and TX16S bindings until the configurable
+  mapping path has compatibility coverage. Gimbals continue to command body
+  motion, never normal raw servo targets.
+- Keep physical kill, host E-stop, unsafe voltage, watchdog, and hard DXL
+  faults immediate. A stale valid RC frame becomes a controlled
+  `LINK_LOSS_STOP` only after gait landing support exists.
+- Use stop-settle-switch-resume for the first gait-transition implementation.
+  Master phase remains continuous while walking; a canonical phase may be set
+  only after every foot reaches a defined stable stance.
+- Add one explicit RC conditioning and body-command-shaping contract. Do not
+  stack undocumented EMA, tracker, gait, and servo-internal profiles.
+- Retain compute-all-then-Sync-Write. Do not change 57,600-baud rate, return
+  delay, internal DYNAMIXEL tuning, or EEPROM settings until output-disabled
+  HIL and suspended-bench timing evidence supports a specific change.
+- Defer terrain adaptation, force control, nonlinear CPGs, whole-body
+  optimization, and automatic tuning. They are not prerequisites for a
+  predictable RC motion baseline.
+
+### Beads Delivery Order
+
+1. `hexapod_src-22l.15.1`: timing observability, whole-frame RC snapshots,
+   and output-disabled traces.
+2. `hexapod_src-22l.15.2` and `.3`: calibrated normalization, then bumpless
+   analog filtering/expo and switch conditioning.
+3. `hexapod_src-22l.15.4`: centralized limits and the production
+   acceleration-limited body command shaper.
+4. `hexapod_src-2qd` and `hexapod_src-22l.15.5`: phase-safe gait state,
+   stopping, transitions, and latched swing trajectories.
+5. `hexapod_src-22l.15.6`, `hexapod_src-e93`, and `hexapod_src-3cm`: IK jump
+   diagnostics, final joint-rate guard, and staged RC link-loss landing.
+6. `hexapod_src-22l.15.7`: measured DXL command-epoch and internal-profiling
+   policy; this waits for the existing legacy polling benchmark.
+7. `hexapod_src-22l.15.9` and `.8`: optional median/jerk strategies, then
+   safe runtime mappings, presets, and tuning gates.
+8. `hexapod_src-22l.15.10`: complete replay/HIL evidence, tuning guide, and
+   physical validation. It is intentionally blocked by the preceding work and
+   existing hardware bench validation.
+
+No implementation issue should be claimed outside this order unless its Beads
+dependencies have been deliberately revised after new source or hardware
+evidence.
+
+Each implementation session then works one issue at a time from `bd ready`, claims it with `bd update <id> --claim`, and closes it only when its acceptance criteria pass.
 
 Use the repository's existing language, build system, coding style, servo driver, inverse kinematics, and gait implementation. Do not rewrite working subsystems unnecessarily.
 
-Before editing:
+Before creating issues:
 1. Inspect the repository and identify:
    - RC receiver type and protocol: PWM, PPM, SBUS, CRSF, serial, etc.
    - RC update rate and how packet loss/failsafe is reported.
@@ -17,7 +76,7 @@ Before editing:
    - Whether the servo API supports a synchronized or batch write.
    - Whether servos already perform internal speed/acceleration profiling.
 2. Preserve existing channel assignments where practical.
-3. Implement the following architecture with minimal invasive changes.
+3. Record these findings in the epic description (and `bd remember` durable facts), then file child issues that implement the following architecture with minimal invasive changes. If inspection reveals additional sources of jerk not listed here, file an issue for each one.
 
 ==================================================
 REQUIRED CONTROL PIPELINE
@@ -44,10 +103,10 @@ Never map raw RC values directly to servo positions.
 Sample the entire RC frame atomically once per control tick. Do not read individual channels at different times.
 
 ==================================================
-FIRST IMPLEMENTATION PRIORITIES
+IMPLEMENTATION ORDER AND DEPENDENCIES
 ==================================================
 
-Implement these items first, in this order:
+Structure the epic's issue dependencies so these items land first, in this order:
 
 1. Fixed-rate control loop with measured dt.
 2. RC validation, calibration, timeout, deadband, expo, and EMA.
@@ -59,7 +118,7 @@ Implement these items first, in this order:
 8. Optional median filtering and optional jerk-limited command shaping.
 9. Runtime mode selection through configurable RC channels.
 
-Do not initially implement:
+Do not file implementation issues yet for:
 - Kalman filtering.
 - Full nonlinear CPGs.
 - Terrain adaptation.
@@ -67,7 +126,72 @@ Do not initially implement:
 - Whole-body optimization.
 - Automatic parameter tuning.
 
-Leave clean extension interfaces for these features.
+Leave clean extension interfaces for these features (an issue may cover defining those interfaces).
+
+==================================================
+REQUIRED BEADS EPIC BREAKDOWN
+==================================================
+
+Create the epic, then create at minimum the following child issues. Every issue must: reference the relevant specification section of this document, carry acceptance criteria, carry labels (`area:firmware`, plus `priority:safety` where applicable), and declare dependencies matching the implementation order above. Split any issue that grows too large.
+
+Audit and discovery:
+- Audit codebase and document every current source of jerky motion (RC path, gait, IK, servo output, timing). Findings go into the epic description and follow-up issues.
+
+Control loop and timing:
+- Fixed-rate control loop with monotonic clock, measured dt, dt clamping, overrun logging.
+- Atomic once-per-tick RC frame sampling.
+- Remove heap allocation, blocking I/O, and slow formatting from the real-time loop.
+
+RC input conditioning:
+- Per-channel calibration config struct and asymmetric normalization with clamping and invalid-value rejection.
+- Analog glitch filtering: input-filter strategy interface (NONE_DIAGNOSTIC, EMA, MEDIAN3_EMA) with time-based EMA and median-of-three.
+- Deadband with output rescaling and expo shaping.
+- Switch debouncing with stable-position requirement.
+- Bumpless input-filter mode switching (initialize new filter from current output).
+
+Command shaping:
+- Central configuration object for all body-command limits.
+- Body-level command mapping (BodyTwist, BodyPose) — never raw RC to servo positions.
+- Command-shaper strategy interface (DIRECT_DIAGNOSTIC, ACCEL_LIMITED, JERK_LIMITED).
+- ACCEL_LIMITED shaper with direction-aware accel/decel limits per axis.
+- JERK_LIMITED critically damped bounded-jerk tracker with target-crossing protection.
+- Bumpless shaper mode switching preserving value and rate state.
+
+Failsafe:
+- RC timeout tracking, LINK_LOSS_STOP behavior, disarm-after-1s policy, configurable timeouts, rearm requirement.
+- Configurable emergency-stop policy (HOLD_POSITION, CONTROLLED_STOP, TORQUE_OFF).
+
+Gait continuity:
+- Gait state machine (DISARMED, STANDING, STARTING, WALKING, STOPPING, GAIT_TRANSITION, LINK_LOSS_STOP, FAULT) with continuous phase — no phase resets on stick-center, speed change, gait change, or late packets.
+- STARTING/STOPPING ramps: amplitude ramp-in, finish active swings, settle to stable stance.
+- Stop-settle-switch-resume runtime gait transitions, with extension interface for future blended transitions.
+
+Foot trajectories:
+- Latched swing endpoints (lift-off/touchdown position, duration, step height, boundary velocities) — no endpoint teleporting on new RC frames.
+- Cubic Hermite horizontal swing path with matched boundary velocities.
+- Minimum-jerk vertical swing profile with zero velocity at lift-off, apex, touchdown.
+- Stance-path foot velocity from body twist (preserve existing world-frame pinning if present).
+
+IK and joint safety:
+- IK branch continuity: closest-valid-solution selection, wrapped angular distance, angle unwrapping, trig input clamping, unreachable-target detection/reporting, jump detection if single-branch.
+- Final per-joint velocity guard with configurable limits and activation diagnostics counter.
+
+Servo output:
+- Compute-all-then-transmit with synchronized/batch write; document inter-servo skew if batch is unavailable.
+- Deliberate policy decision on internal servo profiling vs external trajectory generation, documented.
+
+RC mapping and tuning:
+- Configurable 16-channel mapping with debounced mode switches and safety gating of diagnostic modes.
+- Tuning layer (Channel 14) with safe-state gating, filtering, and conservative clamping.
+- SMOOTH/BALANCED/RESPONSIVE presets with smooth interpolated preset transitions.
+- Compile-time options and production defaults.
+- Optional protected persistent tuning storage.
+
+Diagnostics and testing:
+- Non-blocking telemetry/diagnostics for all listed signals plus live diagnostic view.
+- Unit tests per the UNIT AND SIMULATION TESTS section (may be split per subsystem, ideally paired with or blocking each implementation issue).
+- Tuning document covering every parameter, unit, default, safe range, compile-time option, and RC assignment.
+- Safe physical test procedure execution checklist as the final issue, blocked by all implementation issues.
 
 ==================================================
 CONTROL LOOP
@@ -900,7 +1024,7 @@ RC loss:
 ACCEPTANCE CRITERIA
 ==================================================
 
-The implementation is complete when:
+Distribute these criteria across the child issues; the epic is closed only when every child issue is closed and all of the following hold:
 
 1. A noisy centered RC input remains zero after filtering and deadband.
 2. A full stick step does not create an immediate full body-velocity step.
@@ -923,9 +1047,14 @@ The implementation is complete when:
 DELIVERABLES
 ==================================================
 
-Make the code changes rather than only describing them.
+For this planning session, deliver:
 
-At completion, provide:
+1. One Beads epic capturing the goal, the audit findings on current sources of jerk, and the control-pipeline description.
+2. Child issues covering every item in REQUIRED BEADS EPIC BREAKDOWN, each with acceptance criteria, labels, priority, and dependencies matching the implementation order.
+3. `bd remember` entries for durable hardware/architecture facts discovered during the audit.
+4. A verification pass: `bd ready` shows the correct first actionable issues and no dependency cycles exist.
+
+Across the life of the epic, the implementation issues must collectively produce:
 
 1. A short description of the original source of jerk found in the code.
 2. A list of modified and added files.

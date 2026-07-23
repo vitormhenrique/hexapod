@@ -24,8 +24,10 @@ constexpr uint32_t kDefaultMaxControllerElapsedMs = 1000;
 class ControllerClock {
  public:
   explicit ControllerClock(
+      uint32_t nominal_period_ms = 0,
       uint32_t max_elapsed_ms = kDefaultMaxControllerElapsedMs)
-      : max_elapsed_ms_(max_elapsed_ms) {}
+      : nominal_period_ms_(nominal_period_ms),
+        max_elapsed_ms_(max_elapsed_ms) {}
 
   void reset();
 
@@ -34,6 +36,7 @@ class ControllerClock {
   ControllerTime sampleMilliseconds(uint32_t now_ms);
 
  private:
+  uint32_t nominal_period_ms_;
   uint32_t max_elapsed_ms_;
   uint32_t last_now_ms_ = 0;
   bool initialized_ = false;

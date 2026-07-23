@@ -27,11 +27,15 @@ NUM_LEGS = 6
 JOINTS_PER_LEG = 3
 NUM_SERVOS = NUM_LEGS * JOINTS_PER_LEG  # 18
 NUM_FOOT_SENSORS = 6
+NUM_RC_ANALOG_INPUTS = 8
 ROBOT_NAME_LEN = 16  # incl. NUL terminator
 # v3: default joint trims are zero -- servo center (2048/180 deg) is the
 # mechanical home pose per the URDF all-zero model. The bump invalidates v2
 # payloads that carried the old hidden +171/-512 posture trims.
-SCHEMA_VERSION = 3
+# v4 adds logical RC calibration. Firmware migrates valid v3 payloads in RAM
+# using the compiled default calibration profile until an explicit commit.
+SCHEMA_VERSION = 4
+LEGACY_SCHEMA_VERSION = 3
 
 SERVO_CENTER_TICK = 2048
 SERVO_MAX_TICK = 4095
@@ -55,9 +59,29 @@ CONFIG_PAYLOAD_SIZE = (
     + NUM_LEGS * (4 * 2)  # legs (4 x int16 each)
     + NUM_SERVOS * (1 + 1 + 1 + 1 + 2 + 2 + 2)  # servos (10 bytes each)
     + (2 + 2 + 2 + 1 + 1 + 1)  # gait (9 bytes)
+    + NUM_RC_ANALOG_INPUTS * (1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 2 + 2)
+    # logical RC calibration (15 bytes each)
     + NUM_FOOT_SENSORS * (4 + 2 + 2 + 2 + 1)  # feet (11 bytes each)
     + 4  # feature_defaults
-)  # == 337
+)  # == 457
+
+LEGACY_CONFIG_PAYLOAD_SIZE_V3 = (
+    2
+    + ROBOT_NAME_LEN
+    + 3 * 2
+    + (2 + 2 + 2)
+    + NUM_LEGS * (4 * 2)
+    + NUM_SERVOS * (1 + 1 + 1 + 1 + 2 + 2 + 2)
+    + (2 + 2 + 2 + 1 + 1 + 1)
+    + NUM_FOOT_SENSORS * (4 + 2 + 2 + 2 + 1)
+    + 4
+)
+
+RC_CENTERED_ANALOG = 0
+RC_UNIPOLAR_ANALOG = 1
+RC_RELATIVE_ENCODER = 2
+RC_FILTER_TAU_MAX_MS = 1000
+RC_SWITCH_DEBOUNCE_MAX_MS = 2000
 
 # Gait ids (mirror config::GaitId).
 GAIT_NAMES = {0: "stand", 1: "sit", 2: "tripod", 3: "ripple", 4: "wave", 5: "crawl"}
@@ -128,6 +152,25 @@ class GaitDefaults:
 
 
 @dataclass
+class RcChannelCalibration:
+    source: int = 0
+    type: int = RC_CENTERED_ANALOG
+    min_raw: int = 0
+    center_raw: int = 0
+    max_raw: int = 0
+    reversed: int = 0
+    deadband_x255: int = 0
+    expo_x255: int = 0
+    filter_tau_ms: int = 0
+    switch_debounce_ms: int = 0
+
+
+@dataclass
+class RcInputCalibration:
+    channels: list[RcChannelCalibration] = field(default_factory=list)
+
+
+@dataclass
 class FootSensorCal:
     pressure_baseline: int = 0
     near_thresh: int = 0
@@ -145,6 +188,9 @@ class RobotConfig:
     legs: list[LegGeometry] = field(default_factory=list)
     servos: list[ServoConfig] = field(default_factory=list)
     gait: GaitDefaults = field(default_factory=GaitDefaults)
+    rc_input: RcInputCalibration = field(
+        default_factory=lambda: default_rc_input_calibration()
+    )
     feet: list[FootSensorCal] = field(default_factory=list)
     feature_defaults: int = 0
 
@@ -179,15 +225,22 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     Raises :class:`ConfigDecodeError` if the length or schema version does not
     match, mirroring ``deserializeRobotConfig`` returning false.
     """
-    if len(payload) != CONFIG_PAYLOAD_SIZE:
+    if len(payload) not in (CONFIG_PAYLOAD_SIZE, LEGACY_CONFIG_PAYLOAD_SIZE_V3):
         raise ConfigDecodeError(
-            f"config payload is {len(payload)} bytes, expected {CONFIG_PAYLOAD_SIZE}"
+            "config payload is "
+            f"{len(payload)} bytes, expected {CONFIG_PAYLOAD_SIZE}"
         )
 
     o = 0
     schema_version = struct.unpack_from("<H", payload, o)[0]
     o += 2
-    if schema_version != SCHEMA_VERSION:
+    legacy_v3 = (
+        schema_version == LEGACY_SCHEMA_VERSION
+        and len(payload) == LEGACY_CONFIG_PAYLOAD_SIZE_V3
+    )
+    if not legacy_v3 and (
+        schema_version != SCHEMA_VERSION or len(payload) != CONFIG_PAYLOAD_SIZE
+    ):
         raise ConfigDecodeError(
             f"unsupported config schema version {schema_version} (expected {SCHEMA_VERSION})"
         )
@@ -218,6 +271,31 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     o += 9
     gait_defaults = GaitDefaults(body_h, stride, step_h, duty, speed, gait)
 
+    if legacy_v3:
+        rc_input = default_rc_input_calibration()
+    else:
+        channels: list[RcChannelCalibration] = []
+        for _ in range(NUM_RC_ANALOG_INPUTS):
+            source, channel_type, minimum, center, maximum, reverse, deadband, expo, tau, debounce = (
+                struct.unpack_from("<BBhhhBBBHH", payload, o)
+            )
+            channels.append(
+                RcChannelCalibration(
+                    source,
+                    channel_type,
+                    minimum,
+                    center,
+                    maximum,
+                    reverse,
+                    deadband,
+                    expo,
+                    tau,
+                    debounce,
+                )
+            )
+            o += 15
+        rc_input = RcInputCalibration(channels)
+
     feet: list[FootSensorCal] = []
     for _ in range(NUM_FOOT_SENSORS):
         baseline, near, touch, load, enabled = struct.unpack_from("<iHHHB", payload, o)
@@ -228,13 +306,14 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     o += 4
 
     return RobotConfig(
-        schema_version=schema_version,
+        schema_version=SCHEMA_VERSION if legacy_v3 else schema_version,
         robot_name=robot_name,
         links=links,
         geometry=geometry,
         legs=legs,
         servos=servos,
         gait=gait_defaults,
+        rc_input=rc_input,
         feet=feet,
         feature_defaults=feature_defaults,
     )
@@ -288,6 +367,22 @@ def encode_robot_config(cfg: RobotConfig) -> bytes:
         g.speed_x255,
         g.gait,
     )
+    if len(cfg.rc_input.channels) != NUM_RC_ANALOG_INPUTS:
+        raise ValueError(f"expected {NUM_RC_ANALOG_INPUTS} RC calibration records")
+    for channel in cfg.rc_input.channels:
+        out += struct.pack(
+            "<BBhhhBBBHH",
+            channel.source,
+            channel.type,
+            channel.min_raw,
+            channel.center_raw,
+            channel.max_raw,
+            channel.reversed,
+            channel.deadband_x255,
+            channel.expo_x255,
+            channel.filter_tau_ms,
+            channel.switch_debounce_ms,
+        )
     for foot in cfg.feet:
         out += struct.pack(
             "<iHHHB",
@@ -355,12 +450,38 @@ def default_robot_config() -> RobotConfig:
         speed_x255=128,
         gait=0,
     )
+    cfg.rc_input = default_rc_input_calibration()
     cfg.feet = [FootSensorCal() for _ in range(NUM_FOOT_SENSORS)]
     # Only sensor polling defaults on so present boards stream raw data; all
     # richer/safety features stay off until requested (mirrors the firmware
     # kFeatureDefaultMask / protocol kFeatureDefaultEnabled baseline).
     cfg.feature_defaults = FEAT_SENSOR_POLLING
     return cfg
+
+
+def default_rc_input_calibration() -> RcInputCalibration:
+    """Safe logical input defaults that reproduce the firmware bridge ranges."""
+    channels: list[RcChannelCalibration] = []
+    for index in range(NUM_RC_ANALOG_INPUTS):
+        if index < 4:
+            channel_type = RC_CENTERED_ANALOG
+            minimum, center, maximum = -1000, 0, 1000
+        elif index < 6:
+            channel_type = RC_UNIPOLAR_ANALOG
+            minimum, center, maximum = 0, 0, 1000
+        else:
+            channel_type = RC_RELATIVE_ENCODER
+            minimum, center, maximum = 0, 0, 2047
+        channels.append(
+            RcChannelCalibration(
+                source=index + 1,
+                type=channel_type,
+                min_raw=minimum,
+                center_raw=center,
+                max_raw=maximum,
+            )
+        )
+    return RcInputCalibration(channels)
 
 
 # --------------------------------------------------------------------------- #
@@ -448,6 +569,50 @@ def validate_robot_config(config: RobotConfig) -> list[str]:
         | FEAT_JETSON_CONTROL
     ):
         errors.append("feature defaults include unknown bits")
+
+    rc_input = config.rc_input
+    if len(rc_input.channels) != NUM_RC_ANALOG_INPUTS:
+        errors.append(f"expected {NUM_RC_ANALOG_INPUTS} RC calibration records")
+    sources: set[int] = set()
+    for index, channel in enumerate(rc_input.channels):
+        source_index = channel.source - 1
+        if not 1 <= channel.source <= NUM_RC_ANALOG_INPUTS:
+            errors.append(f"RC channel {index} source is outside 1..{NUM_RC_ANALOG_INPUTS}")
+        elif channel.source in sources:
+            errors.append(f"RC source {channel.source} is duplicated")
+        sources.add(channel.source)
+        expected_type = (
+            RC_CENTERED_ANALOG
+            if source_index < 4
+            else RC_UNIPOLAR_ANALOG
+            if source_index < 6
+            else RC_RELATIVE_ENCODER
+        )
+        if channel.type != expected_type:
+            errors.append(f"RC channel {index} has an incompatible type")
+        if channel.min_raw >= channel.max_raw:
+            errors.append(f"RC channel {index} minimum must be below maximum")
+        if not channel.min_raw <= channel.center_raw <= channel.max_raw:
+            errors.append(f"RC channel {index} center is outside its range")
+        if channel.type == RC_CENTERED_ANALOG and channel.center_raw in (
+            channel.min_raw,
+            channel.max_raw,
+        ):
+            errors.append(f"RC channel {index} centered range is degenerate")
+        if channel.reversed not in (0, 1):
+            errors.append(f"RC channel {index} reverse must be 0 or 1")
+        if not 0 <= channel.deadband_x255 <= 128:
+            errors.append(f"RC channel {index} deadband exceeds the safe range")
+        if not 0 <= channel.expo_x255 <= 255:
+            errors.append(f"RC channel {index} expo is outside 0..255")
+        if not 0 <= channel.filter_tau_ms <= RC_FILTER_TAU_MAX_MS:
+            errors.append(f"RC channel {index} filter tau exceeds the safe range")
+        if not 0 <= channel.switch_debounce_ms <= RC_SWITCH_DEBOUNCE_MAX_MS:
+            errors.append(
+                f"RC channel {index} switch debounce exceeds the safe range"
+            )
+    if sources != set(range(1, NUM_RC_ANALOG_INPUTS + 1)):
+        errors.append("RC calibration must cover each logical source exactly once")
 
     if len(config.servos) != NUM_SERVOS:
         errors.append(f"expected {NUM_SERVOS} servo calibration records")

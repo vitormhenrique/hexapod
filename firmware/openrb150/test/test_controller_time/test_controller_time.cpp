@@ -45,13 +45,29 @@ void test_nominal_ten_ms_tick_matches_native_injected_time() {
 }
 
 void test_overrun_preserves_real_elapsed_time() {
-  ControllerClock clock;
+  ControllerClock clock(/*nominal_period_ms=*/10);
   clock.sampleMilliseconds(10);
 
   const ControllerTime overrun = clock.sampleMilliseconds(85);
 
   TEST_ASSERT_TRUE(overrun.valid);
   TEST_ASSERT_EQUAL_UINT32(75, overrun.dt_ms);
+  TEST_ASSERT_TRUE(overrun.overrun);
+}
+
+void test_nominal_and_early_steps_are_not_overruns() {
+  ControllerClock clock(/*nominal_period_ms=*/10);
+  clock.sampleMilliseconds(100);
+
+  const ControllerTime early = clock.sampleMilliseconds(109);
+  const ControllerTime nominal = clock.sampleMilliseconds(119);
+
+  TEST_ASSERT_TRUE(early.valid);
+  TEST_ASSERT_EQUAL_UINT32(9, early.dt_ms);
+  TEST_ASSERT_FALSE(early.overrun);
+  TEST_ASSERT_TRUE(nominal.valid);
+  TEST_ASSERT_EQUAL_UINT32(10, nominal.dt_ms);
+  TEST_ASSERT_FALSE(nominal.overrun);
 }
 
 void test_unsigned_wraparound_preserves_elapsed_time() {
@@ -73,6 +89,7 @@ void test_invalid_tick_period_and_large_jump_fail_closed() {
   const ControllerTime invalid_jump = clock.sampleMilliseconds(1011);
   TEST_ASSERT_FALSE(invalid_jump.valid);
   TEST_ASSERT_EQUAL_UINT32(0, invalid_jump.dt_ms);
+  TEST_ASSERT_TRUE(invalid_jump.overrun);
 
   const ControllerTime rebased = clock.sampleMilliseconds(1021);
   TEST_ASSERT_TRUE(rebased.valid);
@@ -84,6 +101,7 @@ int main(int, char**) {
   RUN_TEST(test_first_and_zero_elapsed_samples_are_valid);
   RUN_TEST(test_nominal_ten_ms_tick_matches_native_injected_time);
   RUN_TEST(test_overrun_preserves_real_elapsed_time);
+  RUN_TEST(test_nominal_and_early_steps_are_not_overruns);
   RUN_TEST(test_unsigned_wraparound_preserves_elapsed_time);
   RUN_TEST(test_invalid_tick_period_and_large_jump_fail_closed);
   return UNITY_END();

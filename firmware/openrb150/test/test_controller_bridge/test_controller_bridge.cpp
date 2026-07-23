@@ -386,6 +386,67 @@ void test_setbindings_remaps_source() {
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, feed(b, in, 10).twist_vx);
 }
 
+void test_asymmetric_gimbal_calibration_maps_center_and_endpoints() {
+  ControllerBridge b;
+  config::RcInputCalibration calibration;
+  config::defaultRcInputCalibration(calibration);
+  config::RcChannelCalibration& forward = calibration.channels[1];
+  forward.min_raw = -800;
+  forward.center_raw = 100;
+  forward.max_raw = 700;
+  b.setCalibration(calibration);
+
+  ChannelPackInputs_t in = makeNeutral();
+  in.toggles[0] = 0;
+  in.gimbal[1] = 100;
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, feed(b, in, 10).twist_vx);
+  in.gimbal[1] = 700;
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, feed(b, in, 20).twist_vx);
+  in.gimbal[1] = -800;
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, -1.0f, feed(b, in, 30).twist_vx);
+}
+
+void test_calibration_reverse_and_invalid_input_rejection() {
+  ControllerBridge b;
+  config::RcInputCalibration calibration;
+  config::defaultRcInputCalibration(calibration);
+  calibration.channels[1].reversed = 1;
+  b.setCalibration(calibration);
+
+  ChannelPackInputs_t in = makeNeutral();
+  in.toggles[0] = 0;
+  in.gimbal[1] = 500;
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, -0.5f, feed(b, in, 10).twist_vx);
+
+  // The custom wire format clamps its logical gimbal range to +/-1000. Make
+  // the accepted calibration narrower, then prove a valid wire value outside
+  // that calibrated window is rejected rather than becoming full speed.
+  calibration.channels[1].min_raw = -500;
+  calibration.channels[1].max_raw = 500;
+  b.setCalibration(calibration);
+  in.gimbal[1] = 1000;
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, feed(b, in, 20).twist_vx);
+}
+
+void test_unipolar_calibration_maps_pot_range() {
+  ControllerBridge b;
+  config::RcInputCalibration calibration;
+  config::defaultRcInputCalibration(calibration);
+  config::RcChannelCalibration& speed = calibration.channels[4];
+  speed.min_raw = 200;
+  speed.center_raw = 200;
+  speed.max_raw = 800;
+  b.setCalibration(calibration);
+
+  ChannelPackInputs_t in = makeNeutral();
+  in.pot[0] = 200;
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, feed(b, in, 10).speed);
+  in.pot[0] = 500;
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, feed(b, in, 20).speed);
+  in.pot[0] = 800;
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, feed(b, in, 30).speed);
+}
+
 // --- input-profile detection & lock ----------------------------------------
 
 void test_custom_profile_locks_after_stable_frames() {
@@ -771,6 +832,9 @@ int main(int, char**) {
   RUN_TEST(test_deadband_kills_centre_jitter);
   RUN_TEST(test_invert_flips_axis);
   RUN_TEST(test_setbindings_remaps_source);
+  RUN_TEST(test_asymmetric_gimbal_calibration_maps_center_and_endpoints);
+  RUN_TEST(test_calibration_reverse_and_invalid_input_rejection);
+  RUN_TEST(test_unipolar_calibration_maps_pot_range);
   // Input-profile detection & lock.
   RUN_TEST(test_custom_profile_locks_after_stable_frames);
   RUN_TEST(test_custom_btn4_uses_four_buttons);

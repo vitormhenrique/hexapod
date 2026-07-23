@@ -348,6 +348,33 @@ void test_commit_rejected_when_staging_invalid() {
   TEST_ASSERT_EQUAL_INT(0, mem.writes());
 }
 
+void test_validate_rejects_invalid_staged_rc_calibration() {
+  FakeEeprom mem;
+  ConfigStore store(mem);
+  StorePersistence persist(store, true);
+  ConfigApi api(persist);
+
+  // RC calibration follows the gait block. The second byte of the first
+  // record is its channel type; 0xFF is outside RcChannelType.
+  const uint16_t rc_offset =
+      kLegacyConfigPayloadSizeV3 -
+      kNumFootSensors * (4 + 2 + 2 + 2 + 1) - 4;
+  const uint16_t type_offset = static_cast<uint16_t>(rc_offset + 1);
+  uint8_t req[4 + 1];
+  req[0] = static_cast<uint8_t>(type_offset & 0xFF);
+  req[1] = static_cast<uint8_t>(type_offset >> 8);
+  req[2] = 1;
+  req[3] = 0;
+  req[4] = 0xFF;
+  Resp write = call(api, cfgmsg::kSetBlock, req, sizeof(req));
+  TEST_ASSERT_TRUE(write.handled);
+  TEST_ASSERT_EQUAL_UINT8(0, write.flags);
+
+  Resp validate = call(api, cfgmsg::kValidate, nullptr, 0);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CfgResult::ValidationFailed),
+                          validate.buf[0]);
+}
+
 void test_commit_surfaces_store_failure() {
   FakeEeprom mem;
   ConfigStore store(mem);
@@ -401,6 +428,49 @@ void test_adopt_payload_seeds_shadow() {
 
   Resp s = call(api, cfgmsg::kGetSummary, nullptr, 0);
   TEST_ASSERT_EQUAL_STRING("Booted", reinterpret_cast<char*>(&s.buf[11]));
+}
+
+void test_adopt_v3_payload_migrates_staging_to_v4() {
+  FakeEeprom mem;
+  ConfigStore store(mem);
+  StorePersistence persist(store, true);
+  ConfigApi api(persist);
+
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  cfg.servos[2].trim_ticks = -31;
+  uint8_t v4[kConfigPayloadSize];
+  TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize,
+                           serializeRobotConfig(cfg, v4, sizeof(v4)));
+
+  constexpr uint16_t kRcOffset =
+      kLegacyConfigPayloadSizeV3 -
+      kNumFootSensors * (4 + 2 + 2 + 2 + 1) - 4;
+  uint8_t v3[kLegacyConfigPayloadSizeV3];
+  memcpy(v3, v4, kRcOffset);
+  memcpy(&v3[kRcOffset],
+         &v4[kRcOffset + kNumRcAnalogInputs * (1 + 1 + 2 + 2 + 2 + 1 + 1 +
+                                                  1 + 2 + 2)],
+         kLegacyConfigPayloadSizeV3 - kRcOffset);
+  v3[0] = static_cast<uint8_t>(kLegacySchemaVersion & 0xFF);
+  v3[1] = static_cast<uint8_t>(kLegacySchemaVersion >> 8);
+
+  TEST_ASSERT_TRUE(api.adoptPayload(v3, sizeof(v3)));
+  TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, api.config().schema_version);
+  TEST_ASSERT_EQUAL_INT16(-31, api.config().servos[2].trim_ticks);
+  TEST_ASSERT_TRUE(validateRcInputCalibration(api.config().rc_input));
+
+  // Staging was upgraded to v4, so its final byte remains readable through
+  // CFG_GET_BLOCK instead of retaining the shorter legacy payload length.
+  uint8_t req[4];
+  const uint16_t offset = kConfigPayloadSize - 1;
+  req[0] = static_cast<uint8_t>(offset & 0xFF);
+  req[1] = static_cast<uint8_t>(offset >> 8);
+  req[2] = 1;
+  req[3] = 0;
+  Resp block = call(api, cfgmsg::kGetBlock, req, sizeof(req));
+  TEST_ASSERT_EQUAL_UINT8(0, block.flags);
+  TEST_ASSERT_EQUAL_UINT16(1, block.buf[2] | (block.buf[3] << 8));
 }
 
 void test_non_config_msg_not_handled() {
@@ -494,9 +564,11 @@ int main(int, char**) {
   RUN_TEST(test_commit_persists_to_store);
   RUN_TEST(test_commit_rejected_when_volatile);
   RUN_TEST(test_commit_rejected_when_staging_invalid);
+  RUN_TEST(test_validate_rejects_invalid_staged_rc_calibration);
   RUN_TEST(test_commit_surfaces_store_failure);
   RUN_TEST(test_reset_defaults_restores_staging);
   RUN_TEST(test_adopt_payload_seeds_shadow);
+  RUN_TEST(test_adopt_v3_payload_migrates_staging_to_v4);
   RUN_TEST(test_non_config_msg_not_handled);
   RUN_TEST(test_revision_bumps_only_on_shadow_change);
   RUN_TEST(test_default_config_enables_sensor_polling_bit);

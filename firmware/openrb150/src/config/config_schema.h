@@ -41,6 +41,11 @@ constexpr uint8_t kNumLegs = 6;
 constexpr uint8_t kJointsPerLeg = 3;
 constexpr uint8_t kNumServos = kNumLegs * kJointsPerLeg;  // 18
 constexpr uint8_t kNumFootSensors = 6;                    // mux channels 0..5
+// Logical analog sources consumed by ControllerBridge: four gimbals, two
+// unipolar pots, and two encoder/slider sources. This stays independent of
+// physical CRSF channel packing so custom ChannelPack and TX16S profiles can
+// share one persisted calibration profile.
+constexpr uint8_t kNumRcAnalogInputs = 8;
 constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminator
 
 // Schema version for the serialized payload. Bump on any layout change so the
@@ -51,7 +56,11 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 //     slightly up, tibia perpendicular; see the URDF all-zero pose). The bump
 //     forces a stored v2 config carrying the old hidden +171/-512 trims to be
 //     rejected at boot so the robot falls back to these corrected defaults.
-constexpr uint16_t kSchemaVersion = 3;
+// v4: adds persisted logical RC input calibration. Valid v3 payloads are
+//     migrated in RAM to v4 defaults at boot so existing EEPROM geometry and
+//     servo calibration are retained until the next explicit config commit.
+constexpr uint16_t kSchemaVersion = 4;
+constexpr uint16_t kLegacySchemaVersion = 3;
 
 // MX-28: 4096 ticks/rev, center 180deg = tick 2048.
 constexpr uint16_t kServoCenterTick = 2048;
@@ -81,6 +90,16 @@ enum class GaitId : uint8_t {
   Ripple = 3,
   Wave = 4,
   Crawl = 5,
+};
+
+// The logical input's native representation before ControllerBridge maps it
+// to a BodyTwist/BodyPose command. Values deliberately mirror AxisSource
+// order without depending on input/controller_bridge.h: source 1..8 maps to
+// GimbalLX, GimbalLY, GimbalRX, GimbalRY, Pot1, Pot2, Enc1, Enc2.
+enum class RcChannelType : uint8_t {
+  CenteredAnalog = 0,
+  UnipolarAnalog = 1,
+  RelativeEncoder = 2,
 };
 
 // Feature default bits (mirrors AGENTS.md 1.3 feature flags; defaults conservative).
@@ -169,6 +188,32 @@ struct GaitDefaults {
   uint8_t gait = 0;              // GaitId value
 };
 
+// Calibration and conditioning parameters for one logical analog source.
+// `deadband_x255`, `expo_x255`, `filter_tau_ms`, and
+// `switch_debounce_ms` are persisted here for the next input-conditioning
+// layer. The current bridge consumes min/center/max and reversed only; this
+// preserves its existing binding-level deadband semantics until that layer
+// deliberately takes ownership.
+struct RcChannelCalibration {
+  uint8_t source = 0;  // logical source 1..kNumRcAnalogInputs
+  uint8_t type = static_cast<uint8_t>(RcChannelType::CenteredAnalog);
+  int16_t min_raw = 0;
+  int16_t center_raw = 0;
+  int16_t max_raw = 0;
+  uint8_t reversed = 0;
+  uint8_t deadband_x255 = 0;
+  uint8_t expo_x255 = 0;
+  uint16_t filter_tau_ms = 0;
+  uint16_t switch_debounce_ms = 0;
+};
+
+struct RcInputCalibration {
+  RcChannelCalibration channels[kNumRcAnalogInputs];
+};
+
+constexpr uint16_t kRcFilterTauMaxMs = 1000;
+constexpr uint16_t kRcSwitchDebounceMaxMs = 2000;
+
 // Per-foot contact sensor calibration (Robotic Finger Sensor v2). Disabled by
 // default until a calibration capture establishes a baseline (AGENTS.md 4.4).
 struct FootSensorCal {
@@ -190,6 +235,7 @@ struct RobotConfig {
   LegGeometry legs[kNumLegs];
   ServoConfig servos[kNumServos];
   GaitDefaults gait;
+  RcInputCalibration rc_input;
   FootSensorCal feet[kNumFootSensors];
   uint32_t feature_defaults = 0;
 };
@@ -213,7 +259,22 @@ constexpr uint16_t kConfigPayloadSize =
     + kNumLegs * (4 * 2)               // legs (4 x int16 each)
     + kNumServos * (1 + 1 + 1 + 1 + 2 + 2 + 2)  // servos (10 bytes each)
     + (2 + 2 + 2 + 1 + 1 + 1)          // gait (9 bytes)
+    + kNumRcAnalogInputs * (1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 2 + 2)
+                         // RC input calibration (15 bytes each)
     + kNumFootSensors * (4 + 2 + 2 + 2 + 1)     // feet (11 bytes each)
+    + 4;                               // feature_defaults
+
+  // v3 payload size before RC input calibration was added. Deserialization
+  // accepts this exact legacy layout and migrates it in RAM.
+  constexpr uint16_t kLegacyConfigPayloadSizeV3 =
+    2                                  // schema_version
+    + kRobotNameLen                    // robot_name
+    + 3 * 2                            // links (3 x uint16)
+    + (2 + 2 + 2)                      // body geometry
+    + kNumLegs * (4 * 2)               // legs
+    + kNumServos * (1 + 1 + 1 + 1 + 2 + 2 + 2)  // servos
+    + (2 + 2 + 2 + 1 + 1 + 1)          // gait
+    + kNumFootSensors * (4 + 2 + 2 + 2 + 1)     // feet
     + 4;                               // feature_defaults
 
 // ---------------------------------------------------------------------------
@@ -223,6 +284,14 @@ constexpr uint16_t kConfigPayloadSize =
 // Populate `cfg` with the compiled SAFE defaults (HexNav geometry, conservative
 // servo limits, contact sensing disabled).
 void defaultRobotConfig(RobotConfig& cfg);
+
+// Populate the safe calibration profile that reproduces the bridge's current
+// gimbal/pot/encoder normalization before an operator performs calibration.
+void defaultRcInputCalibration(RcInputCalibration& calibration);
+
+// Validate the logical RC source coverage, calibration ordering, and bounded
+// persisted conditioning fields independently of the rest of RobotConfig.
+bool validateRcInputCalibration(const RcInputCalibration& calibration);
 
 // Serialize `cfg` into `out` (capacity `max_len`) as a little-endian,
 // version-tagged payload. Returns the number of bytes written, or 0 if the

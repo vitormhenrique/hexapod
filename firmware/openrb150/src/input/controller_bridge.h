@@ -36,6 +36,7 @@
 
 #include <stdint.h>
 
+#include "../config/config_schema.h"
 #include "ChannelPack.h"  // vendored: single source of truth for the channel map
 
 namespace controller {
@@ -275,6 +276,15 @@ class ControllerBridge {
   // preserved; only the routing changes.
   void setBindings(const BindingConfig& cfg) { cfg_ = cfg; }
 
+  // Adopt a schema-validated logical input calibration profile. This is called
+  // only by rcTask, which owns the bridge, after a config revision hand-off.
+  // Invalid profiles are ignored so a malformed API/config hand-off cannot
+  // turn into arbitrary controller motion.
+  void setCalibration(const config::RcInputCalibration& calibration);
+  const config::RcInputCalibration& calibration() const {
+    return calibration_;
+  }
+
   // Decode one fresh CRSF channel frame (raw 11-bit ticks, 0-based: ch[0]=CH1)
   // captured at `now_ms`. `link_up` is the receiver link state (false => the
   // controller is not reachable). Returns the updated command snapshot.
@@ -320,6 +330,9 @@ class ControllerBridge {
   // Read helpers, normalising whatever source a binding points at.
   float readAxisBipolar(const AxisBinding& b) const;   // -> [-1, 1]
   float readAxisUnipolar(const AxisBinding& b) const;  // -> [0, 1]
+  const config::RcChannelCalibration* calibrationFor(AxisSource source) const;
+  bool readCalibratedBipolar(AxisSource source, int16_t raw, float& out) const;
+  bool readCalibratedUnipolar(AxisSource source, int16_t raw, float& out) const;
   bool readBool(BoolSource s) const;                   // current level
   uint8_t readTri(TriSource s) const;                  // 0=UP,1=CENTER,2=DOWN
 
@@ -329,6 +342,7 @@ class ControllerBridge {
   void enterFailsafe(uint32_t now_ms);
 
   BindingConfig cfg_;
+  config::RcInputCalibration calibration_;
   ControllerCommand cmd_;
   ChannelPackInputs_t raw_;
 

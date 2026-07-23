@@ -90,6 +90,20 @@ void test_default_gait_and_features() {
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     TEST_ASSERT_EQUAL_UINT8(0, cfg.feet[f].enabled);
   }
+  TEST_ASSERT_TRUE(validateRcInputCalibration(cfg.rc_input));
+  TEST_ASSERT_EQUAL_UINT8(1, cfg.rc_input.channels[0].source);
+  TEST_ASSERT_EQUAL_INT16(-1000, cfg.rc_input.channels[0].min_raw);
+  TEST_ASSERT_EQUAL_INT16(0, cfg.rc_input.channels[0].center_raw);
+  TEST_ASSERT_EQUAL_INT16(1000, cfg.rc_input.channels[0].max_raw);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RcChannelType::CenteredAnalog),
+      cfg.rc_input.channels[0].type);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RcChannelType::UnipolarAnalog),
+      cfg.rc_input.channels[4].type);
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(RcChannelType::RelativeEncoder),
+      cfg.rc_input.channels[6].type);
 }
 
 void test_serialize_size_matches_constant() {
@@ -124,6 +138,11 @@ void test_round_trip_preserves_fields() {
   cfg.feet[2].touch_thresh = 4200;
   cfg.feet[2].load_thresh = 5000;  // LOADED >= TOUCH
   cfg.feet[2].enabled = 1;
+  cfg.rc_input.channels[1].min_raw = -900;
+  cfg.rc_input.channels[1].center_raw = 25;
+  cfg.rc_input.channels[1].max_raw = 975;
+  cfg.rc_input.channels[1].reversed = 1;
+  cfg.rc_input.channels[1].filter_tau_ms = 60;
   cfg.feature_defaults = kFeatSensorPolling | kFeatPassivePoseStream;
 
   uint8_t buf[kConfigPayloadSize];
@@ -144,6 +163,11 @@ void test_round_trip_preserves_fields() {
   TEST_ASSERT_EQUAL_INT32(-123456, got.feet[2].pressure_baseline);
   TEST_ASSERT_EQUAL_UINT16(4200, got.feet[2].touch_thresh);
   TEST_ASSERT_EQUAL_UINT8(1, got.feet[2].enabled);
+  TEST_ASSERT_EQUAL_INT16(-900, got.rc_input.channels[1].min_raw);
+  TEST_ASSERT_EQUAL_INT16(25, got.rc_input.channels[1].center_raw);
+  TEST_ASSERT_EQUAL_INT16(975, got.rc_input.channels[1].max_raw);
+  TEST_ASSERT_EQUAL_UINT8(1, got.rc_input.channels[1].reversed);
+  TEST_ASSERT_EQUAL_UINT16(60, got.rc_input.channels[1].filter_tau_ms);
   TEST_ASSERT_EQUAL_UINT32(kFeatSensorPolling | kFeatPassivePoseStream,
                            got.feature_defaults);
   TEST_ASSERT_TRUE(validateRobotConfig(got));
@@ -167,6 +191,37 @@ void test_deserialize_rejects_bad_version() {
   buf[1] = 0xEE;
   RobotConfig got;
   TEST_ASSERT_FALSE(deserializeRobotConfig(buf, kConfigPayloadSize, got));
+}
+
+void test_deserialize_migrates_v3_payload_with_default_rc_calibration() {
+  RobotConfig current;
+  defaultRobotConfig(current);
+  current.servos[4].trim_ticks = -27;
+  current.gait.stride_len_mm = 71;
+
+  uint8_t v4[kConfigPayloadSize];
+  TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize,
+                           serializeRobotConfig(current, v4, sizeof(v4)));
+
+  constexpr uint16_t kRcOffset =
+      kLegacyConfigPayloadSizeV3 -
+      kNumFootSensors * (4 + 2 + 2 + 2 + 1) - 4;
+  uint8_t v3[kLegacyConfigPayloadSizeV3];
+  memcpy(v3, v4, kRcOffset);
+  memcpy(&v3[kRcOffset],
+         &v4[kRcOffset + kNumRcAnalogInputs * (1 + 1 + 2 + 2 + 2 + 1 + 1 +
+                                                  1 + 2 + 2)],
+         kLegacyConfigPayloadSizeV3 - kRcOffset);
+  v3[0] = static_cast<uint8_t>(kLegacySchemaVersion & 0xFF);
+  v3[1] = static_cast<uint8_t>(kLegacySchemaVersion >> 8);
+
+  RobotConfig migrated;
+  TEST_ASSERT_TRUE(deserializeRobotConfig(v3, sizeof(v3), migrated));
+  TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
+  TEST_ASSERT_EQUAL_INT16(-27, migrated.servos[4].trim_ticks);
+  TEST_ASSERT_EQUAL_UINT16(71, migrated.gait.stride_len_mm);
+  TEST_ASSERT_TRUE(validateRcInputCalibration(migrated.rc_input));
+  TEST_ASSERT_TRUE(validateRobotConfig(migrated));
 }
 
 void test_validate_rejects_duplicate_id() {
@@ -307,6 +362,31 @@ void test_validate_rejects_bad_foot_calibration() {
   TEST_ASSERT_TRUE(validateRobotConfig(cfg));
 }
 
+void test_validate_rejects_bad_rc_input_calibration() {
+  RobotConfig cfg;
+
+  defaultRobotConfig(cfg);
+  cfg.rc_input.channels[0].center_raw = cfg.rc_input.channels[0].min_raw;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.rc_input.channels[1].source = cfg.rc_input.channels[0].source;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.rc_input.channels[4].type =
+      static_cast<uint8_t>(RcChannelType::CenteredAnalog);
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.rc_input.channels[0].reversed = 2;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+
+  defaultRobotConfig(cfg);
+  cfg.rc_input.channels[0].filter_tau_ms = kRcFilterTauMaxMs + 1;
+  TEST_ASSERT_FALSE(validateRobotConfig(cfg));
+}
+
 // Cross-check: the serialized default-config bytes must match the host
 // reference byte-for-byte. The host generator (protocol/tests/gen_vectors.py)
 // emits frames.json["config"]["default_payload_crc"] over the same payload, and
@@ -320,7 +400,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(13664, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(2239, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {
@@ -334,6 +414,7 @@ int main(int, char**) {
   RUN_TEST(test_round_trip_preserves_fields);
   RUN_TEST(test_deserialize_rejects_bad_length);
   RUN_TEST(test_deserialize_rejects_bad_version);
+  RUN_TEST(test_deserialize_migrates_v3_payload_with_default_rc_calibration);
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
   RUN_TEST(test_validate_rejects_zero_home_radius);
@@ -341,6 +422,7 @@ int main(int, char**) {
   RUN_TEST(test_validate_rejects_missing_joint_slot);
   RUN_TEST(test_validate_rejects_unsafe_gait_and_features);
   RUN_TEST(test_validate_rejects_bad_foot_calibration);
+  RUN_TEST(test_validate_rejects_bad_rc_input_calibration);
   RUN_TEST(test_default_payload_crc_matches_host_vector);
   return UNITY_END();
 }

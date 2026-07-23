@@ -44,6 +44,28 @@ Notes:
   `±25°` rotation — `poselim::kMaxTransMm` / `kMaxRotRad`) so a stick command can
   never exceed what `SET_BODY_POSE` accepts over USB.
 
+### Logical RC Calibration
+
+The persisted robot configuration carries a calibration record for each
+logical analog source used by this bridge: `GimbalLX`, `GimbalLY`, `GimbalRX`,
+`GimbalRY`, `Pot1`, `Pot2`, `Enc1`, and `Enc2`. This is deliberately above the
+custom/Tx16S physical CRSF layouts: the two profiles decode their wire data to
+the same logical source before calibration, so changing transmitter profiles
+does not reinterpret a stored calibration.
+
+Current bridge behavior applies the calibrated minimum/center/maximum range
+and reverse flag. Centered controls use asymmetric normalisation around the
+stored center; values far outside the calibrated range are rejected to neutral
+rather than becoming a full-speed command. The compiled defaults reproduce the
+previous `[-1000, 0, 1000]` gimbal range and `[0, 1000]` pot range.
+
+The persisted deadband, expo, filter-tau, and switch-debounce fields are
+validated but not yet applied here. Their processing ownership is introduced by
+the RC input-conditioning task so the existing binding deadband is not silently
+stacked with a second filter or curve. Valid schema-v3 EEPROM payloads migrate
+in RAM to schema v4 with these safe default calibration records; an explicit
+config commit persists the migration.
+
 ### Pots & encoders (live shape parameters, all modes)
 
 These are read in **every** mode and continuously shape the gait, normalised to

@@ -23,6 +23,7 @@
 #endif
 #include "../input/controller_bridge.h"
 #include "../input/crsf_parser.h"
+#include "../input/rc_frame_snapshot.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
 #include "../protocol/controller_api.h"
@@ -132,6 +133,16 @@ RcDiagSnapshot g_rcDiag{};
 // the existing safety FSM / arbiter / telemetry plumbing unchanged.
 controller::ControllerBridge g_bridge;
 controller::ControllerCommand g_ctrlCmd;
+controller::RcFrameMailbox g_rcMailbox;
+controller::RcFrameSnapshot g_controlRcSnapshot;
+bool g_controlRcSnapshotValid = false;
+// ConfigApi is owned by apiTask, while ControllerBridge is owned by rcTask.
+// controlTask already consumes a validated, revisioned config snapshot; it
+// publishes this small calibration block to rcTask so the bridge never reads a
+// partially replaced RobotConfig directly.
+config::RcInputCalibration g_pendingRcCalibration;
+volatile uint32_t g_pendingRcCalibrationRevision = 0;
+volatile bool g_pendingRcCalibrationValid = false;
 
 volatile uint8_t g_commandSource = 0;       // safety::CommandSource value
 volatile bool g_motionAuthorized = false;   // a source may drive servos
@@ -140,7 +151,7 @@ volatile bool g_killActive = true;          // RC kill / host estop asserted
 // Only controlTask advances this adapter clock. It translates the FreeRTOS
 // scheduler timestamp into the portable ControllerTime contract without making
 // the future ControllerCore depend on FreeRTOS.
-controller::ControllerClock g_controlClock;
+controller::ControllerClock g_controlClock(period_ms::kControl);
 volatile uint8_t g_safetyState = static_cast<uint8_t>(safety::State::Boot);
 volatile uint8_t g_faultReason = 0;  // safety::FaultReason value
 volatile uint8_t g_lastFaultReason = 0;  // safety::FaultReason value
@@ -1160,6 +1171,11 @@ bool refreshControllerConfigSnapshot() {
     return false;
   }
   g_controllerConfigRevision = revision;
+  taskENTER_CRITICAL();
+  g_pendingRcCalibration = g_controllerConfig.robot.rc_input;
+  g_pendingRcCalibrationRevision = revision;
+  g_pendingRcCalibrationValid = true;
+  taskEXIT_CRITICAL();
   return true;
 }
 
@@ -1207,12 +1223,23 @@ void collectControllerState(uint32_t now_ms) {
 void collectControllerIntent(bool maintenance_held, bool host_disarm) {
   controller::ControllerIntent& intent = g_controllerIntent;
   intent = controller::ControllerIntent{};
-  intent.rc.command = g_ctrlCmd;
-  intent.rc.ever_seen = g_rcStatus.ever_seen;
-  intent.rc.kill = g_rcStatus.kill;
-  intent.rc.armed = g_rcStatus.armed;
-  intent.rc.failsafe = g_rcStatus.failsafe;
-  intent.rc.autonomy_enabled = g_rcStatus.autonomy;
+  controller::RcFrameSnapshot latest_rc;
+  taskENTER_CRITICAL();
+  const bool rc_snapshot_available = g_rcMailbox.copy(latest_rc);
+  taskEXIT_CRITICAL();
+  if (rc_snapshot_available) {
+    g_controlRcSnapshot = latest_rc;
+    g_controlRcSnapshotValid = true;
+  }
+  if (g_controlRcSnapshotValid) {
+    const controller::RcFrameSnapshot& rc = g_controlRcSnapshot;
+    intent.rc.command = rc.command;
+    intent.rc.ever_seen = rc.status.ever_seen;
+    intent.rc.kill = rc.status.kill;
+    intent.rc.armed = rc.status.armed;
+    intent.rc.failsafe = rc.status.failsafe;
+    intent.rc.autonomy_enabled = rc.status.autonomy;
+  }
   intent.motion = g_motionApi.intent();
   intent.maintenance.lock_held = maintenance_held;
   intent.maintenance.lock_token = g_maintApi.token();
@@ -2095,7 +2122,12 @@ void dxlTask(void*) {
 }
 
 void rcTask(void*) {
+  crsf::RcStatus rc_status;
+  crsf::initRcStatus(rc_status);
   crsf::initRcStatus(g_rcStatus);
+  taskENTER_CRITICAL();
+  g_rcMailbox.reset();
+  taskEXIT_CRITICAL();
   g_bridge.reset();
 #if defined(PIN_SERIAL3_RX)
   // Serial3 is the ExpressLRS CRSF receiver link; rcTask owns it exclusively.
@@ -2103,6 +2135,7 @@ void rcTask(void*) {
 #endif
   TickType_t next = xTaskGetTickCount();
   constexpr uint16_t kMaxBytesPerCycle = 128;
+  uint32_t applied_calibration_revision = 0xFFFFFFFFu;
   for (;;) {
     tick(watchdog::TaskId::Rc);
     const uint32_t now_ms =
@@ -2125,6 +2158,21 @@ void rcTask(void*) {
     // Trip failsafe if no fresh frame arrived within the timeout (or the link
     // has never been seen) -- forces a safe disarmed/estop hold.
     g_bridge.evaluateFailsafe(now_ms);
+    config::RcInputCalibration pending_calibration;
+    uint32_t pending_calibration_revision = 0;
+    bool calibration_pending = false;
+    taskENTER_CRITICAL();
+    calibration_pending = g_pendingRcCalibrationValid;
+    if (calibration_pending) {
+      pending_calibration = g_pendingRcCalibration;
+      pending_calibration_revision = g_pendingRcCalibrationRevision;
+    }
+    taskEXIT_CRITICAL();
+    if (calibration_pending &&
+        pending_calibration_revision != applied_calibration_revision) {
+      g_bridge.setCalibration(pending_calibration);
+      applied_calibration_revision = pending_calibration_revision;
+    }
     // Adopt a host-staged binding map before publishing this cycle's command so
     // a SET_BINDINGS takes effect immediately (rcTask is the sole writer of the
     // bridge; apiTask only stages).
@@ -2132,14 +2180,27 @@ void rcTask(void*) {
       g_bridge.setBindings(g_ctrlPendingBindings);
       g_ctrlPendingBindingsValid = false;
     }
-    // Publish the decoded command snapshot for controlTask and derive the
-    // legacy RcStatus the safety FSM / arbiter / telemetry consume.
-    g_ctrlCmd = g_bridge.command();
+    // Build one complete RC snapshot before publishing it. controlTask either
+    // copies this whole frame or retains its prior coherent frame for a cycle.
+    const controller::ControllerCommand command = g_bridge.command();
+    deriveRcStatus(command, frame, fresh, now_ms, rc_status);
+    controller::RcFrameSnapshot rc_snapshot;
+    rc_snapshot.command = command;
+    rc_snapshot.status = rc_status;
+    rc_snapshot.frame_sequence = g_crsfParser.framesDecoded();
+    rc_snapshot.published_ms = now_ms;
+    taskENTER_CRITICAL();
+    g_rcMailbox.publish(rc_snapshot);
+    taskEXIT_CRITICAL();
+
+    // Legacy telemetry and USB-controller views retain their existing latest
+    // snapshots. The control path above never reads these independently.
+    g_ctrlCmd = command;
+    g_rcStatus = rc_status;
     // Publish the raw inputs + active bindings for the controller USB API /
     // controller_state telemetry (apiTask is a reader only).
     g_ctrlRaw = g_bridge.rawInputs();
     g_ctrlBindings = g_bridge.bindings();
-    deriveRcStatus(g_ctrlCmd, frame, fresh, now_ms, g_rcStatus);
     // Publish the raw RC diagnostics snapshot (a8n). Raw ticks refresh only on a
     // fresh frame (so a dropout freezes the last-known sticks); the parser's
     // frame-health counters and link statistics are always current.
@@ -2155,9 +2216,9 @@ void rcTask(void*) {
     if (g_rcDiag.has_link_stats) {
       g_rcDiag.link_stats = g_crsfParser.linkStats();
     }
-    g_rcDiag.last_frame_ms = g_rcStatus.last_frame_ms;
-    g_rcDiag.ever_seen = g_rcStatus.ever_seen;
-    g_rcDiag.failsafe = g_rcStatus.failsafe;
+    g_rcDiag.last_frame_ms = rc_status.last_frame_ms;
+    g_rcDiag.ever_seen = rc_status.ever_seen;
+    g_rcDiag.failsafe = rc_status.failsafe;
     const TickType_t now_ticks = xTaskGetTickCount();
     if (static_cast<int32_t>(now_ticks - next) >=
         static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kRc))) {

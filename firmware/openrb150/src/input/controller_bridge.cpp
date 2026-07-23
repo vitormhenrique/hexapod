@@ -39,6 +39,16 @@ inline float gimbalUnit(int16_t g) {
   return clampf(static_cast<float>(g) / 1000.0f, -1.0f, 1.0f);
 }
 
+constexpr int16_t kCalibrationOutOfRangeTolerance = 64;
+
+bool rawWithinCalibrationWindow(int16_t raw,
+                                const config::RcChannelCalibration& c) {
+  return raw >= static_cast<int32_t>(c.min_raw) -
+                    kCalibrationOutOfRangeTolerance &&
+         raw <= static_cast<int32_t>(c.max_raw) +
+                    kCalibrationOutOfRangeTolerance;
+}
+
 // --- Conventional-CRSF normalisation (TX16S MK3 direct profile) ------------
 //
 // TX16S direct frames carry ordinary per-channel stick/knob/switch values that
@@ -153,7 +163,15 @@ BindingConfig defaultBindings() {
 
 ControllerBridge::ControllerBridge() {
   cfg_ = defaultBindings();
+  config::defaultRcInputCalibration(calibration_);
   reset();
+}
+
+void ControllerBridge::setCalibration(
+    const config::RcInputCalibration& calibration) {
+  if (config::validateRcInputCalibration(calibration)) {
+    calibration_ = calibration;
+  }
 }
 
 void ControllerBridge::reset() {
@@ -358,17 +376,29 @@ void ControllerBridge::updateTx16sDirectVirtualEncoders(
 
 float ControllerBridge::readAxisBipolar(const AxisBinding& b) const {
   float v = 0.0f;
+  bool valid = true;
   switch (b.source) {
-    case AxisSource::GimbalLX: v = gimbalUnit(raw_.gimbal[0]); break;
-    case AxisSource::GimbalLY: v = gimbalUnit(raw_.gimbal[1]); break;
-    case AxisSource::GimbalRX: v = gimbalUnit(raw_.gimbal[2]); break;
-    case AxisSource::GimbalRY: v = gimbalUnit(raw_.gimbal[3]); break;
-    case AxisSource::Pot1: v = potUnit(raw_.pot[0]) * 2.0f - 1.0f; break;
-    case AxisSource::Pot2: v = potUnit(raw_.pot[1]) * 2.0f - 1.0f; break;
+    case AxisSource::GimbalLX:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[0], v); break;
+    case AxisSource::GimbalLY:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[1], v); break;
+    case AxisSource::GimbalRX:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[2], v); break;
+    case AxisSource::GimbalRY:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[3], v); break;
+    case AxisSource::Pot1:
+      valid = readCalibratedUnipolar(b.source, raw_.pot[0], v);
+      v = v * 2.0f - 1.0f;
+      break;
+    case AxisSource::Pot2:
+      valid = readCalibratedUnipolar(b.source, raw_.pot[1], v);
+      v = v * 2.0f - 1.0f;
+      break;
     case AxisSource::Enc1: v = enc_accum_[0] * 2.0f - 1.0f; break;
     case AxisSource::Enc2: v = enc_accum_[1] * 2.0f - 1.0f; break;
     case AxisSource::None: return 0.0f;
   }
+  if (!valid) return 0.0f;
   v = applyDeadband(v, b.deadband);
   if (b.invert) v = -v;
   return clampf(v, -1.0f, 1.0f);
@@ -376,19 +406,87 @@ float ControllerBridge::readAxisBipolar(const AxisBinding& b) const {
 
 float ControllerBridge::readAxisUnipolar(const AxisBinding& b) const {
   float v = 0.0f;
+  bool valid = true;
   switch (b.source) {
-    case AxisSource::GimbalLX: v = (gimbalUnit(raw_.gimbal[0]) + 1.0f) * 0.5f; break;
-    case AxisSource::GimbalLY: v = (gimbalUnit(raw_.gimbal[1]) + 1.0f) * 0.5f; break;
-    case AxisSource::GimbalRX: v = (gimbalUnit(raw_.gimbal[2]) + 1.0f) * 0.5f; break;
-    case AxisSource::GimbalRY: v = (gimbalUnit(raw_.gimbal[3]) + 1.0f) * 0.5f; break;
-    case AxisSource::Pot1: v = potUnit(raw_.pot[0]); break;
-    case AxisSource::Pot2: v = potUnit(raw_.pot[1]); break;
+    case AxisSource::GimbalLX:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[0], v);
+      v = (v + 1.0f) * 0.5f;
+      break;
+    case AxisSource::GimbalLY:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[1], v);
+      v = (v + 1.0f) * 0.5f;
+      break;
+    case AxisSource::GimbalRX:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[2], v);
+      v = (v + 1.0f) * 0.5f;
+      break;
+    case AxisSource::GimbalRY:
+      valid = readCalibratedBipolar(b.source, raw_.gimbal[3], v);
+      v = (v + 1.0f) * 0.5f;
+      break;
+    case AxisSource::Pot1:
+      valid = readCalibratedUnipolar(b.source, raw_.pot[0], v); break;
+    case AxisSource::Pot2:
+      valid = readCalibratedUnipolar(b.source, raw_.pot[1], v); break;
     case AxisSource::Enc1: v = enc_accum_[0]; break;
     case AxisSource::Enc2: v = enc_accum_[1]; break;
     case AxisSource::None: return 0.0f;
   }
+  if (!valid) return 0.0f;
   if (b.invert) v = 1.0f - v;
   return clampf(v, 0.0f, 1.0f);
+}
+
+const config::RcChannelCalibration* ControllerBridge::calibrationFor(
+    AxisSource source) const {
+  const uint8_t wanted = static_cast<uint8_t>(source);
+  if (wanted == 0 || wanted > config::kNumRcAnalogInputs) return nullptr;
+  for (uint8_t index = 0; index < config::kNumRcAnalogInputs; ++index) {
+    const config::RcChannelCalibration& c = calibration_.channels[index];
+    if (c.source == wanted) return &c;
+  }
+  return nullptr;
+}
+
+bool ControllerBridge::readCalibratedBipolar(AxisSource source, int16_t raw,
+                                             float& out) const {
+  const config::RcChannelCalibration* c = calibrationFor(source);
+  if (c == nullptr ||
+      c->type != static_cast<uint8_t>(config::RcChannelType::CenteredAnalog) ||
+      !rawWithinCalibrationWindow(raw, *c)) {
+    return false;
+  }
+  const int16_t clamped_raw = raw < c->min_raw ? c->min_raw
+                           : raw > c->max_raw ? c->max_raw
+                                              : raw;
+  if (clamped_raw >= c->center_raw) {
+    out = static_cast<float>(clamped_raw - c->center_raw) /
+          static_cast<float>(c->max_raw - c->center_raw);
+  } else {
+    out = static_cast<float>(clamped_raw - c->center_raw) /
+          static_cast<float>(c->center_raw - c->min_raw);
+  }
+  if (c->reversed != 0) out = -out;
+  out = clampf(out, -1.0f, 1.0f);
+  return true;
+}
+
+bool ControllerBridge::readCalibratedUnipolar(AxisSource source, int16_t raw,
+                                              float& out) const {
+  const config::RcChannelCalibration* c = calibrationFor(source);
+  if (c == nullptr ||
+      c->type != static_cast<uint8_t>(config::RcChannelType::UnipolarAnalog) ||
+      !rawWithinCalibrationWindow(raw, *c)) {
+    return false;
+  }
+  const int16_t clamped_raw = raw < c->min_raw ? c->min_raw
+                           : raw > c->max_raw ? c->max_raw
+                                              : raw;
+  out = static_cast<float>(clamped_raw - c->min_raw) /
+        static_cast<float>(c->max_raw - c->min_raw);
+  if (c->reversed != 0) out = 1.0f - out;
+  out = clampf(out, 0.0f, 1.0f);
+  return true;
 }
 
 bool ControllerBridge::readBool(BoolSource s) const {

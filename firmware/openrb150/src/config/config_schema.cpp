@@ -139,6 +139,8 @@ void defaultRobotConfig(RobotConfig& cfg) {
   cfg.gait.speed_x255 = 128;  // half speed
   cfg.gait.gait = static_cast<uint8_t>(GaitId::Stand);
 
+  defaultRcInputCalibration(cfg.rc_input);
+
   // Foot sensors: disabled until calibrated.
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     cfg.feet[f] = FootSensorCal{};
@@ -193,6 +195,20 @@ uint16_t serializeRobotConfig(const RobotConfig& cfg, uint8_t* out,
   putU8(out, o, cfg.gait.speed_x255);
   putU8(out, o, cfg.gait.gait);
 
+  for (uint8_t index = 0; index < kNumRcAnalogInputs; ++index) {
+    const RcChannelCalibration& c = cfg.rc_input.channels[index];
+    putU8(out, o, c.source);
+    putU8(out, o, c.type);
+    putI16(out, o, c.min_raw);
+    putI16(out, o, c.center_raw);
+    putI16(out, o, c.max_raw);
+    putU8(out, o, c.reversed);
+    putU8(out, o, c.deadband_x255);
+    putU8(out, o, c.expo_x255);
+    putU16(out, o, c.filter_tau_ms);
+    putU16(out, o, c.switch_debounce_ms);
+  }
+
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     putI32(out, o, cfg.feet[f].pressure_baseline);
     putU16(out, o, cfg.feet[f].near_thresh);
@@ -207,12 +223,17 @@ uint16_t serializeRobotConfig(const RobotConfig& cfg, uint8_t* out,
 }
 
 bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
-  if (len != kConfigPayloadSize) return false;
+  if (in == nullptr || len < 2) return false;
   uint16_t o = 0;
 
   out = RobotConfig{};
   out.schema_version = getU16(in, o);
-  if (out.schema_version != kSchemaVersion) return false;
+  const bool legacy_v3 = out.schema_version == kLegacySchemaVersion &&
+                         len == kLegacyConfigPayloadSizeV3;
+  if (!legacy_v3 &&
+      (out.schema_version != kSchemaVersion || len != kConfigPayloadSize)) {
+    return false;
+  }
 
   memcpy(out.robot_name, &in[o], kRobotNameLen);
   out.robot_name[kRobotNameLen - 1] = '\0';  // ensure NUL termination
@@ -251,6 +272,24 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
   out.gait.speed_x255 = getU8(in, o);
   out.gait.gait = getU8(in, o);
 
+  if (legacy_v3) {
+    defaultRcInputCalibration(out.rc_input);
+  } else {
+    for (uint8_t index = 0; index < kNumRcAnalogInputs; ++index) {
+      RcChannelCalibration& c = out.rc_input.channels[index];
+      c.source = getU8(in, o);
+      c.type = getU8(in, o);
+      c.min_raw = getI16(in, o);
+      c.center_raw = getI16(in, o);
+      c.max_raw = getI16(in, o);
+      c.reversed = getU8(in, o);
+      c.deadband_x255 = getU8(in, o);
+      c.expo_x255 = getU8(in, o);
+      c.filter_tau_ms = getU16(in, o);
+      c.switch_debounce_ms = getU16(in, o);
+    }
+  }
+
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     out.feet[f].pressure_baseline = getI32(in, o);
     out.feet[f].near_thresh = getU16(in, o);
@@ -261,7 +300,70 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
 
   out.feature_defaults = getU32(in, o);
 
-  return o == len;
+  if (o != len) return false;
+  // The in-memory config always carries the active schema, including after a
+  // v3 EEPROM payload is migrated with default RC calibration values.
+  out.schema_version = kSchemaVersion;
+  return true;
+}
+
+void defaultRcInputCalibration(RcInputCalibration& calibration) {
+  calibration = RcInputCalibration{};
+  for (uint8_t index = 0; index < kNumRcAnalogInputs; ++index) {
+    RcChannelCalibration& c = calibration.channels[index];
+    c.source = static_cast<uint8_t>(index + 1u);
+    if (index < 4) {
+      c.type = static_cast<uint8_t>(RcChannelType::CenteredAnalog);
+      c.min_raw = -1000;
+      c.center_raw = 0;
+      c.max_raw = 1000;
+    } else if (index < 6) {
+      c.type = static_cast<uint8_t>(RcChannelType::UnipolarAnalog);
+      c.min_raw = 0;
+      c.center_raw = 0;
+      c.max_raw = 1000;
+    } else {
+      c.type = static_cast<uint8_t>(RcChannelType::RelativeEncoder);
+      c.min_raw = 0;
+      c.center_raw = 0;
+      c.max_raw = 2047;
+    }
+  }
+}
+
+bool validateRcInputCalibration(const RcInputCalibration& calibration) {
+  bool source_seen[kNumRcAnalogInputs] = {false};
+  for (uint8_t index = 0; index < kNumRcAnalogInputs; ++index) {
+    const RcChannelCalibration& c = calibration.channels[index];
+    if (c.source == 0 || c.source > kNumRcAnalogInputs) return false;
+    const uint8_t source_index = static_cast<uint8_t>(c.source - 1u);
+    if (source_seen[source_index]) return false;
+    source_seen[source_index] = true;
+
+    if (c.type > static_cast<uint8_t>(RcChannelType::RelativeEncoder) ||
+        c.reversed > 1 || c.deadband_x255 > 128 ||
+        c.filter_tau_ms > kRcFilterTauMaxMs ||
+        c.switch_debounce_ms > kRcSwitchDebounceMaxMs ||
+        c.min_raw >= c.max_raw || c.center_raw < c.min_raw ||
+        c.center_raw > c.max_raw) {
+      return false;
+    }
+
+    const RcChannelType type = static_cast<RcChannelType>(c.type);
+    if (source_index < 4 && type != RcChannelType::CenteredAnalog) return false;
+    if (source_index >= 4 && source_index < 6 &&
+        type != RcChannelType::UnipolarAnalog) {
+      return false;
+    }
+    if (source_index >= 6 && type != RcChannelType::RelativeEncoder) {
+      return false;
+    }
+    if (type == RcChannelType::CenteredAnalog &&
+        (c.center_raw == c.min_raw || c.center_raw == c.max_raw)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 bool validateRobotConfig(const RobotConfig& cfg) {
@@ -310,6 +412,7 @@ bool validateRobotConfig(const RobotConfig& cfg) {
   }
   if (cfg.gait.stride_len_mm > kMaxGaitStrideMm) return false;
   if (cfg.gait.step_height_mm > kMaxGaitStepMm) return false;
+  if (!validateRcInputCalibration(cfg.rc_input)) return false;
 
   // feature_defaults may only request known features; an unknown bit means the
   // payload was produced by a newer/garbage schema and must not be trusted.

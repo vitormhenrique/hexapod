@@ -21,11 +21,13 @@ ControllerTime ControllerClock::sampleMilliseconds(uint32_t now_ms) {
   const uint32_t elapsed_ms = now_ms - last_now_ms_;
   last_now_ms_ = now_ms;
   if (elapsed_ms > max_elapsed_ms_) {
+    time.overrun = true;
     return time;
   }
 
   time.dt_ms = elapsed_ms;
   time.valid = true;
+  time.overrun = nominal_period_ms_ != 0 && elapsed_ms > nominal_period_ms_;
   return time;
 }
 

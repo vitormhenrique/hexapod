@@ -1347,7 +1347,13 @@ def test_decode_robot_config_golden_fields():
     assert cfg.gait.gait == CFG["gait"]["gait"]
     assert len(cfg.servos) == cfgmod.NUM_SERVOS
     assert len(cfg.legs) == cfgmod.NUM_LEGS
+    assert len(cfg.rc_input.channels) == cfgmod.NUM_RC_ANALOG_INPUTS
     assert len(cfg.feet) == cfgmod.NUM_FOOT_SENSORS
+    assert cfg.rc_input.channels[0].source == 1
+    assert cfg.rc_input.channels[0].min_raw == -1000
+    assert cfg.rc_input.channels[0].center_raw == 0
+    assert cfg.rc_input.channels[0].max_raw == 1000
+    assert cfg.rc_input.channels[4].type == cfgmod.RC_UNIPOLAR_ANALOG
     for want in CFG["servos"]:
         s = cfg.servos[want["index"]]
         assert s.id == want["id"]
@@ -1391,6 +1397,10 @@ def test_calibration_config_validation_matches_firmware_rules():
     invalid_sensor.feet[0].touch_thresh = 300
     invalid_sensor.feet[0].load_thresh = 200
     assert "load threshold" in "\n".join(cfgmod.validate_robot_config(invalid_sensor))
+
+    invalid_rc = copy.deepcopy(config)
+    invalid_rc.rc_input.channels[0].center_raw = invalid_rc.rc_input.channels[0].min_raw
+    assert "centered range" in "\n".join(cfgmod.validate_robot_config(invalid_rc))
 
 
 def test_decode_robot_config_rejects_bad_length_and_schema():

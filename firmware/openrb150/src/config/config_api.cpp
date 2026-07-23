@@ -39,8 +39,11 @@ bool ConfigApi::adoptPayload(const uint8_t* payload, uint16_t len) {
   if (!deserializeRobotConfig(payload, len, tmp)) return false;
   if (!validateRobotConfig(tmp)) return false;
   shadow_ = tmp;
-  memcpy(staging_, payload, len);
-  staging_len_ = len;
+  // A valid v3 EEPROM payload is migrated by deserializeRobotConfig() into
+  // the active v4 shape. Re-serialize it so future CFG_GET_BLOCK/COMMIT
+  // operations always use the current schema and include RC calibration.
+  staging_len_ = serializeRobotConfig(shadow_, staging_, sizeof(staging_));
+  if (staging_len_ != kConfigPayloadSize) return false;
   ++shadow_rev_;  // known-good config changed (lmt.7)
   return true;
 }
