@@ -32,10 +32,12 @@ ROBOT_NAME_LEN = 16  # incl. NUL terminator
 # v3: default joint trims are zero -- servo center (2048/180 deg) is the
 # mechanical home pose per the URDF all-zero model. The bump invalidates v2
 # payloads that carried the old hidden +171/-512 posture trims.
-# v4 adds logical RC calibration. Firmware migrates valid v3 payloads in RAM
-# using the compiled default calibration profile until an explicit commit.
-SCHEMA_VERSION = 4
-LEGACY_SCHEMA_VERSION = 3
+# v4 adds logical RC calibration.
+# v5 adds central body-command limits. Firmware migrates valid v3/v4 payloads
+# in RAM using safe defaults until an explicit commit.
+SCHEMA_VERSION = 5
+LEGACY_SCHEMA_VERSION_V4 = 4
+LEGACY_SCHEMA_VERSION_V3 = 3
 
 SERVO_CENTER_TICK = 2048
 SERVO_MAX_TICK = 4095
@@ -61,9 +63,10 @@ CONFIG_PAYLOAD_SIZE = (
     + (2 + 2 + 2 + 1 + 1 + 1)  # gait (9 bytes)
     + NUM_RC_ANALOG_INPUTS * (1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 2 + 2)
     # logical RC calibration (15 bytes each)
+    + 14 * 2  # body-command limits (14 x uint16)
     + NUM_FOOT_SENSORS * (4 + 2 + 2 + 2 + 1)  # feet (11 bytes each)
     + 4  # feature_defaults
-)  # == 457
+)  # == 485
 
 LEGACY_CONFIG_PAYLOAD_SIZE_V3 = (
     2
@@ -77,11 +80,21 @@ LEGACY_CONFIG_PAYLOAD_SIZE_V3 = (
     + 4
 )
 
+LEGACY_CONFIG_PAYLOAD_SIZE_V4 = (
+    LEGACY_CONFIG_PAYLOAD_SIZE_V3
+    + NUM_RC_ANALOG_INPUTS * (1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 2 + 2)
+)
+
 RC_CENTERED_ANALOG = 0
 RC_UNIPOLAR_ANALOG = 1
 RC_RELATIVE_ENCODER = 2
 RC_FILTER_TAU_MAX_MS = 1000
 RC_SWITCH_DEBOUNCE_MAX_MS = 2000
+BODY_COMMAND_MAX_SCALE_MILLI = 1000
+BODY_COMMAND_MAX_ACCEL_MILLI_PER_S = 5000
+BODY_HEIGHT_RATE_MAX_MM_PER_S = 200
+BODY_POSE_TRANSLATION_RATE_MAX_MM_PER_S = 200
+BODY_POSE_ROTATION_RATE_MAX_MILLIRAD_PER_S = 2000
 
 # Gait ids (mirror config::GaitId).
 GAIT_NAMES = {0: "stand", 1: "sit", 2: "tripod", 3: "ripple", 4: "wave", 5: "crawl"}
@@ -171,6 +184,24 @@ class RcInputCalibration:
 
 
 @dataclass
+class BodyCommandLimits:
+    max_forward_milli: int = 1000
+    max_reverse_milli: int = 1000
+    max_lateral_milli: int = 1000
+    max_yaw_milli: int = 1000
+    forward_accel_milli_per_s: int = 1200
+    forward_decel_milli_per_s: int = 1800
+    lateral_accel_milli_per_s: int = 1000
+    lateral_decel_milli_per_s: int = 1500
+    yaw_accel_milli_per_s: int = 1500
+    yaw_decel_milli_per_s: int = 2000
+    height_rise_mm_per_s: int = 20
+    height_lower_mm_per_s: int = 30
+    pose_translation_rate_mm_per_s: int = 60
+    pose_rotation_rate_millirad_per_s: int = 500
+
+
+@dataclass
 class FootSensorCal:
     pressure_baseline: int = 0
     near_thresh: int = 0
@@ -191,6 +222,7 @@ class RobotConfig:
     rc_input: RcInputCalibration = field(
         default_factory=lambda: default_rc_input_calibration()
     )
+    body_command: BodyCommandLimits = field(default_factory=BodyCommandLimits)
     feet: list[FootSensorCal] = field(default_factory=list)
     feature_defaults: int = 0
 
@@ -225,7 +257,11 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     Raises :class:`ConfigDecodeError` if the length or schema version does not
     match, mirroring ``deserializeRobotConfig`` returning false.
     """
-    if len(payload) not in (CONFIG_PAYLOAD_SIZE, LEGACY_CONFIG_PAYLOAD_SIZE_V3):
+    if len(payload) not in (
+        CONFIG_PAYLOAD_SIZE,
+        LEGACY_CONFIG_PAYLOAD_SIZE_V4,
+        LEGACY_CONFIG_PAYLOAD_SIZE_V3,
+    ):
         raise ConfigDecodeError(
             "config payload is "
             f"{len(payload)} bytes, expected {CONFIG_PAYLOAD_SIZE}"
@@ -235,10 +271,14 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     schema_version = struct.unpack_from("<H", payload, o)[0]
     o += 2
     legacy_v3 = (
-        schema_version == LEGACY_SCHEMA_VERSION
+        schema_version == LEGACY_SCHEMA_VERSION_V3
         and len(payload) == LEGACY_CONFIG_PAYLOAD_SIZE_V3
     )
-    if not legacy_v3 and (
+    legacy_v4 = (
+        schema_version == LEGACY_SCHEMA_VERSION_V4
+        and len(payload) == LEGACY_CONFIG_PAYLOAD_SIZE_V4
+    )
+    if not legacy_v3 and not legacy_v4 and (
         schema_version != SCHEMA_VERSION or len(payload) != CONFIG_PAYLOAD_SIZE
     ):
         raise ConfigDecodeError(
@@ -296,6 +336,12 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
             o += 15
         rc_input = RcInputCalibration(channels)
 
+    if legacy_v3 or legacy_v4:
+        body_command = BodyCommandLimits()
+    else:
+        body_command = BodyCommandLimits(*struct.unpack_from("<" + "H" * 14, payload, o))
+        o += 28
+
     feet: list[FootSensorCal] = []
     for _ in range(NUM_FOOT_SENSORS):
         baseline, near, touch, load, enabled = struct.unpack_from("<iHHHB", payload, o)
@@ -306,7 +352,7 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     o += 4
 
     return RobotConfig(
-        schema_version=SCHEMA_VERSION if legacy_v3 else schema_version,
+        schema_version=SCHEMA_VERSION if (legacy_v3 or legacy_v4) else schema_version,
         robot_name=robot_name,
         links=links,
         geometry=geometry,
@@ -314,6 +360,7 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
         servos=servos,
         gait=gait_defaults,
         rc_input=rc_input,
+        body_command=body_command,
         feet=feet,
         feature_defaults=feature_defaults,
     )
@@ -383,6 +430,24 @@ def encode_robot_config(cfg: RobotConfig) -> bytes:
             channel.filter_tau_ms,
             channel.switch_debounce_ms,
         )
+    body = cfg.body_command
+    out += struct.pack(
+        "<" + "H" * 14,
+        body.max_forward_milli,
+        body.max_reverse_milli,
+        body.max_lateral_milli,
+        body.max_yaw_milli,
+        body.forward_accel_milli_per_s,
+        body.forward_decel_milli_per_s,
+        body.lateral_accel_milli_per_s,
+        body.lateral_decel_milli_per_s,
+        body.yaw_accel_milli_per_s,
+        body.yaw_decel_milli_per_s,
+        body.height_rise_mm_per_s,
+        body.height_lower_mm_per_s,
+        body.pose_translation_rate_mm_per_s,
+        body.pose_rotation_rate_millirad_per_s,
+    )
     for foot in cfg.feet:
         out += struct.pack(
             "<iHHHB",
@@ -451,6 +516,7 @@ def default_robot_config() -> RobotConfig:
         gait=0,
     )
     cfg.rc_input = default_rc_input_calibration()
+    cfg.body_command = BodyCommandLimits()
     cfg.feet = [FootSensorCal() for _ in range(NUM_FOOT_SENSORS)]
     # Only sensor polling defaults on so present boards stream raw data; all
     # richer/safety features stay off until requested (mirrors the firmware
@@ -466,12 +532,18 @@ def default_rc_input_calibration() -> RcInputCalibration:
         if index < 4:
             channel_type = RC_CENTERED_ANALOG
             minimum, center, maximum = -1000, 0, 1000
+            deadband = 13
+            filter_tau_ms = 60
         elif index < 6:
             channel_type = RC_UNIPOLAR_ANALOG
             minimum, center, maximum = 0, 0, 1000
+            deadband = 0
+            filter_tau_ms = 120
         else:
             channel_type = RC_RELATIVE_ENCODER
             minimum, center, maximum = 0, 0, 2047
+            deadband = 0
+            filter_tau_ms = 0
         channels.append(
             RcChannelCalibration(
                 source=index + 1,
@@ -479,6 +551,8 @@ def default_rc_input_calibration() -> RcInputCalibration:
                 min_raw=minimum,
                 center_raw=center,
                 max_raw=maximum,
+                deadband_x255=deadband,
+                filter_tau_ms=filter_tau_ms,
             )
         )
     return RcInputCalibration(channels)
@@ -613,6 +687,36 @@ def validate_robot_config(config: RobotConfig) -> list[str]:
             )
     if sources != set(range(1, NUM_RC_ANALOG_INPUTS + 1)):
         errors.append("RC calibration must cover each logical source exactly once")
+
+    body = config.body_command
+    for name, value in (
+        ("max forward", body.max_forward_milli),
+        ("max reverse", body.max_reverse_milli),
+        ("max lateral", body.max_lateral_milli),
+        ("max yaw", body.max_yaw_milli),
+    ):
+        if not 1 <= value <= BODY_COMMAND_MAX_SCALE_MILLI:
+            errors.append(f"{name} must be within 1..{BODY_COMMAND_MAX_SCALE_MILLI}")
+    for name, value in (
+        ("forward acceleration", body.forward_accel_milli_per_s),
+        ("forward deceleration", body.forward_decel_milli_per_s),
+        ("lateral acceleration", body.lateral_accel_milli_per_s),
+        ("lateral deceleration", body.lateral_decel_milli_per_s),
+        ("yaw acceleration", body.yaw_accel_milli_per_s),
+        ("yaw deceleration", body.yaw_decel_milli_per_s),
+    ):
+        if not 1 <= value <= BODY_COMMAND_MAX_ACCEL_MILLI_PER_S:
+            errors.append(
+                f"{name} must be within 1..{BODY_COMMAND_MAX_ACCEL_MILLI_PER_S}"
+            )
+    if not 1 <= body.height_rise_mm_per_s <= BODY_HEIGHT_RATE_MAX_MM_PER_S:
+        errors.append("height rise rate is outside the safe range")
+    if not 1 <= body.height_lower_mm_per_s <= BODY_HEIGHT_RATE_MAX_MM_PER_S:
+        errors.append("height lower rate is outside the safe range")
+    if not 1 <= body.pose_translation_rate_mm_per_s <= BODY_POSE_TRANSLATION_RATE_MAX_MM_PER_S:
+        errors.append("pose translation rate is outside the safe range")
+    if not 1 <= body.pose_rotation_rate_millirad_per_s <= BODY_POSE_ROTATION_RATE_MAX_MILLIRAD_PER_S:
+        errors.append("pose rotation rate is outside the safe range")
 
     if len(config.servos) != NUM_SERVOS:
         errors.append(f"expected {NUM_SERVOS} servo calibration records")

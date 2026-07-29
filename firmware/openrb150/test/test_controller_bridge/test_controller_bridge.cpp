@@ -104,21 +104,23 @@ void test_walk_mode_twist_from_default_bindings() {
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_roll);
 }
 
-void test_translate_body_mode_planted_feet() {
+void test_translate_body_mode_pose_overlay_keeps_walking() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
   in.toggles[0] = 1;     // SwE CENTER -> TranslateBody
   in.gimbal[3] = 1000;   // RY -> body_x
   in.gimbal[2] = -1000;  // RX -> body_y
-  in.gimbal[1] = 500;    // LY -> body_z
+  in.gimbal[1] = 500;    // LY -> walk_forward (left stick keeps walking)
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::TranslateBody),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_FLOAT_WITHIN(1.0f, poselim::kMaxTransMm, c.pose_x_mm);
   TEST_ASSERT_FLOAT_WITHIN(1.0f, -poselim::kMaxTransMm, c.pose_y_mm);
-  TEST_ASSERT_FLOAT_WITHIN(2.0f, poselim::kMaxTransMm * 0.5f, c.pose_z_mm);
-  // Feet planted: no twist while shifting the core.
-  TEST_ASSERT_EQUAL_FLOAT(0.0f, c.twist_vx);
+  // body_z is unbound by default (height lives on the pot).
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_z_mm);
+  // Left gimbal still walks while the body shifts; right stick no longer
+  // strafes in this mode.
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, 0.5f, c.twist_vx);
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.twist_vy);
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.twist_wz);
 }
@@ -129,14 +131,15 @@ void test_rotate_body_mode_clamped_to_envelope() {
   in.toggles[0] = 2;    // SwE DOWN -> RotateBody
   in.gimbal[2] = 1000;  // RX -> roll
   in.gimbal[3] = 1000;  // RY -> pitch
-  in.gimbal[0] = 1000;  // LX -> yaw
+  in.gimbal[0] = 1000;  // LX -> walk_yaw (left stick keeps steering)
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::RotateBody),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_FLOAT_WITHIN(0.01f, poselim::kMaxRotRad, c.pose_roll);
   TEST_ASSERT_FLOAT_WITHIN(0.01f, poselim::kMaxRotRad, c.pose_pitch);
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, poselim::kMaxRotRad, c.pose_yaw);
-  TEST_ASSERT_EQUAL_FLOAT(0.0f, c.twist_wz);
+  // body_yaw is unbound by default; LX stays walking yaw in every mode.
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_yaw);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_wz);
 }
 
 void test_gait_index_from_select_toggle() {
@@ -145,9 +148,38 @@ void test_gait_index_from_select_toggle() {
   in.toggles[1] = 0;
   TEST_ASSERT_EQUAL_UINT(0, feed(b, in, 10).gait_index);
   in.toggles[1] = 1;
-  TEST_ASSERT_EQUAL_UINT(1, feed(b, in, 20).gait_index);
+  TEST_ASSERT_EQUAL_UINT(0, feed(b, in, 20).gait_index);
+  TEST_ASSERT_EQUAL_UINT(1, feed(b, in, 60).gait_index);
   in.toggles[1] = 2;
-  TEST_ASSERT_EQUAL_UINT(2, feed(b, in, 30).gait_index);
+  TEST_ASSERT_EQUAL_UINT(1, feed(b, in, 70).gait_index);
+  TEST_ASSERT_EQUAL_UINT(2, feed(b, in, 110).gait_index);
+}
+
+void test_gait_selection_is_latched_outside_walk_mode() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.toggles[0] = 0;  // Walk
+  in.toggles[1] = 2;  // Tripod
+  feed(b, in, 10);
+  const ControllerCommand& walking = feed(b, in, 60);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
+                         static_cast<uint8_t>(walking.mode));
+  TEST_ASSERT_EQUAL_UINT(2, walking.gait_index);
+
+  in.toggles[0] = 1;  // TranslateBody
+  in.toggles[1] = 0;  // changing gait switch must not alter the latch
+  feed(b, in, 70);
+  const ControllerCommand& translating = feed(b, in, 120);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::TranslateBody),
+                         static_cast<uint8_t>(translating.mode));
+  TEST_ASSERT_EQUAL_UINT(2, translating.gait_index);
+
+  in.toggles[0] = 0;  // Return to Walk: current Wave selection now applies.
+  feed(b, in, 130);
+  const ControllerCommand& resumed = feed(b, in, 180);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
+                         static_cast<uint8_t>(resumed.mode));
+  TEST_ASSERT_EQUAL_UINT(0, resumed.gait_index);
 }
 
 // --- safety ----------------------------------------------------------------
@@ -394,6 +426,7 @@ void test_asymmetric_gimbal_calibration_maps_center_and_endpoints() {
   forward.min_raw = -800;
   forward.center_raw = 100;
   forward.max_raw = 700;
+  forward.filter_tau_ms = 0;
   b.setCalibration(calibration);
 
   ChannelPackInputs_t in = makeNeutral();
@@ -411,6 +444,7 @@ void test_calibration_reverse_and_invalid_input_rejection() {
   config::RcInputCalibration calibration;
   config::defaultRcInputCalibration(calibration);
   calibration.channels[1].reversed = 1;
+  calibration.channels[1].filter_tau_ms = 0;
   b.setCalibration(calibration);
 
   ChannelPackInputs_t in = makeNeutral();
@@ -436,6 +470,7 @@ void test_unipolar_calibration_maps_pot_range() {
   speed.min_raw = 200;
   speed.center_raw = 200;
   speed.max_raw = 800;
+  speed.filter_tau_ms = 0;
   b.setCalibration(calibration);
 
   ChannelPackInputs_t in = makeNeutral();
@@ -445,6 +480,31 @@ void test_unipolar_calibration_maps_pot_range() {
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.5f, feed(b, in, 20).speed);
   in.pot[0] = 800;
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, feed(b, in, 30).speed);
+}
+
+void test_default_ema_smooths_a_stick_step_after_initial_seed() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.toggles[0] = 0;
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, feed(b, in, 10).twist_vx);
+
+  in.gimbal[1] = 1000;
+  const ControllerCommand& stepped = feed(b, in, 20);
+  TEST_ASSERT_TRUE(stepped.twist_vx > 0.0f);
+  TEST_ASSERT_TRUE(stepped.twist_vx < 0.2f);
+}
+
+void test_centered_noise_remains_zero_after_conditioning() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.toggles[0] = 0;
+  feed(b, in, 10);
+  const int16_t noise[] = {20, -30, 35, -40, 10, -15, 25, -20};
+  for (uint8_t index = 0; index < sizeof(noise) / sizeof(noise[0]); ++index) {
+    in.gimbal[1] = noise[index];
+    const ControllerCommand& command = feed(b, in, 20 + index * 10);
+    TEST_ASSERT_EQUAL_FLOAT(0.0f, command.twist_vx);
+  }
 }
 
 // --- input-profile detection & lock ----------------------------------------
@@ -811,9 +871,10 @@ void tearDown() {}
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_walk_mode_twist_from_default_bindings);
-  RUN_TEST(test_translate_body_mode_planted_feet);
+  RUN_TEST(test_translate_body_mode_pose_overlay_keeps_walking);
   RUN_TEST(test_rotate_body_mode_clamped_to_envelope);
   RUN_TEST(test_gait_index_from_select_toggle);
+  RUN_TEST(test_gait_selection_is_latched_outside_walk_mode);
   RUN_TEST(test_arm_switch_requires_no_kill);
   RUN_TEST(test_arm_switch_uses_guarded_pot_channel_band);
   RUN_TEST(test_kill_switch_forces_estop_and_disarm);
@@ -835,6 +896,8 @@ int main(int, char**) {
   RUN_TEST(test_asymmetric_gimbal_calibration_maps_center_and_endpoints);
   RUN_TEST(test_calibration_reverse_and_invalid_input_rejection);
   RUN_TEST(test_unipolar_calibration_maps_pot_range);
+  RUN_TEST(test_default_ema_smooths_a_stick_step_after_initial_seed);
+  RUN_TEST(test_centered_noise_remains_zero_after_conditioning);
   // Input-profile detection & lock.
   RUN_TEST(test_custom_profile_locks_after_stable_frames);
   RUN_TEST(test_custom_btn4_uses_four_buttons);

@@ -78,6 +78,13 @@ class BodyKinematics {
   IkResult solveBodyLimited(uint8_t leg, float bx, float by, float bz,
                             bool& reach_limited) const;
 
+  // Return the largest scale in [0,1] that keeps the segment from a known-safe
+  // body-frame anchor to the requested target inside the leg reach margin.
+  // Scaling a gait stroke along this segment preserves its intended direction.
+  float bodyTargetPathScale(uint8_t leg, float anchor_bx, float anchor_by,
+                            float anchor_bz, float target_bx, float target_by,
+                            float target_bz) const;
+
   // Full chain with body pose: a world-fixed foot (neutral body frame) under a
   // body pose -> moved body frame -> coxa frame -> leg IK.
   IkResult solveBodyPose(uint8_t leg, const BodyPose& pose, float wx, float wy,

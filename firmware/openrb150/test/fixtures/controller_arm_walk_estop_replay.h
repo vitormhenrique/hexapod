@@ -66,7 +66,7 @@ inline const Fixture& armWalkEstop() {
     Fixture out;
     out.header.format_version = kFormatVersion;
     out.header.time_unit = TimeUnit::Milliseconds;
-    out.header.frame_count = 9;
+    out.header.frame_count = 11;
 
     ControllerConfigSnapshot config_snapshot;
     config::defaultRobotConfig(config_snapshot.robot);
@@ -115,16 +115,30 @@ inline const Fixture& armWalkEstop() {
     out.frames[6].expected = expected(safety::State::RcManual,
                                       safety::CommandSource::Rc, true,
                                       true, true, config::kNumServos,
+                                      false, false, false);
+    out.frames[7].intent.rc.armed = true;
+    out.frames[7].intent.rc.command.gait_index = 1;
+    out.frames[7].intent.rc.command.twist_vx = 0.65f;
+    out.frames[7].expected = expected(safety::State::RcManual,
+                                      safety::CommandSource::Rc, true,
+                                      true, true, config::kNumServos,
+                                      false, false, false);
+    out.frames[8].intent.rc.armed = true;
+    out.frames[8].intent.rc.command.gait_index = 1;
+    out.frames[8].intent.rc.command.twist_vx = 0.65f;
+    out.frames[8].expected = expected(safety::State::RcManual,
+                                      safety::CommandSource::Rc, true,
+                                      true, true, config::kNumServos,
                                       false, false, true);
-    out.frames[7].intent.rc.armed = false;
-    out.frames[7].expected = expected(safety::State::Disarmed,
+    out.frames[9].intent.rc.armed = false;
+    out.frames[9].expected = expected(safety::State::Disarmed,
                                       safety::CommandSource::None, false,
                                       false, false, 0, false, true);
-    out.frames[8].intent.host_estop = true;
-    out.frames[8].expected = expected(safety::State::Estop,
+    out.frames[10].intent.host_estop = true;
+    out.frames[10].expected = expected(safety::State::Estop,
                                       safety::CommandSource::None, false,
                                       false, false, 0);
-    out.frames[8].expected.fault_reason = safety::FaultReason::HostEstop;
+    out.frames[10].expected.fault_reason = safety::FaultReason::HostEstop;
     return out;
   }();
   return fixture;

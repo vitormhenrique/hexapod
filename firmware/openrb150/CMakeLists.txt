@@ -15,6 +15,7 @@ set(HEXAPOD_EMBEDDED_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/src/board/board.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/config/eeprom_24lc32.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/dxl/dxl_bus.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/sensors/bno085.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sensors/finger_sensor.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/src/sensors/i2c_bus.cpp")
 

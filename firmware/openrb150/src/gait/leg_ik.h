@@ -69,6 +69,11 @@ class LegIk {
   // foot stays on its ground plane. Returns true if the target was modified.
   bool clampToReach(float& x_mm, float& y_mm, float& z_mm) const;
 
+  // True when a target is already inside the same conservative annulus used
+  // by clampToReach(). This lets the body-level pipeline shorten a Cartesian
+  // stroke along its original path instead of radially redirecting it.
+  bool withinReachMargin(float x_mm, float y_mm, float z_mm) const;
+
   // Raw planar rest angles at the home foot (radians), exposed for tests/FK.
   float femurRest() const { return femur_rest_; }
   float tibiaRest() const { return tibia_rest_; }

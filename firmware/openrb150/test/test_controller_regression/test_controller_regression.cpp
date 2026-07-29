@@ -127,7 +127,9 @@ void test_identical_sequence_has_stable_semantic_outputs() {
   first.intent().rc.command.twist_vx = 0.65f;
   second.intent().rc.command.gait_index = 1;
   second.intent().rc.command.twist_vx = 0.65f;
-  advanceBoth(first, second, frames, count);  // walking gait
+  advanceBoth(first, second, frames, count);  // shaped command 0.012
+  advanceBoth(first, second, frames, count);  // shaped command 0.024
+  advanceBoth(first, second, frames, count);  // first gait-active 0.036
   const SemanticFrame walking = frames[count - 1];
 
   first.intent().rc.armed = false;

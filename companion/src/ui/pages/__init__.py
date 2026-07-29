@@ -2277,14 +2277,27 @@ class ServoConfigPage(BasePage):
 
     def _config_from_dict(self, data: dict):
         cfg = self._cfg
+        rc_data = data.get("rc_input", {})
+        rc_input = (
+            cfg.RcInputCalibration(
+                channels=[
+                    cfg.RcChannelCalibration(**channel)
+                    for channel in rc_data["channels"]
+                ]
+            )
+            if "channels" in rc_data
+            else cfg.default_rc_input_calibration()
+        )
         return cfg.RobotConfig(
-            schema_version=data.get("schema_version", cfg.SCHEMA_VERSION),
+            schema_version=cfg.SCHEMA_VERSION,
             robot_name=data.get("robot_name", ""),
             links=cfg.LinkLengths(**data["links"]),
             geometry=cfg.BodyGeometry(**data["geometry"]),
             legs=[cfg.LegGeometry(**d) for d in data["legs"]],
             servos=[cfg.ServoConfig(**d) for d in data["servos"]],
             gait=cfg.GaitDefaults(**data["gait"]),
+            rc_input=rc_input,
+            body_command=cfg.BodyCommandLimits(**data.get("body_command", {})),
             feet=[cfg.FootSensorCal(**d) for d in data["feet"]],
             feature_defaults=data.get("feature_defaults", 0),
         )

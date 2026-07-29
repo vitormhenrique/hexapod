@@ -31,7 +31,10 @@ constexpr uint16_t kControl = 448;
 // (HIL hexapod_src-2e8 bring-up). Health-task high-water marks verify actual
 // usage.
 constexpr uint16_t kDxl = 512;
-constexpr uint16_t kRc = 192;
+// CRSF parsing, controller decoding, calibration handoff, and telemetry share
+// this task. A retained FreeRTOS overflow record captured a receiver-triggered
+// failure at 192 words, so reserve enough headroom for the complete frame path.
+constexpr uint16_t kRc = 320;
 // Request/response buffers are static; static stack analysis bounds the normal
 // dispatcher below 576 words. HIL trace fragmentation adds a separate path.
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)

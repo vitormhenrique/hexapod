@@ -5,6 +5,8 @@
 
 #include <math.h>
 
+#include "leg_ik.h"  // kReachMarginFrac: same margin the pipeline clamps to
+
 namespace gait {
 namespace {
 
@@ -34,6 +36,7 @@ constexpr float kCoxaMountXy[config::kNumLegs][2] = {
 // orientation at the documented home pose.
 constexpr float kIkL1Mm = 56.08f;
 constexpr float kIkL2Mm = 66.51f;
+constexpr float kIkL3Mm = 24.86f;       // L_TIBIA (reference model, section 4)
 constexpr float kDistalCrMm = 24.650f;  // L3 * cos(theta_d)
 constexpr float kDistalCzMm = 3.224f;   // L3 * sin(theta_d)
 constexpr float kCoxaZOffMm = 4.55f;    // coxa-frame z = body z - 4.55
@@ -108,27 +111,6 @@ inline float frac01(float v) {
 
 inline float smoothstep(float v) { return v * v * (3.0f - 2.0f * v); }
 
-// One tracker axis step: critically-damped spring-damper pulled toward
-// `target` with natural frequency `w`. Integrated in bounded substeps so the
-// semi-implicit Euler stays stable for any caller dt, with the state clamped
-// to the valid normalised twist range.
-inline void trackAxis(float& x, float& v, float target, float w, float dt) {
-  while (dt > 0.0f) {
-    const float h = dt > 0.02f ? 0.02f : dt;
-    dt -= h;
-    const float a = w * w * (target - x) - 2.0f * w * v;
-    v += a * h;
-    x += v * h;
-  }
-  if (x > 1.0f) {
-    x = 1.0f;
-    if (v > 0.0f) v = 0.0f;
-  } else if (x < -1.0f) {
-    x = -1.0f;
-    if (v < 0.0f) v = 0.0f;
-  }
-}
-
 }  // namespace
 
 GaitEngine::GaitEngine() {}
@@ -158,12 +140,12 @@ void GaitEngine::configure(const config::GaitDefaults& d) {
 void GaitEngine::setGait(config::GaitId g) { gait_ = g; }
 
 void GaitEngine::setTwist(const BodyTwist& t) {
-  target_twist_.vx = clampf(t.vx, -1.0f, 1.0f);
-  target_twist_.vy = clampf(t.vy, -1.0f, 1.0f);
-  target_twist_.wz = clampf(t.wz, -1.0f, 1.0f);
-  if (fabsf(target_twist_.vx) <= kMotionDeadband) target_twist_.vx = 0.0f;
-  if (fabsf(target_twist_.vy) <= kMotionDeadband) target_twist_.vy = 0.0f;
-  if (fabsf(target_twist_.wz) <= kMotionDeadband) target_twist_.wz = 0.0f;
+  twist_.vx = clampf(t.vx, -1.0f, 1.0f);
+  twist_.vy = clampf(t.vy, -1.0f, 1.0f);
+  twist_.wz = clampf(t.wz, -1.0f, 1.0f);
+  if (fabsf(twist_.vx) <= kMotionDeadband) twist_.vx = 0.0f;
+  if (fabsf(twist_.vy) <= kMotionDeadband) twist_.vy = 0.0f;
+  if (fabsf(twist_.wz) <= kMotionDeadband) twist_.wz = 0.0f;
 }
 
 void GaitEngine::reset() { phase_ = 0.0f; }
@@ -179,7 +161,8 @@ float GaitEngine::dutyFactor() const {
                                                         : minimum;
 }
 
-void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
+void GaitEngine::baseHomeFoot(uint8_t leg, float& x, float& y,
+                              float& z) const {
   // Height changes ride the constant-tibia-orientation locus: the stance
   // radius scales about each hip so femur AND knee reconfigure together while
   // the distal link keeps its calibrated ground orientation. Normalised to
@@ -193,6 +176,151 @@ void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
   z = -body_height_mm_;
 }
 
+void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
+  baseHomeFoot(leg, x, y, z);
+  // Walking stance bias: while a stroke is commanded, slide the stance centre
+  // toward this leg's own hip so the stroke envelope fits inside the reach
+  // annulus instead of being collapsed by the pipeline's reach limiting.
+  if (stance_bias_mm_ > 0.01f) {
+    const float dx = x - kCoxaMountXy[leg][0];
+    const float dy = y - kCoxaMountXy[leg][1];
+    const float r = sqrtf(dx * dx + dy * dy);
+    if (r > stance_bias_mm_ + 1.0f) {
+      const float k = (r - stance_bias_mm_) / r;
+      x = kCoxaMountXy[leg][0] + dx * k;
+      y = kCoxaMountXy[leg][1] + dy * k;
+    }
+  }
+}
+
+float GaitEngine::strokeBiasTarget() const {
+  if (twist_.vx == 0.0f && twist_.vy == 0.0f && twist_.wz == 0.0f) {
+    return 0.0f;
+  }
+  // Reachable annulus radii at the current foot height, projected onto the
+  // horizontal plane through each hip (reference-model geometry; the pipeline
+  // re-checks against the live config, this bias just keeps it from having to
+  // shrink anything in the nominal case). A small pad keeps the fitted stroke
+  // extremes strictly inside the margin despite filter lag and float noise.
+  constexpr float kBiasPadMm = 1.0f;
+  const float zc = -body_height_mm_ - kCoxaZOffMm;  // foot z in coxa frame
+  const float d_max = kReachMarginFrac * (kIkL2Mm + kIkL3Mm);
+  const float outer_sq = d_max * d_max - zc * zc;
+  if (outer_sq <= 0.0f) return 0.0f;  // height alone exceeds reach: no help
+  const float r_outer = kIkL1Mm + sqrtf(outer_sq) - kBiasPadMm;
+  const float d_min = fabsf(kIkL2Mm - kIkL3Mm) +
+                      (1.0f - kReachMarginFrac) * (kIkL2Mm + kIkL3Mm);
+  const float inner_sq = d_min * d_min - zc * zc;
+  const float r_inner =
+      kIkL1Mm + (inner_sq > 0.0f ? sqrtf(inner_sq) : 0.0f) + kBiasPadMm;
+
+  float need = 0.0f;               // bias required by the outer boundary
+  float allow = kMaxStanceBiasMm;  // bias allowed by the inner boundary
+  const float beta = dutyFactor();
+  const float swing_span = (beta < 1.0f) ? (1.0f - beta) : 1.0f;
+  const float m = (beta > 0.0f) ? -swing_span / beta : 0.0f;
+  // Swing-path samples for the inner bound: lifting the foot shrinks |z| in
+  // the coxa frame, pulling d toward the folded boundary exactly where the
+  // swing also sweeps inward, so the stance/lift-zero extremes alone are not
+  // the binding inner constraint.
+  constexpr float kSwingU[] = {0.2f, 0.35f, 0.5f, 0.65f, 0.8f};
+  for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+    float hx, hy, hz;
+    baseHomeFoot(leg, hx, hy, hz);
+    float sx, sy, lift_scale;
+    strokeForLeg(leg, sx, sy, lift_scale);
+    // Hip -> stance-centre unit direction (the bias axis for this leg).
+    const float cx = hx - kCoxaMountXy[leg][0];
+    const float cy = hy - kCoxaMountXy[leg][1];
+    const float cr = sqrtf(cx * cx + cy * cy);
+    if (cr < 1.0f) continue;
+    const float ux = cx / cr;
+    const float uy = cy / cr;
+    for (int8_t sign = -1; sign <= 1; sign += 2) {
+      // Stroke extreme relative to the hip, before any bias.
+      const float px = cx + static_cast<float>(sign) * kStrokeEnvelopeFrac * sx;
+      const float py = cy + static_cast<float>(sign) * kStrokeEnvelopeFrac * sy;
+      const float along = px * ux + py * uy;   // component on the bias axis
+      const float perp_sq = px * px + py * py - along * along;
+      // Outer boundary: smallest b with |p - b*u| <= r_outer (exact solve;
+      // sliding the centre inward moves the extreme along -u).
+      const float outer_rem = r_outer * r_outer - perp_sq;
+      if (outer_rem <= 0.0f) {
+        // No inward shift can bring this extreme inside; take the cap and let
+        // the pipeline's reach limiting absorb the (shorter) remainder.
+        need = kMaxStanceBiasMm;
+      } else {
+        const float b = along - sqrtf(outer_rem);
+        if (b > need) need = b;
+      }
+      // Inner boundary at ground level: largest b keeping |p-b*u| >= r_inner.
+      const float inner_rem = r_inner * r_inner - perp_sq;
+      if (inner_rem > 0.0f) {
+        const float b_in = along - sqrtf(inner_rem);
+        if (b_in < allow) allow = b_in;
+      }
+    }
+    // Inner boundary along the lifted swing return.
+    for (const float u : kSwingU) {
+      const float ss = u * u * (3.0f - 2.0f * u);  // smoothstep
+      const float L = -0.5f + ss + m * u * (u - 1.0f) * (2.0f * u - 1.0f);
+      const float lift_wave = sinf(kPi * u);
+      float zc_u = zc + step_mm_ * lift_scale * lift_wave * lift_wave;
+      const float zc_cap = kMaxFootZMm - kCoxaZOffMm;  // foot Z clamp in coxa
+      if (zc_u > zc_cap) zc_u = zc_cap;
+      const float in_sq = d_min * d_min - zc_u * zc_u;
+      const float r_in_u =
+          kIkL1Mm + (in_sq > 0.0f ? sqrtf(in_sq) : 0.0f) + kBiasPadMm;
+      const float px = cx + L * sx;
+      const float py = cy + L * sy;
+      const float along = px * ux + py * uy;
+      const float perp_sq = px * px + py * py - along * along;
+      const float inner_rem = r_in_u * r_in_u - perp_sq;
+      if (inner_rem > 0.0f) {
+        const float b_in = along - sqrtf(inner_rem);
+        if (b_in < allow) allow = b_in;
+      }
+    }
+  }
+  if (allow < 0.0f) allow = 0.0f;
+  return clampf(need, 0.0f,
+                allow < kMaxStanceBiasMm ? allow : kMaxStanceBiasMm);
+}
+
+void GaitEngine::strokeForLeg(uint8_t leg, float& x, float& y,
+                              float& lift_scale) const {
+  float hx, hy, hz;
+  homeFoot(leg, hx, hy, hz);
+  const float radius = sqrtf(hx * hx + hy * hy);
+  float tangent_x = 0.0f;
+  float tangent_y = 0.0f;
+  if (radius > 1e-3f) {
+    tangent_x = -hy / radius;
+    tangent_y = hx / radius;
+  }
+  x = clampf(twist_.vx * stride_mm_ +
+                 twist_.wz * stride_mm_ * tangent_x,
+             -kMaxStrideMm, kMaxStrideMm);
+  y = clampf(twist_.vy * stride_mm_ +
+                 twist_.wz * stride_mm_ * tangent_y,
+             -kMaxStrideMm, kMaxStrideMm);
+  const float command_scale =
+      fmaxf(fabsf(twist_.vx), fmaxf(fabsf(twist_.vy), fabsf(twist_.wz)));
+  lift_scale = command_scale > 0.25f ? 1.0f : command_scale * 4.0f;
+}
+
+void GaitEngine::motionEnvelopeFoot(uint8_t leg, float longitudinal,
+                                    float lift_fraction, float& x, float& y,
+                                    float& z) const {
+  float home_x, home_y, home_z;
+  homeFoot(leg, home_x, home_y, home_z);
+  float stroke_x, stroke_y, lift_scale;
+  strokeForLeg(leg, stroke_x, stroke_y, lift_scale);
+  x = home_x + stroke_x * longitudinal;
+  y = home_y + stroke_y * longitudinal;
+  z = home_z + step_mm_ * lift_scale * clampf(lift_fraction, 0.0f, 1.0f);
+}
+
 void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
   const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
 
@@ -202,6 +330,13 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
   step_mm_ += (step_target_ - step_mm_) * pk;
   body_height_mm_ += (height_target_ - body_height_mm_) * pk;
   speed_ += (speed_target_ - speed_) * pk;
+
+  // Advance the walking stance bias toward what the current stroke envelope
+  // needs. Static poses always relax back to the documented home stance.
+  const bool stepping =
+      gait_ != config::GaitId::Stand && gait_ != config::GaitId::Sit;
+  const float bias_target = stepping ? strokeBiasTarget() : 0.0f;
+  stance_bias_mm_ += (bias_target - stance_bias_mm_) * pk;
 
   // Static poses: no stepping, no twist.
   if (gait_ == config::GaitId::Stand || gait_ == config::GaitId::Sit) {
@@ -217,29 +352,10 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
     return;
   }
 
-  // Track the stick target with the critically-damped spring-damper. The
-  // working twist therefore has continuous position and velocity: direction
-  // and magnitude changes become S-curves instead of rate-limited ramps.
-  const float omega =
-      kMinTwistOmega + (kMaxTwistOmega - kMinTwistOmega) * speed_;
-  trackAxis(twist_.vx, twist_vel_.vx, target_twist_.vx, omega, dt_s);
-  trackAxis(twist_.vy, twist_vel_.vy, target_twist_.vy, omega, dt_s);
-  trackAxis(twist_.wz, twist_vel_.wz, target_twist_.wz, omega, dt_s);
-
-  // Park: once the target is neutral and the tracker tail has decayed inside
-  // the park window, snap to exactly zero so the phase stops advancing and
-  // the feet hold the planted home stance (no bobbing at centre sticks).
-  const bool target_neutral = target_twist_.vx == 0.0f &&
-                              target_twist_.vy == 0.0f &&
-                              target_twist_.wz == 0.0f;
-  if (target_neutral &&
-      fabsf(twist_.vx) < kTwistParkPos && fabsf(twist_.vy) < kTwistParkPos &&
-      fabsf(twist_.wz) < kTwistParkPos &&
-      fabsf(twist_vel_.vx) < kTwistParkVel &&
-      fabsf(twist_vel_.vy) < kTwistParkVel &&
-      fabsf(twist_vel_.wz) < kTwistParkVel) {
+  if (fabsf(twist_.vx) < kTwistParkPos &&
+      fabsf(twist_.vy) < kTwistParkPos &&
+      fabsf(twist_.wz) < kTwistParkPos) {
     twist_.vx = twist_.vy = twist_.wz = 0.0f;
-    twist_vel_.vx = twist_vel_.vy = twist_vel_.wz = 0.0f;
   }
 
   const float command_scale =
@@ -266,16 +382,8 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
 
     // Commanded stroke vector for this leg (mm). Yaw adds a tangential
     // component perpendicular to the leg's home radial direction.
-    const float r = sqrtf(hx * hx + hy * hy);
-    float tang_x = 0.0f, tang_y = 0.0f;
-    if (r > 1e-3f) {
-      tang_x = -hy / r;
-      tang_y = hx / r;
-    }
-    float sx = twist_.vx * stride_mm_ + twist_.wz * stride_mm_ * tang_x;
-    float sy = twist_.vy * stride_mm_ + twist_.wz * stride_mm_ * tang_y;
-    sx = clampf(sx, -kMaxStrideMm, kMaxStrideMm);
-    sy = clampf(sy, -kMaxStrideMm, kMaxStrideMm);
+    float sx, sy, lift_scale;
+    strokeForLeg(leg, sx, sy, lift_scale);
 
     const float leg_phase = frac01(phase_ + legOffset(gait_, leg));
     bool swing;
@@ -300,8 +408,6 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
       const float m = -swing_span / beta;  // matched endpoint slope (in u)
       L = -0.5f + smoothstep(u) + m * u * (u - 1.0f) * (2.0f * u - 1.0f);
       const float lift_wave = sinf(kPi * u);
-      const float lift_scale =
-          command_scale > 0.25f ? 1.0f : command_scale * 4.0f;
       lift = step_mm_ * lift_scale * lift_wave * lift_wave;
       swing = true;
     }

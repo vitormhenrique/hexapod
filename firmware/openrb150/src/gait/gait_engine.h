@@ -42,19 +42,28 @@ constexpr float kMinFootZMm = -120.0f;  // lowest commanded foot Z in B
 constexpr float kMaxFootZMm = -5.0f;    // highest commanded foot Z in B
 constexpr float kSitFootZMm = -8.0f;    // body-down sit pose
 
+// Horizontal stroke envelope fraction: the largest |L| the swing-return
+// profile produces (slope-matched Hermite overshoot past +/-0.5). Shared with
+// GaitPipeline's reach-envelope check so both layers bound the same extremes.
+constexpr float kStrokeEnvelopeFrac = 0.56f;
+
+// Maximum inward walking stance bias (mm). The documented home stance stands
+// at ~92% leg extension -- only a few mm inside the IK reach margin -- so any
+// real stride pushes the outward half of the stroke off the workspace and the
+// pipeline's reach limiting used to collapse the whole gait into a shuffle.
+// While a twist is commanded the engine slides each stance centre toward its
+// own hip just far enough for the stroke envelope to fit the reachable
+// annulus. The cap keeps the inward extreme clear of the folded (inner)
+// boundary and bounds worst-case deviation from the documented home.
+constexpr float kMaxStanceBiasMm = 25.0f;
+
 // Cycle frequency range mapped from the speed knob (0..255).
 constexpr float kMinFreqHz = 0.25f;
 constexpr float kMaxFreqHz = 1.20f;
-// Critically-damped second-order twist tracking. The stick target drives a
-// spring-damper (poles at -omega), so the working twist has continuous
-// position AND velocity: S-curve response with zero acceleration steps, unlike
-// a linear slew. Pot1 speed maps the natural frequency (gentle .. brisk).
-constexpr float kMinTwistOmega = 3.0f;   // rad/s, ~1.5 s settle at speed 0
-constexpr float kMaxTwistOmega = 10.0f;  // rad/s, ~0.5 s settle at speed 1
-// Park thresholds: once the target is neutral and the tracker has decayed
-// inside these bounds it snaps to exactly zero so the gait phase parks.
+// BodyCommandShaper owns acceleration/deceleration. The gait engine receives
+// an already-shaped twist and keeps only this small neutral threshold so
+// imperceptible transport residue cannot make the feet bob in place.
 constexpr float kTwistParkPos = 0.03f;
-constexpr float kTwistParkVel = 0.20f;
 // First-order filter time constant for the live shape parameters (body
 // height, stride, step height, speed). RC pot/ADC noise lands on the filter
 // target, never directly on the servo goals.
@@ -128,12 +137,27 @@ class GaitEngine {
   config::GaitId gait() const { return gait_; }
   float phase() const { return phase_; }
   float dutyFactor() const;
+  void nominalFoot(uint8_t leg, float& x, float& y, float& z) const {
+    homeFoot(leg, x, y, z);
+  }
+  void motionEnvelopeFoot(uint8_t leg, float longitudinal,
+                          float lift_fraction, float& x, float& y,
+                          float& z) const;
 
  private:
+  // Home stance before the walking bias (height locus only).
+  void baseHomeFoot(uint8_t leg, float& x, float& y, float& z) const;
   void homeFoot(uint8_t leg, float& x, float& y, float& z) const;
+  void strokeForLeg(uint8_t leg, float& x, float& y,
+                    float& lift_scale) const;
+  // Inward stance bias (mm) needed for the current stroke envelope to fit the
+  // reference-model reach annulus. 0 when no twist is commanded.
+  float strokeBiasTarget() const;
 
   config::GaitId gait_ = config::GaitId::Stand;
   float phase_ = 0.0f;
+  // Filtered inward walking stance bias (mm), toward each leg's own hip.
+  float stance_bias_mm_ = 0.0f;
   // Filtered live shape parameters (first-order lag toward the *_target_
   // values below, advanced in update()). Seeded from the first configure().
   float stride_mm_ = 60.0f;
@@ -147,9 +171,7 @@ class GaitEngine {
   float height_target_ = 40.0f;
   float speed_target_ = 0.5f;
   bool params_seeded_ = false;
-  BodyTwist target_twist_;
-  BodyTwist twist_;      // tracker position: the working twist
-  BodyTwist twist_vel_;  // tracker velocity state
+  BodyTwist twist_;  // already-shaped command from ControllerCore
 };
 
 }  // namespace gait

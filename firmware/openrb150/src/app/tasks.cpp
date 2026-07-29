@@ -23,6 +23,7 @@
 #endif
 #include "../input/controller_bridge.h"
 #include "../input/crsf_parser.h"
+#include "../input/crsf_telemetry.h"
 #include "../input/rc_frame_snapshot.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
@@ -38,6 +39,7 @@
 #include "../protocol/sensor_api.h"
 #include "../protocol/telemetry.h"
 #include "../protocol/telemetry_encode.h"
+#include "../sensors/bno085.h"
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
@@ -387,12 +389,32 @@ volatile bool g_dxlHardFault = false;
 
 // CRSF runs at 420000 baud on the OpenRB-150 D14 TX / D13 RX UART (Serial3).
 constexpr uint32_t kCrsfBaud = 420000;
+constexpr uint32_t kCrsfStatusPeriodMs = 200;    // 5 Hz
+constexpr uint32_t kCrsfAttitudePeriodMs = 100;  // 10 Hz
+constexpr uint32_t kCrsfBatteryPeriodMs = 500;   // 2 Hz
+constexpr uint32_t kImuFreshMs = 250;
+
+// controlTask publishes this complete operator-facing snapshot; rcTask copies
+// it atomically before adding i2cTask's IMU status and serializing a frame.
+crsf::telemetry::HexapodStatus g_radioStatus;
 
 // Single owner of the root I2C bus (SERCOM0): TCA9548A mux, 24LC32 EEPROM, and the
 // muxed foot sensors. Only i2cTask touches this. Topology is the boot-scan
 // result describing which optional devices were found.
 i2c::I2cBus g_i2cBus;
 i2c::I2cTopology g_i2cTopology;
+sensors::Bno085 g_bno085(g_i2cBus);
+
+struct ImuSnapshot {
+  int16_t pitch_cdeg = 0;
+  int16_t roll_cdeg = 0;
+  int16_t yaw_cdeg = 0;
+  uint8_t calibration = 0;
+  bool present = false;
+  bool valid = false;
+  uint32_t sample_ms = 0;
+};
+ImuSnapshot g_imuSnapshot;
 
 // Foot contact pipeline. The reader does bounded I2C/mux register I/O,
 // the estimator runs the portable contact state machine, and the published
@@ -1072,6 +1094,46 @@ void deriveRcStatus(const controller::ControllerCommand& cc,
   rc.ever_seen = cc.ever_seen;
 }
 
+uint8_t fractionToByte(float value) {
+  if (value <= 0.0f) return 0;
+  if (value >= 1.0f) return 255;
+  return static_cast<uint8_t>(value * 255.0f + 0.5f);
+}
+
+uint8_t rcGaitForTelemetry(const controller::ControllerCommand& command) {
+  if (command.mode != controller::ControlMode::Walk) {
+    return static_cast<uint8_t>(config::GaitId::Stand);
+  }
+  return static_cast<uint8_t>(
+      controller::rcGaitFromIndex(command.gait_index));
+}
+
+uint8_t batteryPercent(uint16_t millivolts) {
+  constexpr uint16_t kEmptyMv = 9900;
+  constexpr uint16_t kFullMv = 12600;
+  if (millivolts <= kEmptyMv) return 0;
+  if (millivolts >= kFullMv) return 100;
+  return static_cast<uint8_t>(
+      (static_cast<uint32_t>(millivolts - kEmptyMv) * 100u) /
+      (kFullMv - kEmptyMv));
+}
+
+bool sendCrsfTelemetry(uint8_t type, const uint8_t* payload,
+                       uint8_t payload_len) {
+#if defined(PIN_SERIAL3_TX)
+  uint8_t frame[crsf::kMaxFrameLen];
+  const uint8_t frame_len = crsf::telemetry::buildFrame(
+      type, payload, payload_len, frame, sizeof(frame));
+  if (frame_len == 0 || Serial3.availableForWrite() < frame_len) return false;
+  return Serial3.write(frame, frame_len) == frame_len;
+#else
+  (void)type;
+  (void)payload;
+  (void)payload_len;
+  return false;
+#endif
+}
+
 bool configuredServoCoverageFromBus() {
   if (g_dxlBus.servoCount() < config::kNumServos) return false;
   const config::RobotConfig& cfg = g_configApi.config();
@@ -1285,6 +1347,70 @@ void publishControllerCommand(uint32_t now_ms) {
   g_controlApi.setLiveState(g_safetyState, g_faultReason);
   g_passiveApi.setLiveState(g_safetyState);
   g_motionApi.setLiveState(g_safetyState, g_motionGate);
+
+  crsf::telemetry::HexapodStatus radio;
+  radio.safety_state = g_safetyState;
+  radio.command_source = g_commandSource;
+  radio.fault_reason = g_faultReason;
+  radio.battery_mv = g_controllerState.battery.valid
+                         ? g_controllerState.battery.millivolts
+                         : 0;
+  if (g_controllerIntent.rc.armed) {
+    radio.flags |= crsf::telemetry::flag::kArmed;
+  }
+  if (command.motion_gate) {
+    radio.flags |= crsf::telemetry::flag::kMotionGate;
+  }
+  if (g_controllerIntent.rc.kill || g_controllerIntent.host_estop) {
+    radio.flags |= crsf::telemetry::flag::kKill;
+  }
+  if (g_controllerIntent.rc.failsafe) {
+    radio.flags |= crsf::telemetry::flag::kFailsafe;
+  }
+  if (g_controllerState.battery.valid) {
+    radio.flags |= crsf::telemetry::flag::kBatteryValid;
+  }
+  if (g_faultReason != static_cast<uint8_t>(safety::FaultReason::None)) {
+    radio.flags |= crsf::telemetry::flag::kFault;
+  }
+
+  const bool report_rc_selection =
+      command.command_source != safety::CommandSource::Jetson &&
+      command.command_source != safety::CommandSource::MacMaintenance &&
+      g_controllerIntent.rc.command.ever_seen;
+  if (report_rc_selection) {
+    const controller::ControllerCommand& rc = g_controllerIntent.rc.command;
+    radio.gait = rcGaitForTelemetry(rc);
+    radio.control_mode = static_cast<uint8_t>(rc.mode);
+    radio.body_height_mm = static_cast<uint16_t>(
+        gait::rcBodyHeightMm(rc.body_height) + 0.5f);
+    radio.stride_mm = static_cast<uint16_t>(
+        rc.stride * config::kMaxGaitStrideMm + 0.5f);
+    radio.step_height_mm = static_cast<uint16_t>(
+        rc.step_height * config::kMaxGaitStepMm + 0.5f);
+    radio.speed_x255 = fractionToByte(rc.speed);
+    radio.duty_x255 = g_controllerConfig.robot.gait.duty_x255;
+  } else if (command.command_source == safety::CommandSource::Jetson) {
+    const protocol::MotionIntent& motion = g_controllerIntent.motion;
+    radio.gait = motion.gait;
+    radio.control_mode = static_cast<uint8_t>(controller::ControlMode::Walk);
+    radio.body_height_mm = motion.body_height_mm;
+    radio.stride_mm = motion.stride_len_mm;
+    radio.step_height_mm = motion.step_height_mm;
+    radio.speed_x255 = motion.speed_x255;
+    radio.duty_x255 = motion.duty_x255;
+  } else {
+    radio.gait = static_cast<uint8_t>(config::GaitId::Stand);
+    radio.control_mode = static_cast<uint8_t>(controller::ControlMode::Walk);
+    radio.body_height_mm = g_controllerConfig.robot.gait.body_height_mm;
+    radio.stride_mm = g_controllerConfig.robot.gait.stride_len_mm;
+    radio.step_height_mm = g_controllerConfig.robot.gait.step_height_mm;
+    radio.speed_x255 = g_controllerConfig.robot.gait.speed_x255;
+    radio.duty_x255 = g_controllerConfig.robot.gait.duty_x255;
+  }
+  taskENTER_CRITICAL();
+  g_radioStatus = radio;
+  taskEXIT_CRITICAL();
 
   if (command.goal_valid) {
     // Preserve the existing bounded publication behavior: never block the
@@ -2136,6 +2262,9 @@ void rcTask(void*) {
   TickType_t next = xTaskGetTickCount();
   constexpr uint16_t kMaxBytesPerCycle = 128;
   uint32_t applied_calibration_revision = 0xFFFFFFFFu;
+  uint32_t last_status_tx_ms = 0;
+  uint32_t last_attitude_tx_ms = 0;
+  uint32_t last_battery_tx_ms = 0;
   for (;;) {
     tick(watchdog::TaskId::Rc);
     const uint32_t now_ms =
@@ -2219,6 +2348,48 @@ void rcTask(void*) {
     g_rcDiag.last_frame_ms = rc_status.last_frame_ms;
     g_rcDiag.ever_seen = rc_status.ever_seen;
     g_rcDiag.failsafe = rc_status.failsafe;
+
+    // Emit at most one frame per RC cycle. UART buffer capacity is checked by
+    // sendCrsfTelemetry(), so downlink telemetry never blocks RC parsing.
+    if (rc_status.ever_seen && !rc_status.failsafe) {
+      crsf::telemetry::HexapodStatus radio;
+      ImuSnapshot imu;
+      taskENTER_CRITICAL();
+      radio = g_radioStatus;
+      imu = g_imuSnapshot;
+      taskEXIT_CRITICAL();
+      const bool imu_fresh = imu.present && imu.valid &&
+                             (now_ms - imu.sample_ms) <= kImuFreshMs;
+      if (imu.present) radio.flags |= crsf::telemetry::flag::kImuPresent;
+      if (imu_fresh) radio.flags |= crsf::telemetry::flag::kImuFresh;
+      radio.imu_calibration = imu.calibration;
+
+      uint8_t payload[crsf::telemetry::kHexapodPayloadBytes];
+      if ((now_ms - last_status_tx_ms) >= kCrsfStatusPeriodMs) {
+        crsf::telemetry::encodeHexapodStatus(radio, payload);
+        if (sendCrsfTelemetry(crsf::telemetry::kFrameTypeHexapodStatus,
+                              payload,
+                              crsf::telemetry::kHexapodPayloadBytes)) {
+          last_status_tx_ms = now_ms;
+        }
+      } else if (imu_fresh &&
+                 (now_ms - last_attitude_tx_ms) >= kCrsfAttitudePeriodMs) {
+        crsf::telemetry::encodeAttitude(
+            imu.pitch_cdeg, imu.roll_cdeg, imu.yaw_cdeg, payload);
+        if (sendCrsfTelemetry(crsf::telemetry::kFrameTypeAttitude, payload,
+                              crsf::telemetry::kAttitudePayloadBytes)) {
+          last_attitude_tx_ms = now_ms;
+        }
+      } else if ((radio.flags & crsf::telemetry::flag::kBatteryValid) != 0 &&
+                 (now_ms - last_battery_tx_ms) >= kCrsfBatteryPeriodMs) {
+        crsf::telemetry::encodeBattery(
+            radio.battery_mv, batteryPercent(radio.battery_mv), payload);
+        if (sendCrsfTelemetry(crsf::telemetry::kFrameTypeBattery, payload,
+                              crsf::telemetry::kBatteryPayloadBytes)) {
+          last_battery_tx_ms = now_ms;
+        }
+      }
+    }
     const TickType_t now_ticks = xTaskGetTickCount();
     if (static_cast<int32_t>(now_ticks - next) >=
         static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kRc))) {
@@ -2517,6 +2688,12 @@ void i2cTask(void*) {
   g_i2cBus.begin();
   g_i2cBus.scanAll(g_i2cTopology);
   g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
+  const bool imu_present = g_bno085.begin();
+  taskENTER_CRITICAL();
+  g_imuSnapshot.present = imu_present;
+  g_imuSnapshot.valid = false;
+  g_imuSnapshot.sample_ms = 0;
+  taskEXIT_CRITICAL();
   publishTopologySnapshot();
   g_i2cLastUpdateMs = static_cast<uint32_t>(xTaskGetTickCount()) *
                       portTICK_PERIOD_MS;
@@ -2631,6 +2808,7 @@ void i2cTask(void*) {
     // service blocks so a re-scan can force a re-power of rediscovered boards).
     static uint8_t poll_ch = 0;
     static uint8_t configured_mask = 0;
+    static uint32_t last_imu_sample_ms = 0;
 
     // Service a host-requested I2C re-scan (I2C_SCAN). i2cTask is the sole Wire
     // owner, so the blocking probe runs here; the host polls I2C_GET_TOPOLOGY
@@ -2723,6 +2901,25 @@ void i2cTask(void*) {
         }
       }
     }
+
+    const uint32_t sensor_now_ms = millis();
+    if (g_bno085.present() &&
+        (sensor_now_ms - last_imu_sample_ms) >= 50) {
+      last_imu_sample_ms = sensor_now_ms;
+      if (g_i2cTopology.mux_present) g_i2cBus.selectNone();
+      const sensors::ImuSample sample = g_bno085.read();
+      taskENTER_CRITICAL();
+      g_imuSnapshot.present = true;
+      g_imuSnapshot.valid = sample.ok;
+      if (sample.ok) {
+        g_imuSnapshot.pitch_cdeg = sample.pitch_cdeg;
+        g_imuSnapshot.roll_cdeg = sample.roll_cdeg;
+        g_imuSnapshot.yaw_cdeg = sample.yaw_cdeg;
+        g_imuSnapshot.calibration = sample.calibration;
+        g_imuSnapshot.sample_ms = sensor_now_ms;
+      }
+      taskEXIT_CRITICAL();
+    }
     // Decay any silent foot to STALE and republish the snapshot every pass.
     g_contact.tickStaleness(millis());
     for (uint8_t i = 0; i < sensors::kNumFeet; ++i) {
@@ -2743,6 +2940,11 @@ void healthTask(void*) {
     tick(watchdog::TaskId::Health);
 
     watchdog::evaluate();
+    if (watchdog::criticalStalled()) {
+      board::setUserLed(true);
+    } else {
+      board::toggleUserLed();
+    }
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }

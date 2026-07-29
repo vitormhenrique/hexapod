@@ -243,15 +243,14 @@ if you want to decode a single channel.
 | **AlfredoCRSF** (bundled in `lib/`) | Yes | Parses incoming CRSF frames and sends telemetry. Any CRSF parser that exposes **raw 11-bit** channel values works. |
 | **ChannelPack.h** (this header) | Yes | Decode the controller's channel/bit layout. Copy the file as-is. |
 | `HardwareSerial` (Arduino core) | Yes | UART to the ELRS RX module. |
-| **Adafruit BNO055** + **Adafruit Unified Sensor** | Optional | Only if sending attitude telemetry from a BNO055 IMU. |
+| **BNO085** | Optional | Robot attitude comes from the firmware's bounded root-I2C SHTP adapter. |
 
 For PlatformIO, a minimal receiver `platformio.ini` dependency list:
 
 ```ini
 lib_deps =
     https://github.com/AlfredoSystems/AlfredoCRSF.git
-    adafruit/Adafruit BNO055        ; optional, attitude telemetry
-    adafruit/Adafruit Unified Sensor ; optional, BNO055 dependency
+    ; BNO085 support is built into the OpenRB firmware and does not use Wire.
 ```
 
 ### 7.2 Reading inputs — minimal sketch
@@ -344,7 +343,7 @@ void sendAttitude(float pitchRad, float rollRad, float yawRad) {
 }
 ```
 
-With a BNO055 you can read a `Vector` of Euler angles (degrees), convert to radians,
+With a BNO085 you can read the rotation-vector quaternion, convert to Euler radians,
 and pass them in.
 
 ### 8.2 Battery

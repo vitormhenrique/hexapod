@@ -56,11 +56,13 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 //     slightly up, tibia perpendicular; see the URDF all-zero pose). The bump
 //     forces a stored v2 config carrying the old hidden +171/-512 trims to be
 //     rejected at boot so the robot falls back to these corrected defaults.
-// v4: adds persisted logical RC input calibration. Valid v3 payloads are
-//     migrated in RAM to v4 defaults at boot so existing EEPROM geometry and
-//     servo calibration are retained until the next explicit config commit.
-constexpr uint16_t kSchemaVersion = 4;
-constexpr uint16_t kLegacySchemaVersion = 3;
+// v4: adds persisted logical RC input calibration.
+// v5: adds central body-command limits. Valid v3/v4 payloads are migrated in
+//     RAM at boot so existing EEPROM geometry, servo calibration, and v4 RC
+//     calibration are retained until the next explicit config commit.
+constexpr uint16_t kSchemaVersion = 5;
+constexpr uint16_t kLegacySchemaVersionV4 = 4;
+constexpr uint16_t kLegacySchemaVersionV3 = 3;
 
 // MX-28: 4096 ticks/rev, center 180deg = tick 2048.
 constexpr uint16_t kServoCenterTick = 2048;
@@ -189,11 +191,11 @@ struct GaitDefaults {
 };
 
 // Calibration and conditioning parameters for one logical analog source.
-// `deadband_x255`, `expo_x255`, `filter_tau_ms`, and
-// `switch_debounce_ms` are persisted here for the next input-conditioning
-// layer. The current bridge consumes min/center/max and reversed only; this
-// preserves its existing binding-level deadband semantics until that layer
-// deliberately takes ownership.
+// The bridge applies filter_tau, source-level deadband, and expo to centred
+// analog sources after normalization. A nonzero legacy BindingConfig deadband
+// replaces (rather than stacks with) the source deadband for compatibility.
+// `switch_debounce_ms` is reserved for future configurable discrete mappings;
+// the current gait/mode tri-switches use a fixed conservative debounce.
 struct RcChannelCalibration {
   uint8_t source = 0;  // logical source 1..kNumRcAnalogInputs
   uint8_t type = static_cast<uint8_t>(RcChannelType::CenteredAnalog);
@@ -213,6 +215,33 @@ struct RcInputCalibration {
 
 constexpr uint16_t kRcFilterTauMaxMs = 1000;
 constexpr uint16_t kRcSwitchDebounceMaxMs = 2000;
+
+// Central limits for high-level body commands before gait generation. Twist
+// values use normalized milli-units (1000 == full-scale input); pose and
+// height values use physical units. They are deliberately separate from gait
+// geometry/travel limits, which remain the final kinematic safety boundary.
+struct BodyCommandLimits {
+  uint16_t max_forward_milli = 1000;
+  uint16_t max_reverse_milli = 1000;
+  uint16_t max_lateral_milli = 1000;
+  uint16_t max_yaw_milli = 1000;
+  uint16_t forward_accel_milli_per_s = 1200;
+  uint16_t forward_decel_milli_per_s = 1800;
+  uint16_t lateral_accel_milli_per_s = 1000;
+  uint16_t lateral_decel_milli_per_s = 1500;
+  uint16_t yaw_accel_milli_per_s = 1500;
+  uint16_t yaw_decel_milli_per_s = 2000;
+  uint16_t height_rise_mm_per_s = 20;
+  uint16_t height_lower_mm_per_s = 30;
+  uint16_t pose_translation_rate_mm_per_s = 60;
+  uint16_t pose_rotation_rate_millirad_per_s = 500;
+};
+
+constexpr uint16_t kBodyCommandMaxScaleMilli = 1000;
+constexpr uint16_t kBodyCommandMaxAccelMilliPerS = 5000;
+constexpr uint16_t kBodyHeightRateMaxMmPerS = 200;
+constexpr uint16_t kBodyPoseTranslationRateMaxMmPerS = 200;
+constexpr uint16_t kBodyPoseRotationRateMaxMilliRadPerS = 2000;
 
 // Per-foot contact sensor calibration (Robotic Finger Sensor v2). Disabled by
 // default until a calibration capture establishes a baseline (AGENTS.md 4.4).
@@ -236,6 +265,7 @@ struct RobotConfig {
   ServoConfig servos[kNumServos];
   GaitDefaults gait;
   RcInputCalibration rc_input;
+  BodyCommandLimits body_command;
   FootSensorCal feet[kNumFootSensors];
   uint32_t feature_defaults = 0;
 };
@@ -261,6 +291,7 @@ constexpr uint16_t kConfigPayloadSize =
     + (2 + 2 + 2 + 1 + 1 + 1)          // gait (9 bytes)
     + kNumRcAnalogInputs * (1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 2 + 2)
                          // RC input calibration (15 bytes each)
+    + 14 * 2                            // body-command limits (14 x uint16)
     + kNumFootSensors * (4 + 2 + 2 + 2 + 1)     // feet (11 bytes each)
     + 4;                               // feature_defaults
 
@@ -277,6 +308,11 @@ constexpr uint16_t kConfigPayloadSize =
     + kNumFootSensors * (4 + 2 + 2 + 2 + 1)     // feet
     + 4;                               // feature_defaults
 
+  // v4 payload size before body-command limits were added.
+  constexpr uint16_t kLegacyConfigPayloadSizeV4 =
+    kLegacyConfigPayloadSizeV3
+    + kNumRcAnalogInputs * (1 + 1 + 2 + 2 + 2 + 1 + 1 + 1 + 2 + 2);
+
 // ---------------------------------------------------------------------------
 // API.
 // ---------------------------------------------------------------------------
@@ -288,6 +324,10 @@ void defaultRobotConfig(RobotConfig& cfg);
 // Populate the safe calibration profile that reproduces the bridge's current
 // gimbal/pot/encoder normalization before an operator performs calibration.
 void defaultRcInputCalibration(RcInputCalibration& calibration);
+
+// Populate and validate central high-level body-command limits.
+void defaultBodyCommandLimits(BodyCommandLimits& limits);
+bool validateBodyCommandLimits(const BodyCommandLimits& limits);
 
 // Validate the logical RC source coverage, calibration ordering, and bounded
 // persisted conditioning fields independently of the rest of RobotConfig.

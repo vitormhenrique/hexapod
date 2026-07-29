@@ -105,6 +105,45 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
   out.count = 0;
   out.any_unreachable = false;
   out.any_reach_limited = false;
+
+  if (!apply_pose_) {
+    // Horizontal stroke extrema only (the largest |L| the swing profile
+    // produces). The lift apex is excluded on purpose: raising a foot moves
+    // it toward the middle of the reach annulus (|z| shrinks at unchanged
+    // radius), and the trajectory never combines full lift with a stroke
+    // endpoint, so the apex cannot be the binding constraint.
+    constexpr float kEnvelopeL[] = {-gait::kStrokeEnvelopeFrac,
+                                    gait::kStrokeEnvelopeFrac};
+    float path_scale = 1.0f;
+    for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+      float anchor_x, anchor_y, anchor_z;
+      engine_.nominalFoot(leg, anchor_x, anchor_y, anchor_z);
+      for (const float longitudinal : kEnvelopeL) {
+        float target_x, target_y, target_z;
+        engine_.motionEnvelopeFoot(leg, longitudinal, 0.0f,
+                                   target_x, target_y, target_z);
+        const float leg_scale = body_.bodyTargetPathScale(
+            leg, anchor_x, anchor_y, anchor_z,
+            target_x, target_y, target_z);
+        if (leg_scale < path_scale) path_scale = leg_scale;
+      }
+    }
+    if (path_scale < 1.0f) {
+      out.any_reach_limited = true;
+      // Scale only the horizontal stroke. The swing lift must survive reach
+      // limiting untouched: scaling Z used to collapse the lift together with
+      // the stride, leaving the feet dragging on the ground so the robot
+      // shuffled in place instead of walking.
+      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+        float anchor_x, anchor_y, anchor_z;
+        engine_.nominalFoot(leg, anchor_x, anchor_y, anchor_z);
+        FootTarget& target = feet.feet[leg];
+        target.x_mm = anchor_x + (target.x_mm - anchor_x) * path_scale;
+        target.y_mm = anchor_y + (target.y_mm - anchor_y) * path_scale;
+      }
+    }
+  }
+
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
     const FootTarget& f = feet.feet[leg];
     IkResult ik;
@@ -121,11 +160,7 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
         out.any_reach_limited = true;
       }
     } else {
-      bool reach_limited = false;
-      ik = body_.solveBodyLimited(leg, f.x_mm, f.y_mm, f.z_mm, reach_limited);
-      if (reach_limited) {
-        out.any_reach_limited = true;
-      }
+      ik = body_.solveBody(leg, f.x_mm, f.y_mm, f.z_mm);
     }
     if (!ik.reachable) {
       out.any_unreachable = true;

@@ -91,6 +91,39 @@ IkResult BodyKinematics::solveBodyLimited(uint8_t leg, float bx, float by,
   return ik_.solve(cx, cy, cz);
 }
 
+float BodyKinematics::bodyTargetPathScale(
+    uint8_t leg, float anchor_bx, float anchor_by, float anchor_bz,
+    float target_bx, float target_by, float target_bz) const {
+  if (leg >= config::kNumLegs) return 0.0f;
+
+  float target_x, target_y, target_z;
+  footBodyToCoxa(leg, target_bx, target_by, target_bz,
+                 target_x, target_y, target_z);
+  if (ik_.withinReachMargin(target_x, target_y, target_z)) return 1.0f;
+
+  float anchor_x, anchor_y, anchor_z;
+  footBodyToCoxa(leg, anchor_bx, anchor_by, anchor_bz,
+                 anchor_x, anchor_y, anchor_z);
+  if (!ik_.withinReachMargin(anchor_x, anchor_y, anchor_z)) return 0.0f;
+
+  float reachable = 0.0f;
+  float unreachable = 1.0f;
+  // Eight iterations bound the path scale within 1/256. At the maximum 80 mm
+  // stroke this is below 0.32 mm while keeping Cortex-M0+ work predictable.
+  for (uint8_t iteration = 0; iteration < 8; ++iteration) {
+    const float scale = 0.5f * (reachable + unreachable);
+    const float x = anchor_x + (target_x - anchor_x) * scale;
+    const float y = anchor_y + (target_y - anchor_y) * scale;
+    const float z = anchor_z + (target_z - anchor_z) * scale;
+    if (ik_.withinReachMargin(x, y, z)) {
+      reachable = scale;
+    } else {
+      unreachable = scale;
+    }
+  }
+  return reachable;
+}
+
 IkResult BodyKinematics::solveBodyPose(uint8_t leg, const BodyPose& pose,
                                        float wx, float wy, float wz) const {
   float bx, by, bz;

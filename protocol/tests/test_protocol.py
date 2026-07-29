@@ -1353,7 +1353,17 @@ def test_decode_robot_config_golden_fields():
     assert cfg.rc_input.channels[0].min_raw == -1000
     assert cfg.rc_input.channels[0].center_raw == 0
     assert cfg.rc_input.channels[0].max_raw == 1000
+    assert cfg.rc_input.channels[0].deadband_x255 == 13
+    assert cfg.rc_input.channels[0].filter_tau_ms == 60
+    assert cfg.rc_input.channels[0].expo_x255 == 0
     assert cfg.rc_input.channels[4].type == cfgmod.RC_UNIPOLAR_ANALOG
+    assert cfg.rc_input.channels[4].filter_tau_ms == 120
+    assert cfg.body_command.max_forward_milli == 1000
+    assert cfg.body_command.max_reverse_milli == 1000
+    assert cfg.body_command.forward_accel_milli_per_s == 1200
+    assert cfg.body_command.forward_decel_milli_per_s == 1800
+    assert cfg.body_command.pose_translation_rate_mm_per_s == 60
+    assert cfg.body_command.pose_rotation_rate_millirad_per_s == 500
     for want in CFG["servos"]:
         s = cfg.servos[want["index"]]
         assert s.id == want["id"]
@@ -1369,6 +1379,36 @@ def test_decode_robot_config_roundtrip():
     cfg = cfgmod.default_robot_config()
     again = cfgmod.decode_robot_config(cfgmod.encode_robot_config(cfg))
     assert again == cfg
+
+
+def test_decode_robot_config_migrates_v3_and_v4_payloads():
+    current = cfgmod.encode_robot_config(cfgmod.default_robot_config())
+    rc_offset = (
+        cfgmod.LEGACY_CONFIG_PAYLOAD_SIZE_V3
+        - cfgmod.NUM_FOOT_SENSORS * (4 + 2 + 2 + 2 + 1)
+        - 4
+    )
+    rc_bytes = cfgmod.NUM_RC_ANALOG_INPUTS * 15
+    body_bytes = 28
+
+    v3 = bytearray(
+        current[:rc_offset] + current[rc_offset + rc_bytes + body_bytes :]
+    )
+    struct.pack_into("<H", v3, 0, cfgmod.LEGACY_SCHEMA_VERSION_V3)
+    v3_config = cfgmod.decode_robot_config(bytes(v3))
+    assert v3_config.schema_version == cfgmod.SCHEMA_VERSION
+    assert v3_config.rc_input.channels[0].filter_tau_ms == 60
+    assert v3_config.body_command.forward_accel_milli_per_s == 1200
+
+    v4 = bytearray(
+        current[: rc_offset + rc_bytes]
+        + current[rc_offset + rc_bytes + body_bytes :]
+    )
+    struct.pack_into("<H", v4, 0, cfgmod.LEGACY_SCHEMA_VERSION_V4)
+    v4_config = cfgmod.decode_robot_config(bytes(v4))
+    assert v4_config.schema_version == cfgmod.SCHEMA_VERSION
+    assert v4_config.rc_input.channels[0].filter_tau_ms == 60
+    assert v4_config.body_command.forward_accel_milli_per_s == 1200
 
 
 def test_calibration_config_validation_matches_firmware_rules():
@@ -1401,6 +1441,12 @@ def test_calibration_config_validation_matches_firmware_rules():
     invalid_rc = copy.deepcopy(config)
     invalid_rc.rc_input.channels[0].center_raw = invalid_rc.rc_input.channels[0].min_raw
     assert "centered range" in "\n".join(cfgmod.validate_robot_config(invalid_rc))
+
+    invalid_limits = copy.deepcopy(config)
+    invalid_limits.body_command.forward_accel_milli_per_s = 0
+    assert "forward acceleration" in "\n".join(
+        cfgmod.validate_robot_config(invalid_limits)
+    )
 
 
 def test_decode_robot_config_rejects_bad_length_and_schema():

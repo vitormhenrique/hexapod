@@ -13,9 +13,14 @@
 
 #include "../dxl/servo_map.h"
 #include "../gait/trick_engine.h"
+#include "body_command_shaper.h"
 #include "controller_config.h"
 
 namespace controller {
+
+// RC three-position gait switch: low/centre/high select only moving gait
+// families. Stand and Sit are robot states, not walking-pattern choices.
+config::GaitId rcGaitFromIndex(uint8_t gait_index);
 
 class ControllerCore {
  public:
@@ -53,6 +58,7 @@ class ControllerCore {
   safety::CommandArbiter arbiter_;
   safety::StateMachine state_machine_;
   gait::TrickEngine trick_engine_;
+  BodyCommandShaper body_command_shaper_;
 
   uint32_t applied_intent_sequence_ = 0xFFFFFFFFu;
   uint8_t applied_gait_ = 0xFF;

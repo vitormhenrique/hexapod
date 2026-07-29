@@ -17,9 +17,9 @@
 #define configMAX_PRIORITIES 5
 #define configMINIMAL_STACK_SIZE ((unsigned short)150)
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
-#define configTOTAL_HEAP_SIZE ((size_t)(12 * 1024 + 256))
+#define configTOTAL_HEAP_SIZE ((size_t)(13 * 1024 + 256))
 #else
-#define configTOTAL_HEAP_SIZE ((size_t)(11 * 1024 + 320))
+#define configTOTAL_HEAP_SIZE ((size_t)(12 * 1024 + 320))
 #endif
 #define configMAX_TASK_NAME_LEN 8
 #define configUSE_TRACE_FACILITY 1

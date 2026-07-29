@@ -140,6 +140,7 @@ void defaultRobotConfig(RobotConfig& cfg) {
   cfg.gait.gait = static_cast<uint8_t>(GaitId::Stand);
 
   defaultRcInputCalibration(cfg.rc_input);
+  defaultBodyCommandLimits(cfg.body_command);
 
   // Foot sensors: disabled until calibrated.
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
@@ -209,6 +210,22 @@ uint16_t serializeRobotConfig(const RobotConfig& cfg, uint8_t* out,
     putU16(out, o, c.switch_debounce_ms);
   }
 
+  const BodyCommandLimits& body = cfg.body_command;
+  putU16(out, o, body.max_forward_milli);
+  putU16(out, o, body.max_reverse_milli);
+  putU16(out, o, body.max_lateral_milli);
+  putU16(out, o, body.max_yaw_milli);
+  putU16(out, o, body.forward_accel_milli_per_s);
+  putU16(out, o, body.forward_decel_milli_per_s);
+  putU16(out, o, body.lateral_accel_milli_per_s);
+  putU16(out, o, body.lateral_decel_milli_per_s);
+  putU16(out, o, body.yaw_accel_milli_per_s);
+  putU16(out, o, body.yaw_decel_milli_per_s);
+  putU16(out, o, body.height_rise_mm_per_s);
+  putU16(out, o, body.height_lower_mm_per_s);
+  putU16(out, o, body.pose_translation_rate_mm_per_s);
+  putU16(out, o, body.pose_rotation_rate_millirad_per_s);
+
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     putI32(out, o, cfg.feet[f].pressure_baseline);
     putU16(out, o, cfg.feet[f].near_thresh);
@@ -228,9 +245,11 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
 
   out = RobotConfig{};
   out.schema_version = getU16(in, o);
-  const bool legacy_v3 = out.schema_version == kLegacySchemaVersion &&
+  const bool legacy_v3 = out.schema_version == kLegacySchemaVersionV3 &&
                          len == kLegacyConfigPayloadSizeV3;
-  if (!legacy_v3 &&
+  const bool legacy_v4 = out.schema_version == kLegacySchemaVersionV4 &&
+                         len == kLegacyConfigPayloadSizeV4;
+  if (!legacy_v3 && !legacy_v4 &&
       (out.schema_version != kSchemaVersion || len != kConfigPayloadSize)) {
     return false;
   }
@@ -290,6 +309,26 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
     }
   }
 
+  if (legacy_v3 || legacy_v4) {
+    defaultBodyCommandLimits(out.body_command);
+  } else {
+    BodyCommandLimits& body = out.body_command;
+    body.max_forward_milli = getU16(in, o);
+    body.max_reverse_milli = getU16(in, o);
+    body.max_lateral_milli = getU16(in, o);
+    body.max_yaw_milli = getU16(in, o);
+    body.forward_accel_milli_per_s = getU16(in, o);
+    body.forward_decel_milli_per_s = getU16(in, o);
+    body.lateral_accel_milli_per_s = getU16(in, o);
+    body.lateral_decel_milli_per_s = getU16(in, o);
+    body.yaw_accel_milli_per_s = getU16(in, o);
+    body.yaw_decel_milli_per_s = getU16(in, o);
+    body.height_rise_mm_per_s = getU16(in, o);
+    body.height_lower_mm_per_s = getU16(in, o);
+    body.pose_translation_rate_mm_per_s = getU16(in, o);
+    body.pose_rotation_rate_millirad_per_s = getU16(in, o);
+  }
+
   for (uint8_t f = 0; f < kNumFootSensors; ++f) {
     out.feet[f].pressure_baseline = getI32(in, o);
     out.feet[f].near_thresh = getU16(in, o);
@@ -317,11 +356,14 @@ void defaultRcInputCalibration(RcInputCalibration& calibration) {
       c.min_raw = -1000;
       c.center_raw = 0;
       c.max_raw = 1000;
+      c.deadband_x255 = 13;  // ~5%, matching the prior bridge default.
+      c.filter_tau_ms = 60;
     } else if (index < 6) {
       c.type = static_cast<uint8_t>(RcChannelType::UnipolarAnalog);
       c.min_raw = 0;
       c.center_raw = 0;
       c.max_raw = 1000;
+      c.filter_tau_ms = 120;
     } else {
       c.type = static_cast<uint8_t>(RcChannelType::RelativeEncoder);
       c.min_raw = 0;
@@ -364,6 +406,44 @@ bool validateRcInputCalibration(const RcInputCalibration& calibration) {
     }
   }
   return true;
+}
+
+void defaultBodyCommandLimits(BodyCommandLimits& limits) {
+  limits = BodyCommandLimits{};
+}
+
+bool validateBodyCommandLimits(const BodyCommandLimits& limits) {
+  if (limits.max_forward_milli == 0 ||
+      limits.max_forward_milli > kBodyCommandMaxScaleMilli ||
+      limits.max_reverse_milli == 0 ||
+      limits.max_reverse_milli > kBodyCommandMaxScaleMilli ||
+      limits.max_lateral_milli == 0 ||
+      limits.max_lateral_milli > kBodyCommandMaxScaleMilli ||
+      limits.max_yaw_milli == 0 ||
+      limits.max_yaw_milli > kBodyCommandMaxScaleMilli) {
+    return false;
+  }
+  const uint16_t accel_limits[] = {
+      limits.forward_accel_milli_per_s, limits.forward_decel_milli_per_s,
+      limits.lateral_accel_milli_per_s, limits.lateral_decel_milli_per_s,
+      limits.yaw_accel_milli_per_s, limits.yaw_decel_milli_per_s};
+  for (uint8_t index = 0; index < sizeof(accel_limits) / sizeof(accel_limits[0]);
+       ++index) {
+    if (accel_limits[index] == 0 ||
+        accel_limits[index] > kBodyCommandMaxAccelMilliPerS) {
+      return false;
+    }
+  }
+  return limits.height_rise_mm_per_s > 0 &&
+         limits.height_rise_mm_per_s <= kBodyHeightRateMaxMmPerS &&
+         limits.height_lower_mm_per_s > 0 &&
+         limits.height_lower_mm_per_s <= kBodyHeightRateMaxMmPerS &&
+         limits.pose_translation_rate_mm_per_s > 0 &&
+         limits.pose_translation_rate_mm_per_s <=
+             kBodyPoseTranslationRateMaxMmPerS &&
+         limits.pose_rotation_rate_millirad_per_s > 0 &&
+         limits.pose_rotation_rate_millirad_per_s <=
+             kBodyPoseRotationRateMaxMilliRadPerS;
 }
 
 bool validateRobotConfig(const RobotConfig& cfg) {
@@ -413,6 +493,7 @@ bool validateRobotConfig(const RobotConfig& cfg) {
   if (cfg.gait.stride_len_mm > kMaxGaitStrideMm) return false;
   if (cfg.gait.step_height_mm > kMaxGaitStepMm) return false;
   if (!validateRcInputCalibration(cfg.rc_input)) return false;
+  if (!validateBodyCommandLimits(cfg.body_command)) return false;
 
   // feature_defaults may only request known features; an unknown bit means the
   // payload was produced by a newer/garbage schema and must not be trusted.

@@ -18,28 +18,8 @@ inline float clampf(float v, float lo, float hi) {
   return v;
 }
 
-// Apply a symmetric centre deadband (fraction of full scale) to a [-1,1] value
-// and rescale so the response is continuous from the deadband edge to +/-1.
-inline float applyDeadband(float v, float db) {
-  if (db <= 0.0f) return v;
-  if (db >= 1.0f) return 0.0f;
-  const float a = v < 0.0f ? -v : v;
-  if (a <= db) return 0.0f;
-  const float scaled = (a - db) / (1.0f - db);
-  return v < 0.0f ? -scaled : scaled;
-}
-
-// Map a 0..1000 pot reading to a unipolar 0..1.
-inline float potUnit(int16_t pot) {
-  return clampf(static_cast<float>(pot) / 1000.0f, 0.0f, 1.0f);
-}
-
-// Map a -1000..1000 gimbal reading to a bipolar -1..1.
-inline float gimbalUnit(int16_t g) {
-  return clampf(static_cast<float>(g) / 1000.0f, -1.0f, 1.0f);
-}
-
 constexpr int16_t kCalibrationOutOfRangeTolerance = 64;
+constexpr uint16_t kModeSwitchDebounceMs = 40;
 
 bool rawWithinCalibrationWindow(int16_t raw,
                                 const config::RcChannelCalibration& c) {
@@ -116,18 +96,21 @@ inline void clearRawInputs(ChannelPackInputs_t* out) {
 
 BindingConfig defaultBindings() {
   BindingConfig c;
-  // Left gimbal walks; right gimbal does body work / strafe.
-  c.walk_forward = {AxisSource::GimbalLY, false, 0.05f};
-  c.walk_yaw = {AxisSource::GimbalLX, false, 0.05f};
-  c.walk_strafe = {AxisSource::GimbalRX, false, 0.05f};
-  // Translate-body: right gimbal shifts x/y, left-Y lifts/lowers the body.
-  c.body_x = {AxisSource::GimbalRY, false, 0.05f};
-  c.body_y = {AxisSource::GimbalRX, false, 0.05f};
-  c.body_z = {AxisSource::GimbalLY, false, 0.05f};
-  // Rotate-body: right gimbal = roll/pitch, left-X = yaw.
-  c.body_roll = {AxisSource::GimbalRX, false, 0.05f};
-  c.body_pitch = {AxisSource::GimbalRY, false, 0.05f};
-  c.body_yaw = {AxisSource::GimbalLX, false, 0.05f};
+  // Left gimbal ALWAYS walks (forward + yaw); the mode toggle selects what
+  // the right gimbal overlays on top of walking (Phoenix-style).
+  c.walk_forward = {AxisSource::GimbalLY, false, 0.0f};
+  c.walk_yaw = {AxisSource::GimbalLX, false, 0.0f};
+  c.walk_strafe = {AxisSource::GimbalRX, false, 0.0f};
+  // Translate-body overlay: right gimbal shifts the body fore/aft + lateral
+  // while the left gimbal keeps walking. Z stays on the height pot.
+  c.body_x = {AxisSource::GimbalRY, false, 0.0f};
+  c.body_y = {AxisSource::GimbalRX, false, 0.0f};
+  c.body_z = {AxisSource::None, false, 0.0f};
+  // Rotate-body overlay: right gimbal = roll/pitch while walking. Yaw stays
+  // on the left stick as walking yaw.
+  c.body_roll = {AxisSource::GimbalRX, false, 0.0f};
+  c.body_pitch = {AxisSource::GimbalRY, false, 0.0f};
+  c.body_yaw = {AxisSource::None, false, 0.0f};
   // Shape params: pots are absolute, encoders trim stride / step clearance.
   c.speed = {AxisSource::Pot1, false, 0.0f};
   c.body_height = {AxisSource::Pot2, false, 0.0f};
@@ -164,6 +147,7 @@ BindingConfig defaultBindings() {
 ControllerBridge::ControllerBridge() {
   cfg_ = defaultBindings();
   config::defaultRcInputCalibration(calibration_);
+  conditioner_.configure(calibration_);
   reset();
 }
 
@@ -171,7 +155,13 @@ void ControllerBridge::setCalibration(
     const config::RcInputCalibration& calibration) {
   if (config::validateRcInputCalibration(calibration)) {
     calibration_ = calibration;
+    conditioner_.configure(calibration_);
   }
+}
+
+bool ControllerBridge::setInputFilterMode(
+    InputFilterMode mode, bool diagnostic_mode_allowed) {
+  return conditioner_.setMode(mode, diagnostic_mode_allowed);
 }
 
 void ControllerBridge::reset() {
@@ -188,6 +178,17 @@ void ControllerBridge::reset() {
   tx_direct_layout_streak_ = 0;
   arm_release_pending_ = false;
   arm_release_since_ms_ = 0;
+  conditioner_.reset();
+  for (uint8_t index = 0; index < 4; ++index) conditioned_gimbal_[index] = 0.0f;
+  for (uint8_t index = 0; index < 2; ++index) {
+    conditioned_pot_[index] = 0.0f;
+    conditioned_encoder_[index] = 0.5f;
+    conditioned_toggles_[index] = 1;
+  }
+  mode_switch_.reset();
+  gait_switch_.reset();
+  last_condition_ms_ = 0;
+  condition_time_seen_ = false;
   for (uint8_t i = 0; i < 2; ++i) {
     enc_last_[i] = 0;
     enc_seen_[i] = false;
@@ -376,65 +377,104 @@ void ControllerBridge::updateTx16sDirectVirtualEncoders(
 
 float ControllerBridge::readAxisBipolar(const AxisBinding& b) const {
   float v = 0.0f;
-  bool valid = true;
   switch (b.source) {
     case AxisSource::GimbalLX:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[0], v); break;
     case AxisSource::GimbalLY:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[1], v); break;
     case AxisSource::GimbalRX:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[2], v); break;
     case AxisSource::GimbalRY:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[3], v); break;
+      v = conditionedBipolar(b.source);
+      break;
     case AxisSource::Pot1:
-      valid = readCalibratedUnipolar(b.source, raw_.pot[0], v);
-      v = v * 2.0f - 1.0f;
-      break;
     case AxisSource::Pot2:
-      valid = readCalibratedUnipolar(b.source, raw_.pot[1], v);
-      v = v * 2.0f - 1.0f;
+    case AxisSource::Enc1:
+    case AxisSource::Enc2:
+      v = conditionedUnipolar(b.source) * 2.0f - 1.0f;
       break;
-    case AxisSource::Enc1: v = enc_accum_[0] * 2.0f - 1.0f; break;
-    case AxisSource::Enc2: v = enc_accum_[1] * 2.0f - 1.0f; break;
     case AxisSource::None: return 0.0f;
   }
-  if (!valid) return 0.0f;
-  v = applyDeadband(v, b.deadband);
+  v = applyBindingResponse(b, v);
   if (b.invert) v = -v;
   return clampf(v, -1.0f, 1.0f);
 }
 
 float ControllerBridge::readAxisUnipolar(const AxisBinding& b) const {
   float v = 0.0f;
-  bool valid = true;
   switch (b.source) {
     case AxisSource::GimbalLX:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[0], v);
-      v = (v + 1.0f) * 0.5f;
-      break;
     case AxisSource::GimbalLY:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[1], v);
-      v = (v + 1.0f) * 0.5f;
-      break;
     case AxisSource::GimbalRX:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[2], v);
-      v = (v + 1.0f) * 0.5f;
-      break;
     case AxisSource::GimbalRY:
-      valid = readCalibratedBipolar(b.source, raw_.gimbal[3], v);
-      v = (v + 1.0f) * 0.5f;
+      v = (applyBindingResponse(b, conditionedBipolar(b.source)) + 1.0f) *
+          0.5f;
       break;
     case AxisSource::Pot1:
-      valid = readCalibratedUnipolar(b.source, raw_.pot[0], v); break;
     case AxisSource::Pot2:
-      valid = readCalibratedUnipolar(b.source, raw_.pot[1], v); break;
-    case AxisSource::Enc1: v = enc_accum_[0]; break;
-    case AxisSource::Enc2: v = enc_accum_[1]; break;
+    case AxisSource::Enc1:
+    case AxisSource::Enc2:
+      v = conditionedUnipolar(b.source);
+      break;
     case AxisSource::None: return 0.0f;
   }
-  if (!valid) return 0.0f;
   if (b.invert) v = 1.0f - v;
   return clampf(v, 0.0f, 1.0f);
+}
+
+void ControllerBridge::updateConditionedInputs(uint32_t now_ms) {
+  const uint32_t dt_ms = condition_time_seen_ ? now_ms - last_condition_ms_ : 0;
+  condition_time_seen_ = true;
+  last_condition_ms_ = now_ms;
+
+  float normalized = 0.0f;
+  for (uint8_t index = 0; index < 4; ++index) {
+    const AxisSource source = static_cast<AxisSource>(index + 1u);
+    const bool valid = readCalibratedBipolar(source, raw_.gimbal[index],
+                                             normalized);
+    conditioned_gimbal_[index] = conditioner_.update(
+        static_cast<uint8_t>(source), valid ? normalized : 0.0f, dt_ms);
+  }
+  for (uint8_t index = 0; index < 2; ++index) {
+    const AxisSource source = static_cast<AxisSource>(index + 5u);
+    const bool valid = readCalibratedUnipolar(source, raw_.pot[index],
+                                              normalized);
+    conditioned_pot_[index] = conditioner_.update(
+        static_cast<uint8_t>(source), valid ? normalized : 0.0f, dt_ms);
+  }
+  for (uint8_t index = 0; index < 2; ++index) {
+    const AxisSource source = static_cast<AxisSource>(index + 7u);
+    conditioned_encoder_[index] = conditioner_.update(
+        static_cast<uint8_t>(source), enc_accum_[index], dt_ms);
+  }
+}
+
+void ControllerBridge::updateConditionedToggles(uint32_t now_ms) {
+  conditioned_toggles_[0] =
+      mode_switch_.update(raw_.toggles[0], now_ms, kModeSwitchDebounceMs);
+  conditioned_toggles_[1] =
+      gait_switch_.update(raw_.toggles[1], now_ms, kModeSwitchDebounceMs);
+}
+
+float ControllerBridge::conditionedBipolar(AxisSource source) const {
+  const uint8_t index = static_cast<uint8_t>(source);
+  if (index < 1 || index > 4) return 0.0f;
+  return conditioned_gimbal_[index - 1u];
+}
+
+float ControllerBridge::conditionedUnipolar(AxisSource source) const {
+  const uint8_t index = static_cast<uint8_t>(source);
+  if (index >= 5 && index <= 6) return conditioned_pot_[index - 5u];
+  if (index >= 7 && index <= 8) return conditioned_encoder_[index - 7u];
+  return 0.0f;
+}
+
+float ControllerBridge::applyBindingResponse(const AxisBinding& binding,
+                                              float value) const {
+  const uint8_t source = static_cast<uint8_t>(binding.source);
+  if (!conditioner_.isCentered(source)) return value;
+  const float deadband = binding.deadband > 0.0f
+                             ? binding.deadband
+                             : conditioner_.deadband(source);
+  value = RcInputConditioner::applyDeadband(value, deadband);
+  return RcInputConditioner::applyExpo(value, conditioner_.expo(source));
 }
 
 const config::RcChannelCalibration* ControllerBridge::calibrationFor(
@@ -519,8 +559,8 @@ bool ControllerBridge::readBool(BoolSource s) const {
 uint8_t ControllerBridge::readTri(TriSource s) const {
   switch (s) {
     case TriSource::None: return 1;  // treat unmapped as CENTER
-    case TriSource::SwE: return raw_.toggles[0];
-    case TriSource::SwF: return raw_.toggles[1];
+    case TriSource::SwE: return conditioned_toggles_[0];
+    case TriSource::SwF: return conditioned_toggles_[1];
   }
   return 1;
 }
@@ -587,6 +627,9 @@ const ControllerCommand& ControllerBridge::update(
     return cmd_;
   }
 
+  updateConditionedInputs(now_ms);
+  updateConditionedToggles(now_ms);
+
   cmd_.valid = true;
   cmd_.failsafe = false;
   cmd_.ever_seen = true;
@@ -595,7 +638,9 @@ const ControllerCommand& ControllerBridge::update(
   // Mode + gait selectors.
   const uint8_t mode_v = readTri(cfg_.mode_select);
   cmd_.mode = static_cast<ControlMode>(mode_v < kNumControlModes ? mode_v : 0);
-  cmd_.gait_index = readTri(cfg_.gait_select);
+  if (cmd_.mode == ControlMode::Walk) {
+    cmd_.gait_index = readTri(cfg_.gait_select);
+  }
 
   // Safety levels.
   const bool kill = readBool(cfg_.estop);
@@ -631,17 +676,20 @@ const ControllerCommand& ControllerBridge::update(
   cmd_.stride = readAxisUnipolar(cfg_.stride);
   cmd_.step_height = readAxisUnipolar(cfg_.step_height);
 
-  // Mode-specific motion. In a body mode the feet stay planted (twist = 0); in
-  // walk mode the body pose offset is held at 0. The persistent operator trim
+  // Motion: the left gimbal ALWAYS walks (forward + yaw), in every mode, so
+  // the operator never loses locomotion while adjusting the body. The mode
+  // toggle selects the RIGHT-gimbal overlay: strafe (Walk), body translation
+  // (TranslateBody), or body attitude (RotateBody) -- applied WHILE walking,
+  // Phoenix-style. Unused pose axes stay zero; the persistent operator trim
   // is always carried so a standing lean survives a mode change.
   cmd_.twist_vx = cmd_.twist_vy = cmd_.twist_wz = 0.0f;
   cmd_.pose_x_mm = cmd_.pose_y_mm = cmd_.pose_z_mm = 0.0f;
   cmd_.pose_roll = cmd_.pose_pitch = cmd_.pose_yaw = 0.0f;
+  cmd_.twist_vx = readAxisBipolar(cfg_.walk_forward);
+  cmd_.twist_wz = readAxisBipolar(cfg_.walk_yaw);
   switch (cmd_.mode) {
     case ControlMode::Walk:
-      cmd_.twist_vx = readAxisBipolar(cfg_.walk_forward);
       cmd_.twist_vy = readAxisBipolar(cfg_.walk_strafe);
-      cmd_.twist_wz = readAxisBipolar(cfg_.walk_yaw);
       break;
     case ControlMode::TranslateBody:
       cmd_.pose_x_mm = readAxisBipolar(cfg_.body_x) * poselim::kMaxTransMm;

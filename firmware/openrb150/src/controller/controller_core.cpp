@@ -19,16 +19,6 @@ config::GaitId gaitFromWire(uint8_t gait) {
   return static_cast<config::GaitId>(gait);
 }
 
-config::GaitId rcGaitFromIndex(uint8_t gait_index) {
-  static const config::GaitId kGaits[3] = {
-      config::GaitId::Stand,
-      config::GaitId::Tripod,
-      config::GaitId::Ripple,
-  };
-  if (gait_index > 2) gait_index = 2;
-  return kGaits[gait_index];
-}
-
 bool rcCommandIsActive(const ControllerCommand& command) {
   return command.valid &&
          (fabsf(command.twist_vx) > 0.05f ||
@@ -77,9 +67,21 @@ gait::BodyPose commandPoseToBody(const gait::BodyPose& command) {
 
 }  // namespace
 
+config::GaitId rcGaitFromIndex(uint8_t gait_index) {
+  static const config::GaitId kGaits[3] = {
+      config::GaitId::Wave,
+      config::GaitId::Ripple,
+      config::GaitId::Tripod,
+  };
+  if (gait_index > 2) gait_index = 2;
+  return kGaits[gait_index];
+}
+
 ControllerCore::ControllerCore()
     : pipeline_(config_cache_.snapshot().robot),
       servo_map_(config_cache_.snapshot().robot) {
+  body_command_shaper_.configure(
+      config_cache_.snapshot().robot.body_command);
   reset();
 }
 
@@ -89,6 +91,9 @@ void ControllerCore::reset() {
   trick_engine_.reset();
   pipeline_.reconfigure();
   pipeline_.resetPhase();
+  body_command_shaper_.configure(config_cache_.snapshot().robot.body_command);
+  body_command_shaper_.reset(
+      static_cast<float>(config_cache_.snapshot().robot.gait.body_height_mm));
   applied_intent_sequence_ = 0xFFFFFFFFu;
   applied_gait_ = 0xFF;
   idle_seen_intent_sequence_ = 0xFFFFFFFFu;
@@ -121,6 +126,10 @@ void ControllerCore::step(const RobotState& state,
     config_usable = update != ConfigSnapshotUpdate::Rejected;
     if (update == ConfigSnapshotUpdate::Updated) {
       pipeline_.reconfigure();
+      const ControllerConfigSnapshot& updated_config = config_cache_.snapshot();
+      body_command_shaper_.configure(updated_config.robot.body_command);
+      body_command_shaper_.reset(
+          static_cast<float>(updated_config.robot.gait.body_height_mm));
       applied_intent_sequence_ = 0xFFFFFFFFu;
       applied_gait_ = 0xFF;
       command.diagnostics.config_reapplied = true;
@@ -263,6 +272,11 @@ void ControllerCore::step(const RobotState& state,
     float effective_vy = intent.motion.twist_vy;
     float effective_wz = intent.motion.twist_wz;
     gait::BodyPose body_pose = poseFromMotion(intent.motion);
+    uint16_t requested_body_height = intent.motion.body_height_mm;
+    uint16_t requested_stride = intent.motion.stride_len_mm;
+    uint16_t requested_step_height = intent.motion.step_height_mm;
+    uint8_t requested_speed = intent.motion.speed_x255;
+    uint8_t requested_duty = intent.motion.duty_x255;
 
     if (rc_drives) {
       const ControllerCommand& rc = intent.rc.command;
@@ -281,16 +295,17 @@ void ControllerCore::step(const RobotState& state,
         effective_wz = trick.twist_wz;
         body_pose = trick.pose;
         if (trick.override_height) height_fraction = trick.body_height_frac;
-      } else if (rc.mode == ControlMode::Walk) {
+      } else {
+        // Simultaneous walk + body-pose (Phoenix-style): the bridge always
+        // maps the left gimbal to twist and the mode-selected right-gimbal
+        // overlay to either strafe (twist_vy) or a body-pose offset. Both are
+        // applied together, so the operator can translate/tilt the body while
+        // walking; with the sticks centred the gait holds the planted home
+        // stance and only the pose moves the core.
         effective_gait = static_cast<uint8_t>(rcGaitFromIndex(rc.gait_index));
         effective_vx = rc.twist_vx;
         effective_vy = rc.twist_vy;
         effective_wz = rc.twist_wz;
-      } else {
-        effective_gait = static_cast<uint8_t>(config::GaitId::Stand);
-        effective_vx = 0.0f;
-        effective_vy = 0.0f;
-        effective_wz = 0.0f;
         body_pose.x_mm = rc.pose_x_mm;
         body_pose.y_mm = rc.pose_y_mm;
         body_pose.z_mm = rc.pose_z_mm;
@@ -304,29 +319,40 @@ void ControllerCore::step(const RobotState& state,
       }
       const uint16_t body_height = static_cast<uint16_t>(
           gait::rcBodyHeightMm(height_fraction) + 0.5f);
-      const uint16_t stride = static_cast<uint16_t>(
+        requested_body_height = body_height;
+        requested_stride = static_cast<uint16_t>(
           rc.stride * config::kMaxGaitStrideMm);
-      const uint16_t step_height = static_cast<uint16_t>(
+        requested_step_height = static_cast<uint16_t>(
           rc.step_height * config::kMaxGaitStepMm);
-      const uint8_t speed = static_cast<uint8_t>(rc.speed * 255.0f);
-      pipeline_.setParams(body_height, stride, step_height,
-                          intent.motion.duty_x255, speed);
+        requested_speed = static_cast<uint8_t>(rc.speed * 255.0f);
       applied_intent_sequence_ = 0xFFFFFFFFu;
     } else if (intent.motion.seq != applied_intent_sequence_) {
       trick_engine_.cancel();
       previous_rc_trick_ = TrickId::None;
-      pipeline_.setParams(intent.motion.body_height_mm,
-                          intent.motion.stride_len_mm,
-                          intent.motion.step_height_mm,
-                          intent.motion.duty_x255,
-                          intent.motion.speed_x255);
       applied_intent_sequence_ = intent.motion.seq;
     } else {
       trick_engine_.cancel();
       previous_rc_trick_ = TrickId::None;
     }
 
-    pipeline_.setBodyPose(commandPoseToBody(body_pose));
+      BodyCommand desired_body;
+      desired_body.vx = effective_vx;
+      desired_body.vy = effective_vy;
+      desired_body.wz = effective_wz;
+      desired_body.body_height_mm = static_cast<float>(requested_body_height);
+      desired_body.pose = body_pose;
+      const BodyCommand& shaped_body =
+        body_command_shaper_.update(desired_body, time.dt_ms);
+
+      effective_vx = shaped_body.vx;
+      effective_vy = shaped_body.vy;
+      effective_wz = shaped_body.wz;
+      body_pose = shaped_body.pose;
+      const uint16_t shaped_height = static_cast<uint16_t>(
+        shaped_body.body_height_mm + 0.5f);
+      pipeline_.setParams(shaped_height, requested_stride, requested_step_height,
+                requested_duty, requested_speed);
+      pipeline_.setBodyPose(commandPoseToBody(body_pose));
     const config::GaitId desired_gait = gaitFromWire(effective_gait);
     if (effective_gait != applied_gait_) {
       pipeline_.setGait(desired_gait);
@@ -367,6 +393,8 @@ void ControllerCore::step(const RobotState& state,
         command.goals.any_reach_limited;
   } else {
     trick_engine_.cancel();
+    body_command_shaper_.reset(
+        static_cast<float>(active_config.robot.gait.body_height_mm));
     previous_rc_trick_ = TrickId::None;
     applied_intent_sequence_ = 0xFFFFFFFFu;
     applied_gait_ = 0xFF;

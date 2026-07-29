@@ -1,10 +1,13 @@
 // Native (host) unit tests for the gait -> servo goal pipeline (lmt.1).
 // Run with: pio test -e native
 
+#include <math.h>
 #include <unity.h>
 
 #include "../../src/config/config_schema.h"
+#include "../../src/dxl/servo_map.h"
 #include "../../src/gait/gait_pipeline.h"
+#include "../../src/gait/leg_ik.h"
 
 using namespace gait;
 using namespace config;
@@ -23,6 +26,45 @@ const ServoConfig* servoById(const RobotConfig& cfg, uint8_t id) {
     if (cfg.servos[k].id == id) return &cfg.servos[k];
   }
   return nullptr;
+}
+
+bool emittedFootBody(const RobotConfig& cfg, const PipelineOutput& out,
+                     uint8_t leg, float& body_x, float& body_y,
+                     float& body_z) {
+  dxl::ServoMap map(cfg);
+  float angles[kJointsPerLeg] = {};
+  bool found[kJointsPerLeg] = {};
+  for (uint8_t index = 0; index < out.count; ++index) {
+    const PipelineJoint& goal = out.joints[index];
+    if (goal.leg != leg || goal.joint >= kJointsPerLeg) continue;
+    angles[goal.joint] = map.tickToAngle(leg, goal.joint, goal.tick);
+    found[goal.joint] = true;
+  }
+  for (uint8_t joint = 0; joint < kJointsPerLeg; ++joint) {
+    if (!found[joint]) return false;
+  }
+
+  LegIk ik(cfg.links.coxa_cmm / 100.0f, cfg.links.femur_cmm / 100.0f,
+           cfg.links.tibia_cmm / 100.0f,
+           cfg.geometry.home_radius_cmm / 100.0f,
+           cfg.geometry.home_foot_z_cmm / 100.0f);
+  float coxa_x, coxa_y, coxa_z;
+  ik.forwardRaw(angles[0], angles[1] + ik.femurRest(),
+                angles[2] + ik.tibiaRest(), coxa_x, coxa_y, coxa_z);
+
+  constexpr float kPi = 3.14159265358979323846f;
+  const LegGeometry& geometry = cfg.legs[leg];
+  const float yaw = geometry.mount_yaw_cdeg * (kPi / 18000.0f);
+  const float a = -(yaw + kPi / 2.0f);
+  const float cos_a = cosf(a);
+  const float sin_a = sinf(a);
+  body_x = geometry.mount_x_dmm / 10.0f +
+           cos_a * coxa_x + sin_a * coxa_y;
+  body_y = geometry.mount_y_dmm / 10.0f -
+           sin_a * coxa_x + cos_a * coxa_y;
+  body_z = coxa_z + geometry.mount_z_dmm / 10.0f +
+           cfg.geometry.coxa_lift_cmm / 100.0f;
+  return true;
 }
 
 }  // namespace
@@ -291,6 +333,108 @@ void test_large_stride_is_reach_limited_not_unreachable() {
   TEST_ASSERT_TRUE(saw_reach_limit);
 }
 
+void assertStanceDirectionPreserved(float vx, float vy, float wz) {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Tripod);
+  pipe.setParams(40, cfg.gait.stride_len_mm, 30, 128, 255);
+  pipe.setTwist(vx, vy, wz);
+
+  GaitEngine reference;
+  reference.configure(cfg.gait);
+  GaitDefaults reference_params = cfg.gait;
+  reference_params.body_height_mm = 40;
+  reference_params.stride_len_mm = cfg.gait.stride_len_mm;
+  reference_params.step_height_mm = 30;
+  reference_params.duty_x255 = 128;
+  reference_params.speed_x255 = 255;
+  reference.configure(reference_params);
+  reference.setGait(GaitId::Tripod);
+  BodyTwist twist;
+  twist.vx = vx;
+  twist.vy = vy;
+  twist.wz = wz;
+  reference.setTwist(twist);
+
+  GaitOutput previous_reference;
+  PipelineOutput previous_output;
+  // Warm up past the walking-stance-bias / reach-limit convergence: during
+  // onset the stance centres deliberately slide toward the hips, which is a
+  // commanded repositioning, not a trajectory direction error. Steady-state
+  // stance sweeps must then never reverse.
+  for (uint16_t step = 0; step < 400; ++step) {
+    reference.update(5, previous_reference);
+    pipe.update(5, previous_output);
+  }
+  reference.update(5, previous_reference);
+  pipe.update(5, previous_output);
+  float previous_x[kNumLegs] = {};
+  float previous_y[kNumLegs] = {};
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    float z;
+    TEST_ASSERT_TRUE(emittedFootBody(cfg, previous_output, leg,
+                                    previous_x[leg], previous_y[leg], z));
+  }
+
+  uint16_t checked[kNumLegs] = {};
+  uint16_t reversed[kNumLegs] = {};
+  for (uint16_t step = 0; step < 500; ++step) {
+    GaitOutput current_reference;
+    PipelineOutput current_output;
+    reference.update(5, current_reference);
+    pipe.update(5, current_output);
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      float x, y, z;
+      TEST_ASSERT_TRUE(emittedFootBody(cfg, current_output, leg, x, y, z));
+      if (!previous_reference.feet[leg].swing &&
+          !current_reference.feet[leg].swing) {
+        const float intended_x = current_reference.feet[leg].x_mm -
+                                 previous_reference.feet[leg].x_mm;
+        const float intended_y = current_reference.feet[leg].y_mm -
+                                 previous_reference.feet[leg].y_mm;
+        const float emitted_x = x - previous_x[leg];
+        const float emitted_y = y - previous_y[leg];
+        const float intended_magnitude =
+            sqrtf(intended_x * intended_x + intended_y * intended_y);
+        const float emitted_magnitude =
+            sqrtf(emitted_x * emitted_x + emitted_y * emitted_y);
+        if (intended_magnitude > 1e-3f) {
+          const float direction_dot =
+              emitted_x * intended_x + emitted_y * intended_y;
+          if (direction_dot < 0.0f && emitted_magnitude > 0.02f) {
+            ++reversed[leg];
+          }
+          ++checked[leg];
+        }
+      }
+      previous_x[leg] = x;
+      previous_y[leg] = y;
+    }
+    previous_reference = current_reference;
+  }
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    TEST_ASSERT_TRUE(checked[leg] > 20);
+  }
+  TEST_ASSERT_EQUAL_UINT16(0, reversed[0]);
+  TEST_ASSERT_EQUAL_UINT16(0, reversed[1]);
+  TEST_ASSERT_EQUAL_UINT16(0, reversed[2]);
+  TEST_ASSERT_EQUAL_UINT16(0, reversed[3]);
+  TEST_ASSERT_EQUAL_UINT16(0, reversed[4]);
+  TEST_ASSERT_EQUAL_UINT16(0, reversed[5]);
+}
+
+void test_default_forward_stance_never_reverses_after_ik() {
+  assertStanceDirectionPreserved(0.0f, 1.0f, 0.0f);
+}
+
+void test_default_lateral_stance_never_reverses_after_ik() {
+  assertStanceDirectionPreserved(1.0f, 0.0f, 0.0f);
+}
+
+void test_default_yaw_stance_never_reverses_after_ik() {
+  assertStanceDirectionPreserved(0.0f, 0.0f, 1.0f);
+}
+
 // The static home stance is within the reach margin, so it is never flagged.
 void test_stand_is_not_reach_limited() {
   RobotConfig cfg = defaultCfg();
@@ -383,6 +527,78 @@ void test_extreme_body_pose_is_reach_limited_not_unreachable() {
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 
+// Regression for the "robot does not walk" collapse: the near-boundary home
+// stance used to path-scale the WHOLE trajectory (stride AND swing lift) down
+// to a few millimetres. With the walking stance bias and lift decoupled from
+// horizontal reach limiting, a default full-stick forward walk must emit real
+// steps: a large horizontal sweep and a real swing lift on every leg.
+void test_default_forward_walk_takes_real_steps() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Tripod);
+  pipe.setParams(40, 60, 30, 128, 255);
+  pipe.setTwist(0.0f, 1.0f, 0.0f);  // full forward (+Y mechanical front)
+
+  // Let the stance-bias / shape filters converge (~1 s).
+  PipelineOutput out;
+  for (int i = 0; i < 100; ++i) pipe.update(10, out);
+
+  float min_y[kNumLegs], max_y[kNumLegs], min_z[kNumLegs], max_z[kNumLegs];
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    min_y[leg] = min_z[leg] = 1e9f;
+    max_y[leg] = max_z[leg] = -1e9f;
+  }
+  // > 2 full cycles at max cadence (1.2 Hz).
+  for (int i = 0; i < 300; ++i) {
+    pipe.update(10, out);
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      float x, y, z;
+      TEST_ASSERT_TRUE(emittedFootBody(cfg, out, leg, x, y, z));
+      if (y < min_y[leg]) min_y[leg] = y;
+      if (y > max_y[leg]) max_y[leg] = y;
+      if (z < min_z[leg]) min_z[leg] = z;
+      if (z > max_z[leg]) max_z[leg] = z;
+    }
+  }
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    // Horizontal sweep: a healthy fraction of the 60 mm commanded stride.
+    TEST_ASSERT_TRUE(max_y[leg] - min_y[leg] >= 30.0f);
+    // Swing lift survives reach limiting (30 mm commanded).
+    TEST_ASSERT_TRUE(max_z[leg] - min_z[leg] >= 15.0f);
+  }
+}
+
+// Phoenix-style simultaneous control: a body-pose offset applied WHILE a
+// forward twist is walking must keep the gait stepping (goals keep changing)
+// and stay reachable.
+void test_body_pose_overlay_keeps_gait_stepping() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Tripod);
+  pipe.setParams(40, 60, 30, 128, 255);
+  pipe.setTwist(0.0f, 1.0f, 0.0f);
+  BodyPose pose;
+  pose.x_mm = 15.0f;
+  pose.roll = 0.1f;
+  pipe.setBodyPose(pose);
+
+  PipelineOutput prev;
+  for (int i = 0; i < 100; ++i) pipe.update(10, prev);
+  bool stepping = false;
+  for (int i = 0; i < 100; ++i) {
+    PipelineOutput cur;
+    pipe.update(10, cur);
+    TEST_ASSERT_FALSE(cur.any_unreachable);
+    for (uint8_t k = 0; k < cur.count; ++k) {
+      const int delta = static_cast<int>(cur.joints[k].tick) -
+                        static_cast<int>(prev.joints[k].tick);
+      if (delta > 5 || delta < -5) stepping = true;
+    }
+    prev = cur;
+  }
+  TEST_ASSERT_TRUE(stepping);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_emits_all_mapped_joints_within_travel);
@@ -396,9 +612,14 @@ int main(int, char**) {
   RUN_TEST(test_set_params_preserves_selected_gait);
   RUN_TEST(test_reconfigure_rebuilds_cached_body_ik);
   RUN_TEST(test_large_stride_is_reach_limited_not_unreachable);
+  RUN_TEST(test_default_forward_stance_never_reverses_after_ik);
+  RUN_TEST(test_default_lateral_stance_never_reverses_after_ik);
+  RUN_TEST(test_default_yaw_stance_never_reverses_after_ik);
   RUN_TEST(test_stand_is_not_reach_limited);
   RUN_TEST(test_body_pose_moves_core_over_planted_feet);
   RUN_TEST(test_body_pose_neutral_restores_walk_path);
   RUN_TEST(test_extreme_body_pose_is_reach_limited_not_unreachable);
+  RUN_TEST(test_default_forward_walk_takes_real_steps);
+  RUN_TEST(test_body_pose_overlay_keeps_gait_stepping);
   return UNITY_END();
 }

@@ -22,10 +22,14 @@
 // for a USB host (Mac) to override the map at runtime (oha.4). defaultBindings()
 // is the safe out-of-box layout documented in docs/controller_bridge.md.
 //
-// Control modes (the "move the core without moving the legs" requirement):
-//   Walk          - gimbals drive the gait body twist (forward/strafe/yaw).
-//   TranslateBody - gimbals shift the body x/y/z with the feet planted.
-//   RotateBody    - gimbals tilt the body roll/pitch/yaw with the feet planted.
+// Control modes (the "move the core without losing locomotion" requirement):
+// the LEFT gimbal always drives the gait body twist (forward/yaw), and the
+// mode selects the RIGHT-gimbal overlay, applied WHILE walking:
+//   Walk          - right gimbal adds strafe to the gait twist.
+//   TranslateBody - right gimbal shifts the body x/y over the gait.
+//   RotateBody    - right gimbal tilts the body roll/pitch over the gait.
+// With the left stick centred the gait holds the planted home stance, so the
+// body modes still "move the core without moving the legs".
 //
 // The bridge is stateful (encoder-delta shape trims, button edge-detect +
 // refractory debounce, persistent operator pose trim, failsafe hold) but uses
@@ -38,6 +42,7 @@
 
 #include "../config/config_schema.h"
 #include "ChannelPack.h"  // vendored: single source of truth for the channel map
+#include "rc_input_conditioner.h"
 
 namespace controller {
 
@@ -108,10 +113,11 @@ enum class InputProfile : uint8_t {
 // --- Decoded high-level outputs --------------------------------------------
 
 // High-level control mode selected by a 3-position toggle (or a USB override).
+// The left gimbal walks in every mode; the mode picks the right-gimbal overlay.
 enum class ControlMode : uint8_t {
-  Walk = 0,           // gimbals -> gait body twist
-  TranslateBody = 1,  // gimbals -> body x/y/z offset, feet planted
-  RotateBody = 2,     // gimbals -> body roll/pitch/yaw, feet planted
+  Walk = 0,           // right gimbal -> strafe added to the gait twist
+  TranslateBody = 1,  // right gimbal -> body x/y offset over the gait
+  RotateBody = 2,     // right gimbal -> body roll/pitch over the gait
 };
 constexpr uint8_t kNumControlModes = 3;
 
@@ -131,9 +137,9 @@ enum class TrickId : uint8_t {
 
 // --- Binding configuration (remappable) ------------------------------------
 
-// One proportional binding: which source, and whether to invert it. `deadband`
-// is a fraction (0..1) of the half-span around centre that reads as exactly 0
-// (kills stick/pot jitter); it is ignored for encoder sources.
+// One proportional binding: which source, whether to invert it, and an
+// optional legacy deadband override. A nonzero binding deadband replaces the
+// source calibration deadband; it never stacks with it.
 struct AxisBinding {
   AxisSource source = AxisSource::None;
   bool invert = false;
@@ -233,7 +239,7 @@ struct ControllerCommand {
   bool estop = true;         // kill switch asserted OR failsafe
   bool host_authority = false;  // operator hands motion authority to USB host
   ControlMode mode = ControlMode::Walk;
-  uint8_t gait_index = 0;  // 0..2 from the gait-select toggle
+  uint8_t gait_index = 0;  // 0=Wave, 1=Ripple, 2=Tripod; latched in Walk mode
   // Walk-mode body twist, normalised [-1, 1].
   float twist_vx = 0.0f;
   float twist_vy = 0.0f;
@@ -285,6 +291,9 @@ class ControllerBridge {
     return calibration_;
   }
 
+  bool setInputFilterMode(InputFilterMode mode, bool diagnostic_mode_allowed);
+  InputFilterMode inputFilterMode() const { return conditioner_.mode(); }
+
   // Decode one fresh CRSF channel frame (raw 11-bit ticks, 0-based: ch[0]=CH1)
   // captured at `now_ms`. `link_up` is the receiver link state (false => the
   // controller is not reachable). Returns the updated command snapshot.
@@ -333,6 +342,11 @@ class ControllerBridge {
   const config::RcChannelCalibration* calibrationFor(AxisSource source) const;
   bool readCalibratedBipolar(AxisSource source, int16_t raw, float& out) const;
   bool readCalibratedUnipolar(AxisSource source, int16_t raw, float& out) const;
+  void updateConditionedInputs(uint32_t now_ms);
+  void updateConditionedToggles(uint32_t now_ms);
+  float conditionedBipolar(AxisSource source) const;
+  float conditionedUnipolar(AxisSource source) const;
+  float applyBindingResponse(const AxisBinding& binding, float value) const;
   bool readBool(BoolSource s) const;                   // current level
   uint8_t readTri(TriSource s) const;                  // 0=UP,1=CENTER,2=DOWN
 
@@ -343,8 +357,17 @@ class ControllerBridge {
 
   BindingConfig cfg_;
   config::RcInputCalibration calibration_;
+  RcInputConditioner conditioner_;
   ControllerCommand cmd_;
   ChannelPackInputs_t raw_;
+  float conditioned_gimbal_[4] = {};
+  float conditioned_pot_[2] = {};
+  float conditioned_encoder_[2] = {};
+  uint8_t conditioned_toggles_[2] = {1, 1};
+  RcTriSwitchDebouncer mode_switch_;
+  RcTriSwitchDebouncer gait_switch_;
+  uint32_t last_condition_ms_ = 0;
+  bool condition_time_seen_ = false;
 
   // Input-profile detection state. Locked once, never auto-switches until
   // reset(); a link drop after lock keeps the same profile.

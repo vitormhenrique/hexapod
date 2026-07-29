@@ -2244,31 +2244,31 @@ class ControllerBindings:
     Field defaults mirror controller::defaultBindings()."""
 
     walk_forward: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.0)
     )
     walk_strafe: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.0)
     )
     walk_yaw: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.0)
     )
     body_x: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.0)
     )
     body_y: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.0)
     )
     body_z: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.0)
     )
     body_roll: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.0)
     )
     body_pitch: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.0)
     )
     body_yaw: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.05)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.0)
     )
     speed: ControllerAxisBinding = field(
         default_factory=lambda: ControllerAxisBinding(AXIS_POT1, False, 0.0)

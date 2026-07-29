@@ -253,7 +253,7 @@ void test_centered_twist_holds_planted_home_stance() {
   }
 }
 
-void test_twist_is_slew_limited_by_speed_setting() {
+void test_twist_is_consumed_without_a_second_response_filter() {
   GaitDefaults slow_defaults = defaultGait();
   slow_defaults.gait = static_cast<uint8_t>(GaitId::Tripod);
   slow_defaults.speed_x255 = 0;
@@ -263,7 +263,7 @@ void test_twist_is_slew_limited_by_speed_setting() {
   command.vx = 1.0f;
   slow.setTwist(command);
   GaitOutput slow_out;
-  slow.update(100, slow_out);
+  slow.update(0, slow_out);
 
   GaitDefaults fast_defaults = slow_defaults;
   fast_defaults.speed_x255 = 255;
@@ -271,16 +271,15 @@ void test_twist_is_slew_limited_by_speed_setting() {
   fast.configure(fast_defaults);
   fast.setTwist(command);
   GaitOutput fast_out;
-  fast.update(100, fast_out);
+  fast.update(0, fast_out);
 
   const float slow_stroke = fabsf(slow_out.feet[0].x_mm - kHomeXy[0][0]);
   const float fast_stroke = fabsf(fast_out.feet[0].x_mm - kHomeXy[0][0]);
   TEST_ASSERT_TRUE(slow_stroke > 0.0f);
-  TEST_ASSERT_TRUE(fast_stroke > slow_stroke);
-  TEST_ASSERT_TRUE(fast_stroke < static_cast<float>(fast_defaults.stride_len_mm));
+  TEST_ASSERT_FLOAT_WITHIN(1e-4f, slow_stroke, fast_stroke);
 }
 
-void test_centering_command_settles_smoothly_then_parks_phase() {
+void test_centering_shaped_command_parks_phase() {
   GaitEngine ge;
   GaitDefaults d = defaultGait();
   d.gait = static_cast<uint8_t>(GaitId::Tripod);
@@ -296,16 +295,22 @@ void test_centering_command_settles_smoothly_then_parks_phase() {
   ge.setTwist(command);
   const float phase_before_settle = ge.phase();
   ge.update(20, out);
-  TEST_ASSERT_TRUE(ge.phase() != phase_before_settle);
-
-  for (int i = 0; i < 40; ++i) ge.update(20, out);
-  const float parked_phase = ge.phase();
-  ge.update(200, out);
-  TEST_ASSERT_FLOAT_WITHIN(1e-6f, parked_phase, ge.phase());
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, phase_before_settle, ge.phase());
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     TEST_ASSERT_FALSE(out.feet[leg].swing);
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, kHomeXy[leg][0], out.feet[leg].x_mm);
-    TEST_ASSERT_FLOAT_WITHIN(1e-3f, kHomeXy[leg][1], out.feet[leg].y_mm);
+  }
+  // The walking stance bias relaxes back over the parameter filter, so the
+  // planted feet converge to the documented home stance shortly after the
+  // command centres (they are planted the whole time, never swinging).
+  for (int i = 0; i < 150; ++i) {
+    ge.update(20, out);
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      TEST_ASSERT_FALSE(out.feet[leg].swing);
+    }
+  }
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, kHomeXy[leg][0], out.feet[leg].x_mm);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, kHomeXy[leg][1], out.feet[leg].y_mm);
   }
 }
 
@@ -432,6 +437,56 @@ void test_phase_wraps_and_advances() {
   }
 }
 
+// While a real stride is commanded the stance centre slides toward each hip
+// so the stroke envelope fits the reach annulus (instead of the pipeline
+// collapsing the whole gait), and it returns to the documented home stance
+// once the command is released.
+void test_walking_stance_biases_inward_and_recovers() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics bk(cfg);
+
+  GaitEngine ge;
+  GaitDefaults d = defaultGait();
+  d.gait = static_cast<uint8_t>(GaitId::Tripod);
+  d.stride_len_mm = 60;
+  d.speed_x255 = 255;
+  ge.configure(d);
+  BodyTwist t;
+  t.vy = 0.7f;  // forward (+Y mechanical front); at this stick the fitted
+                // stroke satisfies BOTH annulus bounds with no residual
+  ge.setTwist(t);
+  ge.reset();
+
+  // Converge the bias filter, then verify every walking target is INSIDE the
+  // reach margin (not merely reachable): the pipeline no longer needs to
+  // shrink the stroke.
+  GaitOutput out;
+  for (int i = 0; i < 150; ++i) ge.update(10, out);
+  float min_mid_x = 1e9f;
+  for (int i = 0; i < 200; ++i) {
+    ge.update(10, out);
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      float cx, cy, cz;
+      bk.footBodyToCoxa(leg, out.feet[leg].x_mm, out.feet[leg].y_mm,
+                        out.feet[leg].z_mm, cx, cy, cz);
+      TEST_ASSERT_TRUE(bk.legIk().withinReachMargin(cx, cy, cz));
+    }
+    if (out.feet[2].x_mm < min_mid_x) min_mid_x = out.feet[2].x_mm;
+  }
+  // Mid-right leg (home x = 196.8) must actually be pulled inward.
+  TEST_ASSERT_TRUE(min_mid_x < kHomeXy[2][0] - 4.0f);
+
+  // Release the sticks: the stance relaxes back to the documented home.
+  t.vy = 0.0f;
+  ge.setTwist(t);
+  for (int i = 0; i < 300; ++i) ge.update(10, out);
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, kHomeXy[leg][0], out.feet[leg].x_mm);
+    TEST_ASSERT_FLOAT_WITHIN(0.5f, kHomeXy[leg][1], out.feet[leg].y_mm);
+  }
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_holds_home_stance);
@@ -445,12 +500,13 @@ int main(int, char**) {
   RUN_TEST(test_touchdown_velocity_is_continuous);
   RUN_TEST(test_forward_twist_moves_stance_foot_backward);
   RUN_TEST(test_centered_twist_holds_planted_home_stance);
-  RUN_TEST(test_twist_is_slew_limited_by_speed_setting);
-  RUN_TEST(test_centering_command_settles_smoothly_then_parks_phase);
+  RUN_TEST(test_twist_is_consumed_without_a_second_response_filter);
+  RUN_TEST(test_centering_shaped_command_parks_phase);
   RUN_TEST(test_rc_body_height_pot_neutral_at_center);
   RUN_TEST(test_rc_body_height_envelope_keeps_feet_reachable);
   RUN_TEST(test_rc_body_height_keeps_urdf_distal_direction);
   RUN_TEST(test_all_gait_targets_are_ik_reachable);
   RUN_TEST(test_phase_wraps_and_advances);
+  RUN_TEST(test_walking_stance_biases_inward_and_recovers);
   return UNITY_END();
 }

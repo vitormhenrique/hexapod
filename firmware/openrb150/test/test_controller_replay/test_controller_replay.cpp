@@ -14,7 +14,7 @@ void test_arm_walk_estop_fixture_passes() {
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(controller::replay::Failure::None),
       static_cast<uint8_t>(result.failure));
-  TEST_ASSERT_EQUAL_UINT8(8, result.frame_index);
+  TEST_ASSERT_EQUAL_UINT8(10, result.frame_index);
 }
 
 void test_semantic_fixture_mismatch_identifies_frame_and_field() {

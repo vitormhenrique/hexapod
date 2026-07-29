@@ -109,6 +109,16 @@ bool LegIk::clampToReach(float& x_mm, float& y_mm, float& z_mm) const {
   return true;
 }
 
+bool LegIk::withinReachMargin(float x_mm, float y_mm, float z_mm) const {
+  const float horiz = sqrtf(x_mm * x_mm + y_mm * y_mm);
+  const float planar_r = horiz - l1_;
+  const float d = sqrtf(planar_r * planar_r + z_mm * z_mm);
+  const float d_max = kReachMarginFrac * (l2_ + l3_);
+  const float d_min = fabsf(l2_ - l3_) +
+                      (1.0f - kReachMarginFrac) * (l2_ + l3_);
+  return d >= d_min && d <= d_max;
+}
+
 void LegIk::forwardRaw(float coxa, float femur_raw, float tibia_raw,
                        float& x_mm, float& y_mm, float& z_mm) const {
   // Planar arm: femur at angle alpha, tibia continues at alpha+beta.

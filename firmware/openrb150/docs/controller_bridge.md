@@ -19,19 +19,25 @@ hexapod action the `ControllerBridge` emits each control cycle.
 
 ## 1. Proportional controls (gimbals & pots)
 
-The two gimbals are **mode-sensitive**: what a gimbal axis does depends on the
-active control mode selected by the `SW_E` toggle. This is the "move the core
-without moving the legs" requirement — the same sticks either walk the robot or
-pose its body with the feet planted.
+The **left gimbal always walks** — forward/backward plus yaw are available in
+every control mode. The `SW_E` toggle selects what the **right gimbal**
+overlays on top of walking (Phoenix-style simultaneous control): strafe, body
+translation, or body attitude. With the left stick centred the gait holds the
+planted home stance, so the body modes still "move the core without moving
+the legs".
 
 ### Gimbals per control mode
 
 | Gimbal axis | CRSF ch | **Walk** mode | **TranslateBody** mode | **RotateBody** mode |
 |-------------|:------:|---------------|------------------------|---------------------|
-| Left X  | CH1 | Yaw rate — turn left / right (`twist_wz`) | — | Body **yaw** (`pose_yaw`) |
-| Left Y  | CH2 | Forward / backward (`twist_vx`) | Body **Z** up / down (`pose_z_mm`) | — |
+| Left X  | CH1 | Yaw rate — turn left / right (`twist_wz`) | Yaw rate (`twist_wz`) | Yaw rate (`twist_wz`) |
+| Left Y  | CH2 | Forward / backward (`twist_vx`) | Forward / backward (`twist_vx`) | Forward / backward (`twist_vx`) |
 | Right X | CH3 | Strafe left / right (`twist_vy`) | Body **Y** shift (`pose_y_mm`) | Body **roll** (`pose_roll`) |
 | Right Y | CH4 | — | Body **X** shift (`pose_x_mm`) | Body **pitch** (`pose_pitch`) |
+
+`body_z` and `body_yaw` are unbound by default (body height lives on Pot 2;
+yaw is always walking yaw on Left X); a USB binding override can attach them
+to any source.
 
 Notes:
 - Gimbals are bipolar: centre = 0, with a 5% deadband to kill jitter.
@@ -53,18 +59,23 @@ custom/Tx16S physical CRSF layouts: the two profiles decode their wire data to
 the same logical source before calibration, so changing transmitter profiles
 does not reinterpret a stored calibration.
 
-Current bridge behavior applies the calibrated minimum/center/maximum range
-and reverse flag. Centered controls use asymmetric normalisation around the
-stored center; values far outside the calibrated range are rejected to neutral
-rather than becoming a full-speed command. The compiled defaults reproduce the
-previous `[-1000, 0, 1000]` gimbal range and `[0, 1000]` pot range.
+Current bridge behavior applies calibrated minimum/center/maximum, reversal,
+and a time-based EMA before mapping to body commands. Centered controls then
+use source-level deadband/rescale and expo; a nonzero legacy binding deadband
+overrides the source deadband rather than stacking with it. Values far outside
+the calibrated range are rejected to neutral rather than becoming a full-speed
+command. The compiled defaults reproduce the previous `[-1000, 0, 1000]`
+gimbal range and `[0, 1000]` pot range, retain approximately 5% center
+deadband, and apply a 60 ms gimbal / 120 ms pot EMA. Expo defaults to zero for
+compatibility and can be tuned in the persisted profile.
 
-The persisted deadband, expo, filter-tau, and switch-debounce fields are
-validated but not yet applied here. Their processing ownership is introduced by
-the RC input-conditioning task so the existing binding deadband is not silently
-stacked with a second filter or curve. Valid schema-v3 EEPROM payloads migrate
-in RAM to schema v4 with these safe default calibration records; an explicit
-config commit persists the migration.
+The EMA and optional median-of-three filter modes are bridge-owned and preserve
+the current filtered output when switching modes. Raw diagnostic bypass is
+rejected unless the caller has established that the robot is disarmed. Gait and
+control-mode three-position switches require a stable 40 ms position before
+changing; physical E-stop remains immediate. Valid schema-v3/v4 EEPROM payloads
+migrate in RAM to schema v5 with safe calibration and body-command limits; an
+explicit config commit persists the migration.
 
 ### Pots & encoders (live shape parameters, all modes)
 
@@ -80,8 +91,32 @@ These are read in **every** mode and continuously shape the gait, normalised to
 
 Encoders integrate their relative delta into a 0..1 trim
 (`kEncoderCountsFullScale = 1024` counts = full sweep); pots are absolute.
-POT 1 controls both gait cadence and the twist slew rate: lower settings give a
-gentler full-stick response, while higher settings accelerate more quickly.
+POT 1 controls gait cadence and the torque-enable goal recovery slew. It no
+longer controls body-twist acceleration: the central body-command shaper owns
+that rate contract so an operator speed change cannot silently change braking
+or reversal behavior.
+
+### Body Command Shaping
+
+After controller conditioning, `ControllerCore` applies the persisted
+`BodyCommandLimits` profile before converting the command frame to the gait
+body frame. The production path is acceleration-limited:
+
+- Forward, lateral, and yaw twist use independent maximum command scales and
+  separate acceleration/deceleration limits.
+- Reversals decelerate to zero before applying acceleration in the new
+  direction.
+- Body-height and body-pose offsets use bounded physical rates.
+- The gait engine consumes this already-shaped twist directly; it does not add
+  a second twist spring-damper.
+
+Compiled defaults use normalized command maxima of `1.0`, forward
+acceleration/deceleration of `1.2` / `1.8` per second, lateral `1.0` / `1.5`,
+yaw `1.5` / `2.0`, height rise/lower rates of `20` / `30 mm/s`, body translation
+at `60 mm/s`, and attitude at `0.5 rad/s`. These are conservative starting
+limits, not final hardware tuning values. `DIRECT_DIAGNOSTIC` exists only in
+the portable shaper and is gated; normal firmware selects acceleration-limited
+output.
 
 ---
 
@@ -114,7 +149,12 @@ Positions are UP = 0 / CENTER = 1 / DOWN = 2.
 | Toggle | Hexapod action |
 |--------|----------------|
 | SW_E | **Control-mode select**: Walk (0) / TranslateBody (1) / RotateBody (2) |
-| SW_F | **Gait-family select**: `gait_index` 0 / 1 / 2 |
+| SW_F | **Moving gait select**: Wave (0) / Ripple (1) / Tripod (2) |
+
+SW_F is sampled into the gait latch only while SW_E is in Walk. Moving it while
+translating or rotating the body does not change the active gait; its stable
+position is adopted when Walk is selected again. Stand and Sit remain explicit
+robot-state/choreography actions rather than gait-family choices.
 
 ### Push buttons — CH10 compact state (trick triggers, rising edge)
 
@@ -169,8 +209,8 @@ clamped to `±25°`). This biases the robot's attitude on top of the gimbal pose
 
 | CRSF ch | Physical input | Default function |
 |--------:|----------------|------------------|
-| CH1 | Gimbal Left X | Yaw (Walk) / body yaw (Rotate) |
-| CH2 | Gimbal Left Y | Forward (Walk) / body Z (Translate) |
+| CH1 | Gimbal Left X | Yaw rate (all modes) |
+| CH2 | Gimbal Left Y | Forward / backward (all modes) |
 | CH3 | Gimbal Right X | Strafe (Walk) / body Y (Translate) / roll (Rotate) |
 | CH4 | Gimbal Right Y | Body X (Translate) / pitch (Rotate) |
 | CH5 | Pot 1 | Speed scalar |

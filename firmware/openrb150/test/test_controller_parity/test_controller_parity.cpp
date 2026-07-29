@@ -40,7 +40,7 @@ void test_synthetic_trace_replays_with_exact_controller_parity() {
       controller::parity::replayAndCompare(makeSyntheticTrace());
 
   TEST_ASSERT_TRUE(result.passed);
-  TEST_ASSERT_EQUAL_UINT8(8, result.frame_index);
+  TEST_ASSERT_EQUAL_UINT8(10, result.frame_index);
   TEST_ASSERT_EQUAL_UINT8(0xFF, result.goal_index);
   TEST_ASSERT_EQUAL_UINT8(
       static_cast<uint8_t>(controller::parity::Failure::None),
