@@ -23,9 +23,9 @@
 // is the safe out-of-box layout documented in docs/controller_bridge.md.
 //
 // Control modes (the "move the core without losing locomotion" requirement):
-// the LEFT gimbal always drives the gait body twist (forward/yaw), and the
-// mode selects the RIGHT-gimbal overlay, applied WHILE walking:
-//   Walk          - right gimbal adds strafe to the gait twist.
+// the LEFT gimbal always drives planar walking (forward/strafe), and the mode
+// selects the RIGHT-gimbal behavior, applied WHILE walking:
+//   Walk          - right X rotates the robot.
 //   TranslateBody - right gimbal shifts the body x/y over the gait.
 //   RotateBody    - right gimbal tilts the body roll/pitch over the gait.
 // With the left stick centred the gait holds the planted home stance, so the

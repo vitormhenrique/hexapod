@@ -23,7 +23,7 @@ first-line troubleshooting. Read it before connecting DYNAMIXEL power.
 | Connection | Required arrangement |
 | --- | --- |
 | DYNAMIXEL TTL bus | Connect the servo data bus to the OpenRB-150 `Serial1` DYNAMIXEL TTL bus. The firmware controls the board power FET, while the servo supply must be the external fused 12 V distribution described above. |
-| Servo IDs | The default logical map is IDs 1 through 18, leg-major, coxa/femur/tibia. Confirm the actual map before motion; see the [canonical map](ros2_controller_interface_mapping.md#canonical-joint-map). |
+| Servo IDs | The default map follows Mark III wiring and uses IDs 2 through 19 with ID 1 unused. Confirm the actual map before motion; see the [canonical map](ros2_controller_interface_mapping.md#canonical-joint-map). |
 | RC receiver | Connect the ExpressLRS CRSF UART to `Serial3`: D14 TX / D13 RX, crossed as a normal UART link, at 420000 baud. Keep the receiver and controller logic at 3.3 V. |
 | Foot sensors | Root I2C has the TCA9548A mux at `0x70` and the 24LC32 config EEPROM at `0x50`. Put one Robotic Finger Sensor v2 on each mux channel 0 through 5; channels 6 and 7 are reserved. Each board exposes VCNL4040 proximity at `0x60` and LPS25HB pressure at `0x5C`. |
 | Host connection | Use the OpenRB-150 USB CDC port directly for a Mac companion or Jetson bridge. When the Jetson owns USB, one Mac may use its authenticated TCP relay on a trusted network; see the [Jetson relay guide](../jetson/README.md#mac-tcp-relay). Only one high-authority USB client may control motion at once. |

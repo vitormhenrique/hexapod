@@ -120,20 +120,28 @@ void test_rc_twist_step_reaches_pipeline_through_accel_limiter() {
   const controller::ControllerConfigSnapshot config_snapshot =
       defaultConfigSnapshot();
   const controller::RobotState state = readyState(config_snapshot);
-  controller::ControllerIntent intent = safeRcIntent();
-  controller::ControllerCore core;
+  controller::ControllerIntent neutral_intent = safeRcIntent();
+  controller::ControllerIntent stepped_intent = safeRcIntent();
+  controller::ControllerCore neutral_core;
+  controller::ControllerCore stepped_core;
   controller::RobotCommand neutral;
-
-  driveToRcManual(core, state, intent, config_snapshot, neutral);
-  intent.rc.command.gait_index = 2;  // Tripod
-  intent.rc.command.twist_vx = 1.0f;
   controller::RobotCommand stepped;
-  // Default forward acceleration is 1.2 normalized units/s. The first two
-  // 10 ms steps remain below GaitEngine's 0.03 neutral threshold; the third
-  // step is the first one that may advance a leg target.
-  core.step(state, intent, config_snapshot, timeAt(60), stepped);
-  core.step(state, intent, config_snapshot, timeAt(70), stepped);
-  core.step(state, intent, config_snapshot, timeAt(80), stepped);
+
+  driveToRcManual(neutral_core, state, neutral_intent, config_snapshot,
+                  neutral);
+  driveToRcManual(stepped_core, state, stepped_intent, config_snapshot,
+                  stepped);
+  neutral_intent.rc.command.gait_index = 2;
+  stepped_intent.rc.command.gait_index = 2;
+  stepped_intent.rc.command.twist_vx = 1.0f;
+  // Mark III starts on a zero-longitudinal keyframe. Advance 100 ms so the
+  // shaped command and interpolated gait both produce a measurable target.
+  for (uint32_t now_ms = 60; now_ms <= 150; now_ms += 10) {
+    neutral_core.step(state, neutral_intent, config_snapshot, timeAt(now_ms),
+                      neutral);
+    stepped_core.step(state, stepped_intent, config_snapshot, timeAt(now_ms),
+                      stepped);
+  }
 
   TEST_ASSERT_TRUE(stepped.goal_valid);
   TEST_ASSERT_EQUAL_UINT8(neutral.goals.count, stepped.goals.count);
@@ -142,9 +150,9 @@ void test_rc_twist_step_reaches_pipeline_through_accel_limiter() {
     const int32_t delta = static_cast<int32_t>(stepped.goals.joints[index].tick) -
                           static_cast<int32_t>(neutral.goals.joints[index].tick);
     if (delta != 0) changed = true;
-    // At the first active frame the shaped command is only 0.036, so a
-    // full-stick request must not appear as a full-stride servo step.
-    TEST_ASSERT_TRUE(delta >= -40 && delta <= 40);
+    // The command is still acceleration-limited, so it must remain far below
+    // an instantaneous full-stride servo jump.
+    TEST_ASSERT_TRUE(delta >= -200 && delta <= 200);
   }
   TEST_ASSERT_TRUE(changed);
 }

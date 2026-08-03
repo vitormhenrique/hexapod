@@ -90,15 +90,15 @@ void test_walk_mode_twist_from_default_bindings() {
   ChannelPackInputs_t in = makeNeutral();
   in.toggles[0] = 0;       // SwE UP -> Walk
   in.gimbal[1] = 1000;     // LY full forward -> walk_forward
-  in.gimbal[0] = -1000;    // LX full left    -> walk_yaw
-  in.gimbal[2] = 500;      // RX half         -> walk_strafe
+  in.gimbal[0] = -1000;    // LX full left    -> walk_strafe
+  in.gimbal[2] = 500;      // RX half         -> walk_yaw
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_TRUE(c.valid);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_vx);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, -1.0f, c.twist_wz);
-  TEST_ASSERT_FLOAT_WITHIN(0.03f, 0.5f, c.twist_vy);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, -1.0f, c.twist_vy);
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, 0.5f, c.twist_wz);
   // No body pose in walk mode.
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_x_mm);
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_roll);
@@ -131,15 +131,16 @@ void test_rotate_body_mode_clamped_to_envelope() {
   in.toggles[0] = 2;    // SwE DOWN -> RotateBody
   in.gimbal[2] = 1000;  // RX -> roll
   in.gimbal[3] = 1000;  // RY -> pitch
-  in.gimbal[0] = 1000;  // LX -> walk_yaw (left stick keeps steering)
+  in.gimbal[0] = 1000;  // LX -> walk_strafe
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::RotateBody),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_FLOAT_WITHIN(0.01f, poselim::kMaxRotRad, c.pose_roll);
   TEST_ASSERT_FLOAT_WITHIN(0.01f, poselim::kMaxRotRad, c.pose_pitch);
-  // body_yaw is unbound by default; LX stays walking yaw in every mode.
+  // body_yaw is unbound by default; left X remains planar walking.
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_yaw);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_wz);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_vy);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, c.twist_wz);
 }
 
 void test_gait_index_from_select_toggle() {

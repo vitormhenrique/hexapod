@@ -25,9 +25,9 @@ from hexapod_protocol import telemetry as tlm
 # persisted BodyGeometry block (firmware lmt.11). Mirror gait::kCoxaLiftMm and
 # gait::kHomeRadiusMm / kHomeFootZMm. All-zero joint angles -> the home foot in
 # the coxa frame.
-COXA_LIFT_MM = 21.0
-HOME_RADIUS_MM = 127.0
-HOME_FOOT_Z_MM = -44.55
+COXA_LIFT_MM = 0.0
+HOME_RADIUS_MM = 147.0
+HOME_FOOT_Z_MM = -25.0
 
 _HALF_PI = math.pi / 2.0
 
@@ -229,7 +229,7 @@ class HexapodPoseModel:
         """Assess a body-frame XYZ target using the firmware IK annulus.
 
         ``reachable`` matches the exact two-link annulus used by ``LegIk``.
-        ``inside_safe_margin`` additionally stays 5% clear of both singular
+        ``inside_safe_margin`` additionally stays 1% clear of both singular
         boundaries, matching the gait pipeline's conservative reach margin.
         """
         coxa = self._xforms[leg].from_body(Point3(x_mm, y_mm, z_mm))
@@ -237,9 +237,9 @@ class HexapodPoseModel:
         distance = math.hypot(planar_r, coxa.z)
         minimum = abs(self._l2_mm - self._l3_mm)
         maximum = self._l2_mm + self._l3_mm
-        margin = 0.05 * maximum
+        margin = 0.01 * maximum
         safe_minimum = minimum + margin
-        safe_maximum = 0.95 * maximum
+        safe_maximum = 0.99 * maximum
         return LegReachAssessment(
             reachable=minimum <= distance <= maximum,
             inside_safe_margin=safe_minimum <= distance <= safe_maximum,

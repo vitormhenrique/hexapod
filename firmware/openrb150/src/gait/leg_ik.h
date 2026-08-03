@@ -10,7 +10,7 @@
 //
 // Math follows HexNav_description/docs/inverse_kinematics.md section 8 (hip yaw
 // + 2-link planar arm, law of cosines). The raw planar solution is offset so
-// that the documented home foot (127 mm radial, -44.55 mm down -> section 5/12)
+// that the Mark III home foot (147 mm radial, 25 mm down)
 // maps to all-zero joint angles; this makes the output directly consumable by
 // the servo map (dxl/servo_map.h: tick = 2048 + sign*deg(angle)).
 //
@@ -26,17 +26,15 @@ namespace gait {
 
 // Foot-tip offset baked into L_TIBIA points to the URDF foot frame; the home
 // foot in the coxa frame (identical for all six legs, IK ref section 12).
-constexpr float kHomeRadiusMm = 127.0f;
-constexpr float kHomeFootZMm = -44.55f;
+constexpr float kHomeRadiusMm = 147.0f;
+constexpr float kHomeFootZMm = -25.0f;
 
 // Reachability-aware stride limit (lmt.14): generated foot targets are pulled
 // radially inward by clampToReach() so the planar reach distance never exceeds
-// this fraction of the full two-link extension (l2 + l3). The documented home
-// stance already sits at ~92% of full reach, so commanded strides routinely
-// push the stroke extremes past the workspace boundary; capping at 95% keeps
-// every commanded foot off the near-singular fully-extended region before
-// ground tests while still leaving the home stance untouched.
-constexpr float kReachMarginFrac = 0.95f;
+// this fraction of the full two-link extension (l2 + l3). Mark III lateral
+// travel deliberately approaches the folded boundary, so a 1% margin retains
+// roughly 2 mm of clearance without shortening the reference gait globally.
+constexpr float kReachMarginFrac = 0.99f;
 
 // Result of a single-leg IK solve. Angles are URDF-zero-relative radians.
 struct IkResult {

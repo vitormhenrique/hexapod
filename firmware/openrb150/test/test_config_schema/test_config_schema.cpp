@@ -11,6 +11,33 @@
 
 using namespace config;
 
+namespace {
+
+void applyLegacySequentialMotionProfile(RobotConfig& config) {
+  config.links.coxa_cmm = 5608;
+  config.links.femur_cmm = 6651;
+  config.links.tibia_cmm = 2486;
+  config.geometry.home_radius_cmm = 12700;
+  config.geometry.home_foot_z_cmm = -4455;
+  config.geometry.coxa_lift_cmm = 2100;
+  for (uint8_t index = 0; index < kNumServos; ++index) {
+    ServoConfig& servo = config.servos[index];
+    servo.id = static_cast<uint8_t>(index + 1);
+    servo.leg = index / kJointsPerLeg;
+    servo.joint = index % kJointsPerLeg;
+    servo.sign = 1;
+    servo.trim_ticks = 0;
+    servo.min_tick = 1024;
+    servo.max_tick = 3072;
+  }
+  config.gait.body_height_mm = 40;
+  config.gait.stride_len_mm = 60;
+  config.gait.step_height_mm = 30;
+  config.gait.duty_x255 = 128;
+}
+
+}  // namespace
+
 void test_defaults_are_valid() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
@@ -23,66 +50,54 @@ void test_default_servo_map() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
 
-  // 18 servos in (leg, joint) array order. DXL ids follow the wiring
-  // leg-major: leg1 = coxa 1 / femur 2 / tibia 3, leg2 = 4/5/6, ...
-  // leg6 = 16/17/18 (id = leg*3 + joint + 1).
+  const uint8_t expected_ids[kNumLegs][kJointsPerLeg] = {
+      {7, 9, 11}, {8, 10, 12}, {14, 16, 18},
+      {2, 4, 6},  {19, 3, 5},  {13, 15, 17},
+  };
   for (uint8_t i = 0; i < kNumServos; ++i) {
     const uint8_t leg = i / kJointsPerLeg;
     const uint8_t joint = i % kJointsPerLeg;
-    TEST_ASSERT_EQUAL_UINT8(leg * kJointsPerLeg + joint + 1, cfg.servos[i].id);
+    TEST_ASSERT_EQUAL_UINT8(expected_ids[leg][joint], cfg.servos[i].id);
     TEST_ASSERT_EQUAL_UINT8(leg, cfg.servos[i].leg);
     TEST_ASSERT_EQUAL_UINT8(joint, cfg.servos[i].joint);
-    const int16_t expected_trim =
-      joint == static_cast<uint8_t>(JointRole::Femur)
-        ? kDefaultFemurTrimTicks
-        : (joint == static_cast<uint8_t>(JointRole::Tibia)
-             ? kDefaultTibiaTrimTicks
-             : kDefaultCoxaTrimTicks);
-    TEST_ASSERT_EQUAL_INT16(expected_trim, cfg.servos[i].trim_ticks);
     TEST_ASSERT_TRUE(cfg.servos[i].min_tick < cfg.servos[i].max_tick);
   }
 
-  // Spot-check the published map (leg 1 -> index 0..2, leg 6 -> index 15..17).
-  TEST_ASSERT_EQUAL_UINT8(1, cfg.servos[0].id);    // leg1 coxa
-  TEST_ASSERT_EQUAL_UINT8(2, cfg.servos[1].id);    // leg1 femur
-  TEST_ASSERT_EQUAL_UINT8(3, cfg.servos[2].id);    // leg1 tibia
-  TEST_ASSERT_EQUAL_UINT8(16, cfg.servos[15].id);  // leg6 coxa
-  TEST_ASSERT_EQUAL_UINT8(17, cfg.servos[16].id);  // leg6 femur
-  TEST_ASSERT_EQUAL_UINT8(18, cfg.servos[17].id);  // leg6 tibia
-
-  // All legs use sign +1 (hardware validation: right legs were mirrored).
-  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[0].sign);    // leg 0 (left)
-  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[3].sign);    // leg 1 (right)
-  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[6].sign);    // leg 2 (right)
-  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[9].sign);    // leg 3 (right)
-  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[12].sign);   // leg 4 (left)
-  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[15].sign);   // leg 5 (left)
+  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[0].sign);    // LR
+  TEST_ASSERT_EQUAL_INT8(-1, cfg.servos[3].sign);   // RR
+  TEST_ASSERT_EQUAL_INT8(-1, cfg.servos[6].sign);   // RM
+  TEST_ASSERT_EQUAL_INT8(-1, cfg.servos[9].sign);   // RF
+  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[12].sign);   // LF
+  TEST_ASSERT_EQUAL_INT8(1, cfg.servos[15].sign);   // LM
+  TEST_ASSERT_EQUAL_INT16(395, cfg.servos[4].trim_ticks);
+  TEST_ASSERT_EQUAL_INT16(-1038, cfg.servos[5].trim_ticks);
+  TEST_ASSERT_EQUAL_INT16(-395, cfg.servos[13].trim_ticks);
+  TEST_ASSERT_EQUAL_INT16(1038, cfg.servos[14].trim_ticks);
 }
 
 void test_default_geometry() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
-  TEST_ASSERT_EQUAL_UINT16(5608, cfg.links.coxa_cmm);
-  TEST_ASSERT_EQUAL_UINT16(6651, cfg.links.femur_cmm);
-  TEST_ASSERT_EQUAL_UINT16(2486, cfg.links.tibia_cmm);
-  // Stance/coxa geometry mirrors the gait-layer reference nominals (lmt.11).
-  TEST_ASSERT_EQUAL_UINT16(12700, cfg.geometry.home_radius_cmm);
-  TEST_ASSERT_EQUAL_INT16(-4455, cfg.geometry.home_foot_z_cmm);
-  TEST_ASSERT_EQUAL_UINT16(2100, cfg.geometry.coxa_lift_cmm);
+  TEST_ASSERT_EQUAL_UINT16(5200, cfg.links.coxa_cmm);
+  TEST_ASSERT_EQUAL_UINT16(6600, cfg.links.femur_cmm);
+  TEST_ASSERT_EQUAL_UINT16(13300, cfg.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(14700, cfg.geometry.home_radius_cmm);
+  TEST_ASSERT_EQUAL_INT16(-2500, cfg.geometry.home_foot_z_cmm);
+  TEST_ASSERT_EQUAL_UINT16(0, cfg.geometry.coxa_lift_cmm);
   // Leg 1 rear-left mount.
-  TEST_ASSERT_EQUAL_INT16(-656, cfg.legs[0].mount_x_dmm);
-  TEST_ASSERT_EQUAL_INT16(-1156, cfg.legs[0].mount_y_dmm);
+  TEST_ASSERT_EQUAL_INT16(-600, cfg.legs[0].mount_x_dmm);
+  TEST_ASSERT_EQUAL_INT16(-1200, cfg.legs[0].mount_y_dmm);
   TEST_ASSERT_EQUAL_INT16(13500, cfg.legs[0].mount_yaw_cdeg);
-  // All legs sit 16.5 mm below base_link.
+  // Mark III coxa axes lie on the body reference plane.
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
-    TEST_ASSERT_EQUAL_INT16(-165, cfg.legs[leg].mount_z_dmm);
+    TEST_ASSERT_EQUAL_INT16(0, cfg.legs[leg].mount_z_dmm);
   }
 }
 
 void test_default_gait_and_features() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
-  TEST_ASSERT_EQUAL_UINT16(40, cfg.gait.body_height_mm);
+  TEST_ASSERT_EQUAL_UINT16(60, cfg.gait.body_height_mm);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(GaitId::Stand), cfg.gait.gait);
   // Conservative defaults: only sensor polling on (so present boards stream raw
   // data); no other optional feature and no foot sensor enabled (lmt.7).
@@ -210,7 +225,8 @@ void test_deserialize_rejects_bad_version() {
 void test_deserialize_migrates_v3_payload_with_default_rc_and_body_limits() {
   RobotConfig current;
   defaultRobotConfig(current);
-  current.servos[4].trim_ticks = -27;
+  applyLegacySequentialMotionProfile(current);
+  current.servos[6].trim_ticks = -27;  // physical ID 7
   current.gait.stride_len_mm = 71;
 
     uint8_t v5[kConfigPayloadSize];
@@ -234,8 +250,8 @@ void test_deserialize_migrates_v3_payload_with_default_rc_and_body_limits() {
   RobotConfig migrated;
   TEST_ASSERT_TRUE(deserializeRobotConfig(v3, sizeof(v3), migrated));
   TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
-  TEST_ASSERT_EQUAL_INT16(-27, migrated.servos[4].trim_ticks);
-  TEST_ASSERT_EQUAL_UINT16(71, migrated.gait.stride_len_mm);
+  TEST_ASSERT_EQUAL_INT16(-27, migrated.servos[0].trim_ticks);
+  TEST_ASSERT_EQUAL_UINT16(50, migrated.gait.stride_len_mm);
   TEST_ASSERT_TRUE(validateRcInputCalibration(migrated.rc_input));
   TEST_ASSERT_TRUE(validateBodyCommandLimits(migrated.body_command));
   TEST_ASSERT_TRUE(validateRobotConfig(migrated));
@@ -244,8 +260,9 @@ void test_deserialize_migrates_v3_payload_with_default_rc_and_body_limits() {
 void test_deserialize_migrates_v4_payload_with_default_body_limits() {
   RobotConfig current;
   defaultRobotConfig(current);
+  applyLegacySequentialMotionProfile(current);
   current.rc_input.channels[0].filter_tau_ms = 80;
-  current.servos[3].trim_ticks = -19;
+  current.servos[7].trim_ticks = -19;  // physical ID 8
   uint8_t v5[kConfigPayloadSize];
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize,
                            serializeRobotConfig(current, v5, sizeof(v5)));
@@ -270,6 +287,37 @@ void test_deserialize_migrates_v4_payload_with_default_body_limits() {
   TEST_ASSERT_EQUAL_INT16(-19, migrated.servos[3].trim_ticks);
   TEST_ASSERT_EQUAL_UINT16(80, migrated.rc_input.channels[0].filter_tau_ms);
   TEST_ASSERT_TRUE(validateBodyCommandLimits(migrated.body_command));
+}
+
+void test_deserialize_migrates_v5_motion_profile_to_mark_iii() {
+  RobotConfig legacy;
+  defaultRobotConfig(legacy);
+  applyLegacySequentialMotionProfile(legacy);
+  legacy.schema_version = kLegacySchemaVersionV5;
+  strncpy(legacy.robot_name, "LegacyV5", sizeof(legacy.robot_name) - 1);
+  legacy.servos[6].trim_ticks = 77;  // physical ID 7
+  legacy.servos[6].min_tick = 1300;
+  legacy.servos[6].max_tick = 2800;
+  legacy.gait.stride_len_mm = 80;
+  legacy.rc_input.channels[0].filter_tau_ms = 85;
+
+  uint8_t payload[kConfigPayloadSize];
+  TEST_ASSERT_EQUAL_UINT16(
+      kConfigPayloadSize,
+      serializeRobotConfig(legacy, payload, sizeof(payload)));
+
+  RobotConfig migrated;
+  TEST_ASSERT_TRUE(deserializeRobotConfig(payload, sizeof(payload), migrated));
+  TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
+  TEST_ASSERT_EQUAL_STRING("LegacyV5", migrated.robot_name);
+  TEST_ASSERT_EQUAL_UINT16(13300, migrated.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT8(7, migrated.servos[0].id);
+  TEST_ASSERT_EQUAL_INT16(77, migrated.servos[0].trim_ticks);
+  TEST_ASSERT_EQUAL_UINT16(1300, migrated.servos[0].min_tick);
+  TEST_ASSERT_EQUAL_UINT16(2800, migrated.servos[0].max_tick);
+  TEST_ASSERT_EQUAL_UINT16(50, migrated.gait.stride_len_mm);
+  TEST_ASSERT_EQUAL_UINT16(85, migrated.rc_input.channels[0].filter_tau_ms);
+  TEST_ASSERT_TRUE(validateRobotConfig(migrated));
 }
 
 void test_validate_rejects_duplicate_id() {
@@ -464,7 +512,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(43665, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(40784, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {
@@ -480,6 +528,7 @@ int main(int, char**) {
   RUN_TEST(test_deserialize_rejects_bad_version);
   RUN_TEST(test_deserialize_migrates_v3_payload_with_default_rc_and_body_limits);
   RUN_TEST(test_deserialize_migrates_v4_payload_with_default_body_limits);
+  RUN_TEST(test_deserialize_migrates_v5_motion_profile_to_mark_iii);
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
   RUN_TEST(test_validate_rejects_zero_home_radius);

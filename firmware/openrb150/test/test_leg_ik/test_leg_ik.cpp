@@ -15,19 +15,19 @@ using namespace config;
 
 namespace {
 
-// Default HexNav link lengths (mm), IK ref section 13.
-constexpr float kL1 = 56.08f;
-constexpr float kL2 = 66.51f;
-constexpr float kL3 = 24.86f;
+// Mark III link lengths (mm), Phantom_Phoenix/Hex_Cfg.h.
+constexpr float kL1 = 52.0f;
+constexpr float kL2 = 66.0f;
+constexpr float kL3 = 133.0f;
 
 // Home foot positions in body-centered frame B (mm), IK ref section 13.
 struct Vec3 {
   float x, y, z;
 };
 constexpr Vec3 kHomeFootB[kNumLegs] = {
-    {-155.4f, -205.4f, -40.0f}, {155.4f, -205.4f, -40.0f},
-    {196.8f, 0.0f, -40.0f},     {155.4f, 205.4f, -40.0f},
-    {-155.4f, 205.4f, -40.0f},  {-196.8f, 0.0f, -40.0f},
+  {-164.0f, -224.0f, -25.0f}, {164.0f, -224.0f, -25.0f},
+  {247.0f, 0.0f, -25.0f},     {164.0f, 224.0f, -25.0f},
+  {-164.0f, 224.0f, -25.0f},  {-247.0f, 0.0f, -25.0f},
 };
 
 }  // namespace
@@ -146,13 +146,13 @@ void test_clamp_reach_leaves_home_unchanged() {
 // the foot height preserved and the result solidly reachable.
 void test_clamp_reach_pulls_overreach_to_margin_keeping_height() {
   LegIk ik(kL1, kL2, kL3);
-  float x = 200.0f, y = 0.0f, z = kHomeFootZMm;  // far past full reach
+  float x = 270.0f, y = 0.0f, z = kHomeFootZMm;  // past full reach
   const bool clamped = ik.clampToReach(x, y, z);
   TEST_ASSERT_TRUE(clamped);
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, kHomeFootZMm, z);  // height kept
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, 0.0f, y);          // stays on radial
 
-  // Planar reach distance now equals the margin (95% of l2+l3).
+  // Planar reach distance now equals the configured margin.
   const float d_max = kReachMarginFrac * (kL2 + kL3);
   const float planar_r = sqrtf(x * x + y * y) - kL1;
   const float d = sqrtf(planar_r * planar_r + z * z);
@@ -165,8 +165,8 @@ void test_clamp_reach_pulls_overreach_to_margin_keeping_height() {
 // A diagonal over-reach keeps its hip-yaw direction (x and y scale together).
 void test_clamp_reach_preserves_hip_yaw() {
   LegIk ik(kL1, kL2, kL3);
-  const float yaw_in = atan2f(90.0f, 130.0f);
-  float x = 130.0f, y = 90.0f, z = kHomeFootZMm;  // |xy| ~ 158 mm, over-reach
+  const float yaw_in = atan2f(150.0f, 220.0f);
+  float x = 220.0f, y = 150.0f, z = kHomeFootZMm;
   const bool clamped = ik.clampToReach(x, y, z);
   TEST_ASSERT_TRUE(clamped);
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, yaw_in, atan2f(y, x));  // direction kept
@@ -195,7 +195,7 @@ void test_body_to_coxa_maps_home_to_radial() {
     float cx, cy, cz;
     bk.footBodyToCoxa(leg, kHomeFootB[leg].x, kHomeFootB[leg].y,
                       kHomeFootB[leg].z, cx, cy, cz);
-    // Every leg's home foot lands on the coxa +X radial axis at ~127 mm.
+    // Every leg's home foot lands on the coxa +X radial axis at ~147 mm.
     TEST_ASSERT_FLOAT_WITHIN(0.5f, kHomeRadiusMm, cx);
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 0.0f, cy);
     TEST_ASSERT_FLOAT_WITHIN(0.2f, kHomeFootZMm, cz);
@@ -316,9 +316,9 @@ void test_solve_body_limited_flags_and_recovers_overreach() {
   TEST_ASSERT_FALSE(limited);       // home stance is inside the margin
   TEST_ASSERT_TRUE(home.reachable);
 
-  // Push the foot 70 mm further out along +X (past the reach boundary).
+  // Push the foot 110 mm further out along +X (past the reach boundary).
   bool limited2 = false;
-  IkResult far = bk.solveBodyLimited(leg, kHomeFootB[leg].x + 70.0f,
+  IkResult far = bk.solveBodyLimited(leg, kHomeFootB[leg].x + 110.0f,
                                      kHomeFootB[leg].y, kHomeFootB[leg].z,
                                      limited2);
   TEST_ASSERT_TRUE(limited2);       // clamp engaged

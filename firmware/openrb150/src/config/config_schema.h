@@ -57,10 +57,12 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 //     forces a stored v2 config carrying the old hidden +171/-512 trims to be
 //     rejected at boot so the robot falls back to these corrected defaults.
 // v4: adds persisted logical RC input calibration.
-// v5: adds central body-command limits. Valid v3/v4 payloads are migrated in
-//     RAM at boot so existing EEPROM geometry, servo calibration, and v4 RC
-//     calibration are retained until the next explicit config commit.
-constexpr uint16_t kSchemaVersion = 5;
+// v5: adds central body-command limits.
+// v6: replaces the motion profile with the Mark III Phoenix geometry, servo
+//     wiring, side inversions, horn offsets, limits, and gait defaults. Older
+//     payloads retain non-motion settings but receive the v6 motion profile.
+constexpr uint16_t kSchemaVersion = 6;
+constexpr uint16_t kLegacySchemaVersionV5 = 5;
 constexpr uint16_t kLegacySchemaVersionV4 = 4;
 constexpr uint16_t kLegacySchemaVersionV3 = 3;
 

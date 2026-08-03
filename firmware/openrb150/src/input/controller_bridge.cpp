@@ -96,18 +96,17 @@ inline void clearRawInputs(ChannelPackInputs_t* out) {
 
 BindingConfig defaultBindings() {
   BindingConfig c;
-  // Left gimbal ALWAYS walks (forward + yaw); the mode toggle selects what
-  // the right gimbal overlays on top of walking (Phoenix-style).
+  // Left gimbal owns planar walking; right X rotates the robot in Walk mode.
   c.walk_forward = {AxisSource::GimbalLY, false, 0.0f};
-  c.walk_yaw = {AxisSource::GimbalLX, false, 0.0f};
-  c.walk_strafe = {AxisSource::GimbalRX, false, 0.0f};
+  c.walk_strafe = {AxisSource::GimbalLX, false, 0.0f};
+  c.walk_yaw = {AxisSource::GimbalRX, false, 0.0f};
   // Translate-body overlay: right gimbal shifts the body fore/aft + lateral
   // while the left gimbal keeps walking. Z stays on the height pot.
   c.body_x = {AxisSource::GimbalRY, false, 0.0f};
   c.body_y = {AxisSource::GimbalRX, false, 0.0f};
   c.body_z = {AxisSource::None, false, 0.0f};
-  // Rotate-body overlay: right gimbal = roll/pitch while walking. Yaw stays
-  // on the left stick as walking yaw.
+  // Rotate-body overlay: right gimbal = roll/pitch while the left gimbal keeps
+  // planar walking. Robot yaw is intentionally disabled in this pose mode.
   c.body_roll = {AxisSource::GimbalRX, false, 0.0f};
   c.body_pitch = {AxisSource::GimbalRY, false, 0.0f};
   c.body_yaw = {AxisSource::None, false, 0.0f};
@@ -676,20 +675,18 @@ const ControllerCommand& ControllerBridge::update(
   cmd_.stride = readAxisUnipolar(cfg_.stride);
   cmd_.step_height = readAxisUnipolar(cfg_.step_height);
 
-  // Motion: the left gimbal ALWAYS walks (forward + yaw), in every mode, so
-  // the operator never loses locomotion while adjusting the body. The mode
-  // toggle selects the RIGHT-gimbal overlay: strafe (Walk), body translation
-  // (TranslateBody), or body attitude (RotateBody) -- applied WHILE walking,
-  // Phoenix-style. Unused pose axes stay zero; the persistent operator trim
-  // is always carried so a standing lean survives a mode change.
+  // Motion: the left gimbal always walks in the plane (forward + strafe), so
+  // the operator never loses locomotion while adjusting the body. Right X is
+  // yaw in Walk mode; the other modes reuse the right gimbal for body pose.
+  // Unused pose axes stay zero and operator trim survives mode changes.
   cmd_.twist_vx = cmd_.twist_vy = cmd_.twist_wz = 0.0f;
   cmd_.pose_x_mm = cmd_.pose_y_mm = cmd_.pose_z_mm = 0.0f;
   cmd_.pose_roll = cmd_.pose_pitch = cmd_.pose_yaw = 0.0f;
   cmd_.twist_vx = readAxisBipolar(cfg_.walk_forward);
-  cmd_.twist_wz = readAxisBipolar(cfg_.walk_yaw);
+  cmd_.twist_vy = readAxisBipolar(cfg_.walk_strafe);
   switch (cmd_.mode) {
     case ControlMode::Walk:
-      cmd_.twist_vy = readAxisBipolar(cfg_.walk_strafe);
+      cmd_.twist_wz = readAxisBipolar(cfg_.walk_yaw);
       break;
     case ControlMode::TranslateBody:
       cmd_.pose_x_mm = readAxisBipolar(cfg_.body_x) * poselim::kMaxTransMm;

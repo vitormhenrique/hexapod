@@ -81,14 +81,15 @@ DecodeStatus runTarget(MaintTargetApi& api_obj, uint8_t msg_id,
 }
 
 // Body-frame coordinates (rounded to int16 mm) of leg `leg`'s home foot, which
-// the IK maps to all-zero joint angles. Derived by inverting footBodyToCoxa for
-// the documented coxa-frame home (127, 0, -44.55 mm).
+// the IK maps to all-zero relative joint angles. Derived by inverting
+// footBodyToCoxa for the configured Mark III coxa-frame home.
 void homeBodyTarget(const config::RobotConfig& cfg, uint8_t leg, int16_t& bx,
                     int16_t& by, int16_t& bz) {
   const config::LegGeometry& g = cfg.legs[leg];
   const float hip_x = g.mount_x_dmm / 10.0f;
   const float hip_y = g.mount_y_dmm / 10.0f;
-  const float z_off = g.mount_z_dmm / 10.0f + gait::kCoxaLiftMm;
+  const float z_off = g.mount_z_dmm / 10.0f +
+                      cfg.geometry.coxa_lift_cmm / 100.0f;
   const float yaw = g.mount_yaw_cdeg * (3.14159265358979323846f / 180.0f / 100.0f);
   const float a = -(yaw + 3.14159265358979323846f / 2.0f);
   const float ca = cosf(a), sa = sinf(a);
@@ -226,7 +227,7 @@ void test_joint_target_clamps_high() {
   api_obj.setConfig(&cfg);
   api_obj.setLiveState(kMacMaintenance, true);
 
-  // 120 deg exceeds the default +/-90 deg travel -> clamp at max_tick (3072).
+  // 120 deg exceeds the left-rear coxa's Mark III +75 degree limit.
   uint8_t pl[4];
   pl[0] = 0;
   pl[1] = 0;
@@ -240,7 +241,10 @@ void test_joint_target_clamps_high() {
   // One of the two clamp directions must fire (sign depends on the leg).
   TEST_ASSERT_TRUE(rp[2] != 0 || rp[3] != 0);
   const uint16_t tick = readU16(&rp[4]);
-  TEST_ASSERT_TRUE(tick == 1024 || tick == 3072);
+  dxl::ServoMap sm(cfg);
+  const dxl::JointCommand expected =
+      sm.angleToTick(0, 0, 120.0f * 3.14159265358979323846f / 180.0f);
+  TEST_ASSERT_EQUAL_UINT16(expected.tick, tick);
   // The saturated goal is flagged in the stored set so servo_goals can show it.
   const MaintTargetSet& t = api_obj.target();
   TEST_ASSERT_TRUE(t.clamped[0][0]);
@@ -254,9 +258,9 @@ void test_all_joints_stores_atomically_and_bumps_seq_once() {
   api_obj.setConfig(&cfg);
   api_obj.setLiveState(kMacMaintenance, true);
 
-  // 18 angles, leg-major (leg*3 + joint). Use a modest in-travel value so no
-  // joint clamps; the aggregate response should report 18 stored, mask 0.
-  const int16_t cdeg = 1500;  // 15.00 deg, within +/-90 travel
+  // 18 angles, leg-major (leg*3 + joint). Use a small in-travel value so the
+  // asymmetric Mark III tibia limits remain clear and the clamp mask is zero.
+  const int16_t cdeg = 300;  // 3.00 deg
   const float ang = cdeg * (3.14159265358979323846f / 180.0f / 100.0f);
   dxl::ServoMap sm(cfg);
 

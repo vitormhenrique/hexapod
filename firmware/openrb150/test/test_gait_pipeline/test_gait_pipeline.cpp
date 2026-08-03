@@ -95,11 +95,14 @@ void test_default_stand_uses_natural_joint_pose() {
   PipelineOutput out;
   pipe.update(20, out);
 
-  // The documented URDF home foot maps to the calibrated servo centre. Pot2
-  // changes the foot target on the constrained stance locus; it must not add
-  // another joint-space posture offset after IK.
+  const uint16_t left_ticks[kJointsPerLeg] = {2048, 1610, 2944};
+  const uint16_t right_ticks[kJointsPerLeg] = {2048, 2486, 1152};
   for (uint8_t i = 0; i < out.count; ++i) {
-    TEST_ASSERT_UINT16_WITHIN(1, kServoCenterTick, out.joints[i].tick);
+    const PipelineJoint& joint = out.joints[i];
+    const bool right_side = joint.leg == 1 || joint.leg == 2 || joint.leg == 3;
+    const uint16_t expected =
+        right_side ? right_ticks[joint.joint] : left_ticks[joint.joint];
+    TEST_ASSERT_UINT16_WITHIN(2, expected, joint.tick);
   }
 }
 
@@ -111,11 +114,12 @@ void test_seeded_goals_ramp_from_present_pose() {
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Stand);
   // Speed 0 -> slowest slew (600 ticks/s = 12 ticks per 20 ms cycle).
-  pipe.setParams(40, 60, 30, 128, 0);
+  pipe.setParams(25, 50, 50, 128, 0);
 
   // All servos start 400 ticks below center (robot slumped after torque-off).
-  for (uint8_t id = 1; id <= kNumServos; ++id) {
-    pipe.seedGoal(id, static_cast<uint16_t>(kServoCenterTick - 400));
+  for (uint8_t index = 0; index < kNumServos; ++index) {
+    pipe.seedGoal(cfg.servos[index].id,
+                  static_cast<uint16_t>(kServoCenterTick - 400));
   }
 
   PipelineOutput first;
@@ -130,17 +134,19 @@ void test_seeded_goals_ramp_from_present_pose() {
   }
   TEST_ASSERT_TRUE(any_moving);
 
-  // The ramp converges to the exact URDF home pose.
+  // The ramp converges to the Mark III horn-adjusted home pose.
   PipelineOutput out;
   for (int i = 0; i < 400; ++i) pipe.update(20, out);
   for (uint8_t i = 0; i < out.count; ++i) {
-    TEST_ASSERT_UINT16_WITHIN(1, kServoCenterTick, out.joints[i].tick);
+    const ServoConfig* servo = servoById(cfg, out.joints[i].id);
+    TEST_ASSERT_NOT_NULL(servo);
+    const uint16_t neutral = static_cast<uint16_t>(
+        static_cast<int32_t>(kServoCenterTick) + servo->trim_ticks);
+    TEST_ASSERT_UINT16_WITHIN(2, neutral, out.joints[i].tick);
   }
 }
 
-// The emitted (leg, joint, id) triples match the default servo map order
-// (id = leg*3 + joint + 1, leg-major wiring), so dxlTask can Sync Write them
-// directly.
+// The emitted (leg, joint, id) triples match the Mark III physical servo map.
 void test_joint_ids_match_default_servo_map() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
@@ -155,8 +161,8 @@ void test_joint_ids_match_default_servo_map() {
       const PipelineJoint& j = out.joints[idx++];
       TEST_ASSERT_EQUAL_UINT8(leg, j.leg);
       TEST_ASSERT_EQUAL_UINT8(joint, j.joint);
-      TEST_ASSERT_EQUAL_UINT8(
-          static_cast<uint8_t>(leg * kJointsPerLeg + joint + 1), j.id);
+        TEST_ASSERT_EQUAL_UINT8(
+          cfg.servos[leg * kJointsPerLeg + joint].id, j.id);
     }
   }
 }
@@ -523,7 +529,9 @@ void test_extreme_body_pose_is_reach_limited_not_unreachable() {
 
   PipelineOutput out;
   pipe.update(20, out);
-  TEST_ASSERT_TRUE(out.any_reach_limited);
+  // The Mark III 133 mm tibia keeps this valid body-pose envelope reachable
+  // without requiring the old short-leg model's radial correction.
+  TEST_ASSERT_FALSE(out.any_reach_limited);
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 

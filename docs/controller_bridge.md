@@ -54,21 +54,22 @@ Serial3 (D14 TX / D13 RX) bytes ──► crsf::Parser ──► raw 11-bit tick
 
 ## 2. Control modes ("move the core without moving the legs")
 
-`SW_E` (3-pos toggle) selects the control mode. The same two gimbals are
-re-interpreted per mode; in the two body modes the **feet stay planted** and
-only the body shifts/tilts on the standing legs (clamped to the IK envelope).
+`SW_E` (3-pos toggle) selects the control mode. The left gimbal always controls
+planar walking. In the two body modes the right gimbal overlays body movement
+while the gait continues, with all targets clamped to the IK envelope.
 
 | `SW_E` | `ControlMode` | Left gimbal | Right gimbal |
 | --- | --- | --- | --- |
-| UP | `Walk` | LY = forward/back, LX = yaw turn | RX = strafe |
-| CENTER | `TranslateBody` | LY = body Z (height) | RY = body X, RX = body Y |
-| DOWN | `RotateBody` | LX = body yaw | RX = body roll, RY = body pitch |
+| UP | `Walk` | LY = forward/back, LX = strafe | RX = robot yaw |
+| CENTER | `TranslateBody` | LY = forward/back, LX = strafe | RY = body X, RX = body Y |
+| DOWN | `RotateBody` | LY = forward/back, LX = strafe | RX = body roll, RY = body pitch |
 
 - Translate limits: ±`poselim::kMaxTransMm` = **±50 mm** on each axis.
 - Rotate limits: ±`poselim::kMaxRotRad` = **±0.4363 rad (±25°)** on each axis.
 - These mirror `protocol::motionlim`, so a controller body pose can never exceed
   what `SET_BODY_POSE` allows over USB.
-- In `Walk` mode no body pose is emitted; in the body modes no twist is emitted.
+- In `Walk` mode no body pose is emitted. Body modes retain left-stick walking
+  but disable right-stick yaw while those axes control the pose overlay.
 
 ---
 

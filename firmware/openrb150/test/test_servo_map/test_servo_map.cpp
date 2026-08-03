@@ -27,14 +27,14 @@ void test_lookup_by_slot_matches_wiring() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  // Wiring (leg-major): leg1 coxa id 1, femur id 2, tibia id 3; leg6 tibia 18.
+  // Mark III wiring normalized to firmware leg order LR, RR, RM, RF, LF, LM.
   TEST_ASSERT_EQUAL_PTR(nullptr, map.servoFor(99, 0));
   const ServoConfig* leg1_coxa = map.servoFor(0, 0);
   TEST_ASSERT_NOT_NULL(leg1_coxa);
-  TEST_ASSERT_EQUAL_UINT8(1, leg1_coxa->id);
-  TEST_ASSERT_EQUAL_UINT8(2, map.servoFor(0, 1)->id);
-  TEST_ASSERT_EQUAL_UINT8(3, map.servoFor(0, 2)->id);
-  TEST_ASSERT_EQUAL_UINT8(18, map.servoFor(5, 2)->id);
+  TEST_ASSERT_EQUAL_UINT8(7, leg1_coxa->id);
+  TEST_ASSERT_EQUAL_UINT8(9, map.servoFor(0, 1)->id);
+  TEST_ASSERT_EQUAL_UINT8(11, map.servoFor(0, 2)->id);
+  TEST_ASSERT_EQUAL_UINT8(17, map.servoFor(5, 2)->id);
 }
 
 void test_lookup_by_id() {
@@ -42,10 +42,10 @@ void test_lookup_by_id() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  const ServoConfig* s = map.servoForId(11);  // leg4 femur (leg-major ids)
+  const ServoConfig* s = map.servoForId(11);  // left-rear tibia
   TEST_ASSERT_NOT_NULL(s);
-  TEST_ASSERT_EQUAL_UINT8(3, s->leg);   // leg index 3 == "leg 4"
-  TEST_ASSERT_EQUAL_UINT8(1, s->joint); // femur
+  TEST_ASSERT_EQUAL_UINT8(0, s->leg);
+  TEST_ASSERT_EQUAL_UINT8(2, s->joint);
   TEST_ASSERT_EQUAL_PTR(nullptr, map.servoForId(200));
 }
 
@@ -66,13 +66,12 @@ void test_positive_angle_applies_sign() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  // +45 deg. All legs use sign +1 -> tick above center for both leg 0 and
-  // leg 1. Offset magnitude = 45 * 4096/360 = 512.
+  // +45 deg. Mark III mirrors the right side at the servo output.
   const float angle = 45.0f * kDegToRad;
   JointCommand left = map.angleToTick(0, 0, angle);
   JointCommand right = map.angleToTick(1, 0, angle);
   assertTickNear(kServoCenterTick + 512, left.tick);
-  assertTickNear(kServoCenterTick + 512, right.tick);
+  assertTickNear(kServoCenterTick - 512, right.tick);
   TEST_ASSERT_FALSE(left.clamped_high);
   TEST_ASSERT_FALSE(right.clamped_high);
 }
@@ -90,23 +89,23 @@ void test_trim_offsets_center() {
 void test_clamp_high_reported() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
-  // Default travel is [1024, 3072]. +120 deg => offset ~1365 => 3413 > 3072.
+  // Left-rear coxa uses the Mark III +/-75 degree travel window.
   ServoMap map(cfg);
   JointCommand c = map.angleToTick(0, 0, 120.0f * kDegToRad);
   TEST_ASSERT_TRUE(c.clamped_high);
   TEST_ASSERT_FALSE(c.clamped_low);
-  TEST_ASSERT_EQUAL_UINT16(3072, c.tick);
+  TEST_ASSERT_EQUAL_UINT16(2901, c.tick);
 }
 
 void test_clamp_low_reported() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
-  // Left leg, -120 deg => below 1024 floor.
+  // Left-rear coxa, -120 deg => below the -75 degree floor.
   JointCommand c = map.angleToTick(0, 0, -120.0f * kDegToRad);
   TEST_ASSERT_TRUE(c.clamped_low);
   TEST_ASSERT_FALSE(c.clamped_high);
-  TEST_ASSERT_EQUAL_UINT16(1024, c.tick);
+  TEST_ASSERT_EQUAL_UINT16(1195, c.tick);
 }
 
 void test_unmapped_slot() {
@@ -124,7 +123,7 @@ void test_round_trip_angle_tick_angle() {
   cfg.servos[3].trim_ticks = -25;  // exercise trim in the inverse too
   ServoMap map(cfg);
 
-  // leg index 1 (sign +1), coxa. Pick an in-range angle.
+  // Right-rear coxa is inverted. Pick an in-range angle.
   const float angle = 30.0f * kDegToRad;
   JointCommand c = map.angleToTick(1, 0, angle);
   TEST_ASSERT_FALSE(c.clamped_low);

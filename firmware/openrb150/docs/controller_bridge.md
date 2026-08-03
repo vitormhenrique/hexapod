@@ -19,25 +19,22 @@ hexapod action the `ControllerBridge` emits each control cycle.
 
 ## 1. Proportional controls (gimbals & pots)
 
-The **left gimbal always walks** — forward/backward plus yaw are available in
-every control mode. The `SW_E` toggle selects what the **right gimbal**
-overlays on top of walking (Phoenix-style simultaneous control): strafe, body
-translation, or body attitude. With the left stick centred the gait holds the
-planted home stance, so the body modes still "move the core without moving
-the legs".
+The **left gimbal always walks** in the plane: forward/backward plus strafe are
+available in every control mode. In Walk mode, Right X rotates the robot. The
+`SW_E` toggle reuses the right gimbal for body translation or attitude while
+left-stick walking remains active.
 
 ### Gimbals per control mode
 
 | Gimbal axis | CRSF ch | **Walk** mode | **TranslateBody** mode | **RotateBody** mode |
 |-------------|:------:|---------------|------------------------|---------------------|
-| Left X  | CH1 | Yaw rate — turn left / right (`twist_wz`) | Yaw rate (`twist_wz`) | Yaw rate (`twist_wz`) |
+| Left X  | CH1 | Strafe left / right (`twist_vy`) | Strafe (`twist_vy`) | Strafe (`twist_vy`) |
 | Left Y  | CH2 | Forward / backward (`twist_vx`) | Forward / backward (`twist_vx`) | Forward / backward (`twist_vx`) |
-| Right X | CH3 | Strafe left / right (`twist_vy`) | Body **Y** shift (`pose_y_mm`) | Body **roll** (`pose_roll`) |
+| Right X | CH3 | Yaw rate (`twist_wz`) | Body **Y** shift (`pose_y_mm`) | Body **roll** (`pose_roll`) |
 | Right Y | CH4 | — | Body **X** shift (`pose_x_mm`) | Body **pitch** (`pose_pitch`) |
 
-`body_z` and `body_yaw` are unbound by default (body height lives on Pot 2;
-yaw is always walking yaw on Left X); a USB binding override can attach them
-to any source.
+`body_z` and `body_yaw` are unbound by default; body height lives on Pot 2.
+A USB binding override can attach the unused pose axes to another source.
 
 Notes:
 - Gimbals are bipolar: centre = 0, with a 5% deadband to kill jitter.
@@ -73,8 +70,8 @@ The EMA and optional median-of-three filter modes are bridge-owned and preserve
 the current filtered output when switching modes. Raw diagnostic bypass is
 rejected unless the caller has established that the robot is disarmed. Gait and
 control-mode three-position switches require a stable 40 ms position before
-changing; physical E-stop remains immediate. Valid schema-v3/v4 EEPROM payloads
-migrate in RAM to schema v5 with safe calibration and body-command limits; an
+changing; physical E-stop remains immediate. Valid schema-v3/v4/v5 EEPROM
+payloads migrate in RAM to schema v6 with the Mark III motion profile; an
 explicit config commit persists the migration.
 
 ### Pots & encoders (live shape parameters, all modes)
@@ -209,9 +206,9 @@ clamped to `±25°`). This biases the robot's attitude on top of the gimbal pose
 
 | CRSF ch | Physical input | Default function |
 |--------:|----------------|------------------|
-| CH1 | Gimbal Left X | Yaw rate (all modes) |
+| CH1 | Gimbal Left X | Strafe (all modes) |
 | CH2 | Gimbal Left Y | Forward / backward (all modes) |
-| CH3 | Gimbal Right X | Strafe (Walk) / body Y (Translate) / roll (Rotate) |
+| CH3 | Gimbal Right X | Yaw (Walk) / body Y (Translate) / roll (Rotate) |
 | CH4 | Gimbal Right Y | Body X (Translate) / pitch (Rotate) |
 | CH5 | Pot 1 | Speed scalar |
 | CH6 | Pot 2 | Body height |

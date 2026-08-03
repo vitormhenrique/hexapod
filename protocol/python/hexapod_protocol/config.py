@@ -33,9 +33,11 @@ ROBOT_NAME_LEN = 16  # incl. NUL terminator
 # mechanical home pose per the URDF all-zero model. The bump invalidates v2
 # payloads that carried the old hidden +171/-512 posture trims.
 # v4 adds logical RC calibration.
-# v5 adds central body-command limits. Firmware migrates valid v3/v4 payloads
-# in RAM using safe defaults until an explicit commit.
-SCHEMA_VERSION = 5
+# v5 adds central body-command limits.
+# v6 installs the Mark III motion profile. Firmware migrates valid v3/v4/v5
+# payloads in RAM until an explicit commit.
+SCHEMA_VERSION = 6
+LEGACY_SCHEMA_VERSION_V5 = 5
 LEGACY_SCHEMA_VERSION_V4 = 4
 LEGACY_SCHEMA_VERSION_V3 = 3
 
@@ -278,7 +280,11 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
         schema_version == LEGACY_SCHEMA_VERSION_V4
         and len(payload) == LEGACY_CONFIG_PAYLOAD_SIZE_V4
     )
-    if not legacy_v3 and not legacy_v4 and (
+    legacy_v5 = (
+        schema_version == LEGACY_SCHEMA_VERSION_V5
+        and len(payload) == CONFIG_PAYLOAD_SIZE
+    )
+    if not legacy_v3 and not legacy_v4 and not legacy_v5 and (
         schema_version != SCHEMA_VERSION or len(payload) != CONFIG_PAYLOAD_SIZE
     ):
         raise ConfigDecodeError(
@@ -351,8 +357,10 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     feature_defaults = struct.unpack_from("<I", payload, o)[0]
     o += 4
 
-    return RobotConfig(
-        schema_version=SCHEMA_VERSION if (legacy_v3 or legacy_v4) else schema_version,
+    config = RobotConfig(
+        schema_version=(
+            SCHEMA_VERSION if (legacy_v3 or legacy_v4 or legacy_v5) else schema_version
+        ),
         robot_name=robot_name,
         links=links,
         geometry=geometry,
@@ -364,6 +372,9 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
         feet=feet,
         feature_defaults=feature_defaults,
     )
+    if legacy_v3 or legacy_v4 or legacy_v5:
+        _apply_mark_iii_motion_profile(config, preserve_servo_calibration=True)
+    return config
 
 
 def encode_robot_config(cfg: RobotConfig) -> bytes:
@@ -463,58 +474,87 @@ def encode_robot_config(cfg: RobotConfig) -> bytes:
 
 # Per-leg coxa mount placement seeds + sign rule (mirror config_schema.cpp).
 _LEG_SEEDS = (
-    (-656, -1156, -165, 13500),
-    (656, -1156, -165, -13500),
-    (698, 0, -165, -9000),
-    (656, 1156, -165, -4500),
-    (-656, 1156, -165, 4500),
-    (-698, 0, -165, 9000),
+    (-600, -1200, 0, 13500),
+    (600, -1200, 0, -13500),
+    (1000, 0, 0, -9000),
+    (600, 1200, 0, -4500),
+    (-600, 1200, 0, 4500),
+    (-1000, 0, 0, 9000),
+)
+
+_MARK_III_SERVO_IDS = (
+    (7, 9, 11),
+    (8, 10, 12),
+    (14, 16, 18),
+    (2, 4, 6),
+    (19, 3, 5),
+    (13, 15, 17),
 )
 
 
-def default_robot_config() -> RobotConfig:
-    """Compiled SAFE defaults, mirroring ``defaultRobotConfig`` (HexNav)."""
-    cfg = RobotConfig(schema_version=SCHEMA_VERSION, robot_name="HexNav")
-    cfg.links = LinkLengths(coxa_cmm=5608, femur_cmm=6651, tibia_cmm=2486)
-    # Reference stance geometry (0.01 mm); mirrors gait::kHomeRadiusMm 127.0,
-    # kHomeFootZMm -44.55, kCoxaLiftMm 21.0.
+def _apply_mark_iii_motion_profile(
+    cfg: RobotConfig, *, preserve_servo_calibration: bool = False
+) -> None:
+    prior_servos = list(cfg.servos) if preserve_servo_calibration else []
+    cfg.links = LinkLengths(coxa_cmm=5200, femur_cmm=6600, tibia_cmm=13300)
     cfg.geometry = BodyGeometry(
-        home_radius_cmm=12700, home_foot_z_cmm=-4455, coxa_lift_cmm=2100
+        home_radius_cmm=14700, home_foot_z_cmm=-2500, coxa_lift_cmm=0
     )
     cfg.legs = [LegGeometry(*seed) for seed in _LEG_SEEDS]
     cfg.servos = []
-    for i in range(NUM_SERVOS):
-        leg = i // JOINTS_PER_LEG
-        joint = i % JOINTS_PER_LEG
-        cfg.servos.append(
-            ServoConfig(
-                # Leg-major wiring: leg1 = coxa 1 / femur 2 / tibia 3, ...
-                # leg6 = 16/17/18 (id = leg*3 + joint + 1).
-                id=leg * JOINTS_PER_LEG + joint + 1,
-                leg=leg,
-                joint=joint,
-                # All legs share a +1 sign; hardware validation showed the
-                # right legs (2, 3, 4) were mirrored the wrong way under -1.
-                sign=1,
-                trim_ticks=(
-                    DEFAULT_FEMUR_TRIM_TICKS
-                    if joint == 1
-                    else DEFAULT_TIBIA_TRIM_TICKS
-                    if joint == 2
-                    else DEFAULT_COXA_TRIM_TICKS
-                ),
-                min_tick=SERVO_CENTER_TICK - 1024,  # 1024
-                max_tick=SERVO_CENTER_TICK + 1024,  # 3072
+    for leg in range(NUM_LEGS):
+        right_side = leg in (1, 2, 3)
+        for joint in range(JOINTS_PER_LEG):
+            if joint == 0:
+                trim = 0
+                wide_middle = leg == 5
+                minimum = 910 if wide_middle else 1195
+                maximum = 3186 if wide_middle else 2901
+            elif joint == 1:
+                trim = 395 if right_side else -395
+                minimum, maximum = 910, 3186
+            else:
+                trim = -1038 if right_side else 1038
+                minimum = 887 if right_side else 1286
+                maximum = 2810 if right_side else 3209
+            cfg.servos.append(
+                ServoConfig(
+                    id=_MARK_III_SERVO_IDS[leg][joint],
+                    leg=leg,
+                    joint=joint,
+                    sign=-1 if right_side else 1,
+                    trim_ticks=trim,
+                    min_tick=minimum,
+                    max_tick=maximum,
+                )
             )
-        )
     cfg.gait = GaitDefaults(
-        body_height_mm=40,
-        stride_len_mm=60,
-        step_height_mm=30,
-        duty_x255=128,
+        body_height_mm=60,
+        stride_len_mm=50,
+        step_height_mm=50,
+        duty_x255=159,
         speed_x255=128,
         gait=0,
     )
+    if not preserve_servo_calibration:
+        return
+    prior_by_id = {servo.id: servo for servo in prior_servos}
+    for servo in cfg.servos:
+        prior = prior_by_id.get(servo.id)
+        if prior is None:
+            continue
+        servo.trim_ticks = max(
+            -32768, min(32767, servo.trim_ticks + prior.trim_ticks)
+        )
+        if 0 <= prior.min_tick < prior.max_tick <= SERVO_MAX_TICK:
+            servo.min_tick = max(servo.min_tick, prior.min_tick)
+            servo.max_tick = min(servo.max_tick, prior.max_tick)
+
+
+def default_robot_config() -> RobotConfig:
+    """Compiled safe defaults, mirroring firmware's Mark III profile."""
+    cfg = RobotConfig(schema_version=SCHEMA_VERSION, robot_name="HexNav")
+    _apply_mark_iii_motion_profile(cfg)
     cfg.rc_input = default_rc_input_calibration()
     cfg.body_command = BodyCommandLimits()
     cfg.feet = [FootSensorCal() for _ in range(NUM_FOOT_SENSORS)]

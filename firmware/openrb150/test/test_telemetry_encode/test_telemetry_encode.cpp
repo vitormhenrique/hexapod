@@ -98,11 +98,11 @@ void test_joint_state_maps_and_skips_unmapped() {
   dxl::ServoMap map(cfg);
 
   dxl::ServoStatus servos[3];
-  servos[0].id = 1;  // leg 0, coxa
+  servos[0].id = 7;  // left-rear coxa
   servos[0].present_position = kServoCenterTick;
   servos[1].id = 200;  // not in the map -> skipped
   servos[1].present_position = kServoCenterTick;
-  servos[2].id = 18;  // leg 5, tibia
+  servos[2].id = 17;  // left-middle tibia
   servos[2].present_position = kServoCenterTick;
 
   uint8_t out[64] = {0};

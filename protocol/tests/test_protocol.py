@@ -1381,8 +1381,24 @@ def test_decode_robot_config_roundtrip():
     assert again == cfg
 
 
+def _legacy_sequential_config():
+    legacy = cfgmod.default_robot_config()
+    legacy.links = cfgmod.LinkLengths(5608, 6651, 2486)
+    legacy.geometry = cfgmod.BodyGeometry(12700, -4455, 2100)
+    for index, servo in enumerate(legacy.servos):
+        servo.id = index + 1
+        servo.leg = index // cfgmod.JOINTS_PER_LEG
+        servo.joint = index % cfgmod.JOINTS_PER_LEG
+        servo.sign = 1
+        servo.trim_ticks = 0
+        servo.min_tick = 1024
+        servo.max_tick = 3072
+    legacy.gait = cfgmod.GaitDefaults(40, 60, 30, 128, 128, 0)
+    return legacy
+
+
 def test_decode_robot_config_migrates_v3_and_v4_payloads():
-    current = cfgmod.encode_robot_config(cfgmod.default_robot_config())
+    current = cfgmod.encode_robot_config(_legacy_sequential_config())
     rc_offset = (
         cfgmod.LEGACY_CONFIG_PAYLOAD_SIZE_V3
         - cfgmod.NUM_FOOT_SENSORS * (4 + 2 + 2 + 2 + 1)
@@ -1409,6 +1425,30 @@ def test_decode_robot_config_migrates_v3_and_v4_payloads():
     assert v4_config.schema_version == cfgmod.SCHEMA_VERSION
     assert v4_config.rc_input.channels[0].filter_tau_ms == 60
     assert v4_config.body_command.forward_accel_milli_per_s == 1200
+
+
+def test_decode_robot_config_migrates_v5_motion_profile_to_mark_iii():
+    legacy = _legacy_sequential_config()
+    legacy.schema_version = cfgmod.LEGACY_SCHEMA_VERSION_V5
+    legacy.robot_name = "LegacyV5"
+    legacy.servos[6].trim_ticks = 77  # physical ID 7
+    legacy.servos[6].min_tick = 1300
+    legacy.servos[6].max_tick = 2800
+    legacy.gait.stride_len_mm = 80
+    legacy.rc_input.channels[0].filter_tau_ms = 85
+
+    migrated = cfgmod.decode_robot_config(cfgmod.encode_robot_config(legacy))
+
+    assert migrated.schema_version == cfgmod.SCHEMA_VERSION
+    assert migrated.robot_name == "LegacyV5"
+    assert migrated.links.tibia_cmm == 13300
+    assert migrated.servos[0].id == 7
+    assert migrated.servos[0].trim_ticks == 77
+    assert migrated.servos[0].min_tick == 1300
+    assert migrated.servos[0].max_tick == 2800
+    assert migrated.gait.stride_len_mm == 50
+    assert migrated.rc_input.channels[0].filter_tau_ms == 85
+    assert cfgmod.validate_robot_config(migrated) == []
 
 
 def test_calibration_config_validation_matches_firmware_rules():
@@ -1493,10 +1533,10 @@ def test_tick_angle_roundtrip_within_travel():
 def test_servo_map_lookup_and_unmapped():
     cfg = cfgmod.default_robot_config()
     smap = cfgmod.ServoMap(cfg)
-    assert smap.servo_for(0, 0).id == 1  # leg0 coxa
-    assert smap.servo_for(0, 1).id == 2  # leg0 femur (leg-major wiring)
-    assert smap.servo_for_id(3).leg == 0 and smap.servo_for_id(3).joint == 2
-    assert smap.servo_for_id(13).leg == 4 and smap.servo_for_id(13).joint == 0
+    assert smap.servo_for(0, 0).id == 7  # left-rear coxa
+    assert smap.servo_for(0, 1).id == 9  # left-rear femur
+    assert smap.servo_for_id(3).leg == 4 and smap.servo_for_id(3).joint == 1
+    assert smap.servo_for_id(13).leg == 5 and smap.servo_for_id(13).joint == 0
     assert smap.servo_for(9, 0) is None  # leg out of range
     assert smap.tick_to_angle(9, 0, 2048) == 0.0
     assert smap.angle_to_tick(9, 0, 0.5).unmapped
@@ -1556,29 +1596,29 @@ def test_servo_status_fallback_matches_joint_state_shape():
     cfg = cfgmod.default_robot_config()
     status = telemetry.ServoStatusTelemetry(
         servos=[
-            telemetry.ServoStatus(1, 2048, 0, 0, 0, 0, 0),  # leg0 coxa, center -> 0deg
-            telemetry.ServoStatus(2, 2389, 0, 0, 0, 0, 0),  # leg0 femur, +30deg
-            telemetry.ServoStatus(4, 1024, 0, 0, 0, 0, 0),  # leg1 coxa (sign +1)
+            telemetry.ServoStatus(7, 2048, 0, 0, 0, 0, 0),  # left-rear coxa
+            telemetry.ServoStatus(9, 1994, 0, 0, 0, 0, 0),  # left-rear femur, +30deg
+            telemetry.ServoStatus(8, 1536, 0, 0, 0, 0, 0),  # right-rear coxa
             telemetry.ServoStatus(200, 2048, 0, 0, 0, 0, 0),  # unmapped id -> skipped
         ]
     )
     joints = cfgmod.servo_status_to_joint_angles(cfg, status)
     assert len(joints) == 3  # unmapped servo dropped
     assert joints[0].leg == 0 and joints[0].joint == 0 and joints[0].angle_centideg == 0
-    # leg0 femur is sign +1: a tick above center yields a positive angle.
+    # Left-rear femur includes the Mark III horn offset.
     assert joints[1].leg == 0 and joints[1].joint == 1
     assert joints[1].angle_centideg == round(
-        cfgmod.tick_to_angle(cfg.servos[1], 2389) * cfgmod.RAD_TO_DEG * 100
+        cfgmod.tick_to_angle(cfg.servos[1], 1994) * cfgmod.RAD_TO_DEG * 100
     )
-    # leg1 coxa has sign +1, so a tick below center yields a negative angle.
+    # Right-rear coxa is mirrored, so a tick below center is positive.
     assert joints[2].leg == 1 and joints[2].joint == 0
-    assert joints[2].angle_centideg < 0
+    assert joints[2].angle_centideg > 0
 
 
 def test_servo_status_fallback_clamps_out_of_range_ticks():
     cfg = cfgmod.default_robot_config()
     status = telemetry.ServoStatusTelemetry(
-        servos=[telemetry.ServoStatus(1, 99999, 0, 0, 0, 0, 0)]  # stale/wrapped value
+        servos=[telemetry.ServoStatus(7, 99999, 0, 0, 0, 0, 0)]
     )
     joints = cfgmod.servo_status_to_joint_angles(cfg, status)
     # Clamped to 4095 -> same as tick_to_angle(servo, 4095).

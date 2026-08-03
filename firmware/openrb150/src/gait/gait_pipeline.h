@@ -94,7 +94,9 @@ class GaitPipeline {
   // Select the active gait (stand/sit/tripod/ripple/wave/crawl).
   void setGait(config::GaitId g);
 
-  // Apply gait parameters (body height, stride, step, duty, speed). Values are
+  // Apply gait parameters (body height, stride, step, duty, speed). Mark III
+  // APG tables own duty/support timing; duty_x255 remains a wire-compatible
+  // input but does not alter those fixed safety patterns.
   // clamped to the gait engine's safe maxima.
   void setParams(uint16_t body_height_mm, uint16_t stride_len_mm,
                  uint16_t step_height_mm, uint8_t duty_x255, uint8_t speed_x255);

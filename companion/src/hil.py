@@ -27,6 +27,7 @@ from typing import Callable, Optional
 import typer
 
 from hexapod_protocol import api
+from hexapod_protocol import config as cfg
 from hexapod_protocol import telemetry as tlm
 
 from transport import list_serial_ports, open_serial
@@ -827,26 +828,33 @@ def leg_lab(
     baud: int = _BAUD,
 ) -> None:
     """Leg Lab page: maintenance-gated foot target, clamp/reachability."""
-    # Home-stance foot target in the body frame for each leg (HexNav defaults,
-    # firmware config_schema.cpp kLegSeeds + gait home stance): the coxa-frame
-    # home foot (127, 0, -44.55) mapped through hip_xy + Rz(mount_yaw + 90deg).
-    # The old hardcoded (120, 0, -80) sat outside leg 0's (rear-left) workspace
-    # and made the "reachable" check fail against real geometry.
-    seeds = [  # (mount_x_mm, mount_y_mm, mount_z_mm, yaw_deg)
-        (-65.6, -115.6, -16.5, 135.0),  # leg 1 rear-left
-        (65.6, -115.6, -16.5, -135.0),  # leg 2 rear-right
-        (69.8, 0.0, -16.5, -90.0),  # leg 3 mid-right
-        (65.6, 115.6, -16.5, -45.0),  # leg 4 front-right
-        (-65.6, 115.6, -16.5, 45.0),  # leg 5 front-left
-        (-69.8, 0.0, -16.5, 90.0),  # leg 6 mid-left
-    ]
-    mx, my, mz, yaw = seeds[leg % 6]
-    rad = math.radians(yaw + 90.0)
-    home_x = int(round(mx + 127.0 * math.cos(rad)))
-    home_y = int(round(my + 127.0 * math.sin(rad)))
-    home_z = int(round(mz + 21.0 - 44.55))
     r = Runner("Leg Lab")
     client = _connect(port, baud)
+    config = client.read_config()
+    if config is None:
+        client.stop()
+        r.check("read active config", False, "CFG_GET_BLOCK failed")
+        r.finish()
+        return
+    # Build the home target from the robot's active staged geometry so a
+    # maintenance check never overwrites calibrated geometry with host defaults.
+    geometry = config.geometry
+    leg_geometry = config.legs[leg % cfg.NUM_LEGS]
+    mx = leg_geometry.mount_x_dmm / 10.0
+    my = leg_geometry.mount_y_dmm / 10.0
+    mz = leg_geometry.mount_z_dmm / 10.0
+    yaw = leg_geometry.mount_yaw_cdeg / 100.0
+    rad = math.radians(yaw + 90.0)
+    radius = geometry.home_radius_cmm / 100.0
+    home_x = int(round(mx + radius * math.cos(rad)))
+    home_y = int(round(my + radius * math.sin(rad)))
+    home_z = int(
+        round(
+            mz
+            + geometry.coxa_lift_cmm / 100.0
+            + geometry.home_foot_z_cmm / 100.0
+        )
+    )
     lock = _MaintLock(client)
     try:
         # Without the lock the command must be rejected.

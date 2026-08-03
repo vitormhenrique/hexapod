@@ -107,23 +107,32 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
   out.any_reach_limited = false;
 
   if (!apply_pose_) {
-    // Horizontal stroke extrema only (the largest |L| the swing profile
-    // produces). The lift apex is excluded on purpose: raising a foot moves
-    // it toward the middle of the reach annulus (|z| shrinks at unchanged
-    // radius), and the trajectory never combines full lift with a stroke
-    // endpoint, so the apex cannot be the binding constraint.
-    constexpr float kEnvelopeL[] = {-gait::kStrokeEnvelopeFrac,
-                                    gait::kStrokeEnvelopeFrac};
+    // Mark III combines half lift with both stroke extrema, which can approach
+    // the folded boundary even when the grounded endpoints are safe. Check all
+    // Phoenix swing keyframes and scale only horizontal travel if needed.
+    struct EnvelopeSample {
+      float longitudinal;
+      float lift;
+    };
+    constexpr EnvelopeSample kEnvelope[] = {
+        {-gait::kStrokeEnvelopeFrac, 0.0f},
+        {gait::kStrokeEnvelopeFrac, 0.0f},
+        {-gait::kStrokeEnvelopeFrac, 0.5f},
+        {gait::kStrokeEnvelopeFrac, 0.5f},
+        {0.0f, 1.0f},
+    };
     float path_scale = 1.0f;
     for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
       float anchor_x, anchor_y, anchor_z;
       engine_.nominalFoot(leg, anchor_x, anchor_y, anchor_z);
-      for (const float longitudinal : kEnvelopeL) {
+      for (const EnvelopeSample& sample : kEnvelope) {
         float target_x, target_y, target_z;
-        engine_.motionEnvelopeFoot(leg, longitudinal, 0.0f,
+        engine_.motionEnvelopeFoot(leg, sample.longitudinal, sample.lift,
                                    target_x, target_y, target_z);
+        // Compare horizontal motion at the sample's fixed lift height. The
+        // final scale is intentionally not applied to Z.
         const float leg_scale = body_.bodyTargetPathScale(
-            leg, anchor_x, anchor_y, anchor_z,
+            leg, anchor_x, anchor_y, target_z,
             target_x, target_y, target_z);
         if (leg_scale < path_scale) path_scale = leg_scale;
       }

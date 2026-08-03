@@ -3,21 +3,22 @@
 // ===========================================================================
 // Body pose transform + full-chain leg solve (portable, no Arduino deps).
 //
-// Bridges the body-centered frame B (REP-103: X forward, Y left, Z up; origin
-// at the body geometric centre) and each leg's coxa frame, then runs leg IK.
+// Bridges the mechanical body frame B (X right, Y forward, Z up; origin at the
+// body geometric centre) and each leg's coxa frame, then runs leg IK.
 // Per-leg placement comes from the validated robot config (config_schema.h):
 // coxa mount XY/Z and home yaw.
 //
 // Frame relation (verified against HexNav IK ref sections 3/5/12): a leg's
 // coxa-frame radial +X direction sits at (mount_yaw + 90deg) in B, and the coxa
-// joint axis is lifted +21 mm above the mount. So a point in B maps to the coxa
+// joint axis lift comes from config. So a point in B maps to the coxa
 // frame by translating to the hip, rotating by -(mount_yaw + 90deg) about Z,
-// and shifting Z down by (mount_z + 21 mm):
+// and shifting Z down by (mount_z + coxa_lift):
 //
-//   c = Rz(-(yaw+90)) * (p_B.xy - hip_xy);  c.z = p_B.z - (mount_z + 21)
+//   c = Rz(-(yaw+90)) * (p_B.xy - hip_xy);
+//   c.z = p_B.z - (mount_z + coxa_lift)
 //
-// This maps every leg's documented home foot to (127, 0, -44.55) -> all-zero
-// joint angles.
+// Mark III defaults map every home foot to approximately (147, 0, -25), which
+// is the all-zero relative IK pose before servo horn offsets and inversions.
 //
 // Body pose control (IK ref section 11): with feet world-fixed, moving the body
 // by translation t and rotation R(roll,pitch,yaw) re-expresses each foot in the
@@ -34,11 +35,9 @@
 
 namespace gait {
 
-// Coxa joint axis lift above the mount (IK ref section 4/13, COXA_Z_OFF). This
-// is the documented reference nominal; the runtime value comes from the
-// persisted config (config::BodyGeometry::coxa_lift_cmm), whose compiled default
-// mirrors this constant.
-constexpr float kCoxaLiftMm = 21.0f;
+// Mark III's coxa axes lie on the configured body mount plane. Runtime code
+// always reads the persisted value from BodyGeometry.
+constexpr float kCoxaLiftMm = 0.0f;
 
 // 6-DOF body pose relative to the neutral stance. Translation in mm, rotation
 // in radians (REP-103 roll/pitch/yaw). All-zero == neutral.
