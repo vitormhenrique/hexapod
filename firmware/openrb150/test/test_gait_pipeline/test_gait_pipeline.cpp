@@ -97,7 +97,9 @@ void test_default_stand_uses_natural_joint_pose() {
 
   for (uint8_t i = 0; i < out.count; ++i) {
     const PipelineJoint& joint = out.joints[i];
-    TEST_ASSERT_UINT16_WITHIN(2, kServoCenterTick, joint.tick);
+    // The default integer body height (132 mm) sits 0.27 mm off the exact
+    // measured centered stance (131.73 mm), worth ~3 ticks on the knee.
+    TEST_ASSERT_UINT16_WITHIN(4, kServoCenterTick, joint.tick);
   }
 }
 
@@ -109,7 +111,7 @@ void test_seeded_goals_ramp_from_present_pose() {
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Stand);
   // Speed 0 -> slowest slew (600 ticks/s = 12 ticks per 20 ms cycle).
-  pipe.setParams(40, 60, 30, 128, 0);
+  pipe.setParams(132, 60, 30, 128, 0);
 
   // All servos start 400 ticks below center (robot slumped after torque-off).
   for (uint8_t index = 0; index < kNumServos; ++index) {
@@ -139,7 +141,7 @@ void test_seeded_goals_ramp_from_present_pose() {
               servo->trim_ticks;
     if (neutral < servo->min_tick) neutral = servo->min_tick;
     if (neutral > servo->max_tick) neutral = servo->max_tick;
-    TEST_ASSERT_UINT16_WITHIN(2, neutral, out.joints[i].tick);
+    TEST_ASSERT_UINT16_WITHIN(4, neutral, out.joints[i].tick);
   }
 }
 
@@ -314,9 +316,10 @@ void test_large_stride_is_reach_limited_not_unreachable() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Tripod);
-  // Max stride, modest lift, full speed, forward twist: drives the stroke
-  // extremes well past the near-boundary home stance.
-  pipe.setParams(40, 80, 30, 128, 255);
+  // Tall stance + max stride + full speed: the stroke extremes over-reach the
+  // annulus (the default 132 mm stance with a 60 mm stride does NOT -- see
+  // test_cad_geometry's test_default_stride_is_not_reach_limited).
+  pipe.setParams(150, 80, 30, 128, 255);
   pipe.setTwist(1.0f, 0.0f, 0.0f);
 
   bool saw_reach_limit = false;
@@ -340,13 +343,13 @@ void assertStanceDirectionPreserved(float vx, float vy, float wz) {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Tripod);
-  pipe.setParams(40, cfg.gait.stride_len_mm, 30, 128, 255);
+  pipe.setParams(132, cfg.gait.stride_len_mm, 30, 128, 255);
   pipe.setTwist(vx, vy, wz);
 
   GaitEngine reference;
   reference.configure(cfg.gait);
   GaitDefaults reference_params = cfg.gait;
-  reference_params.body_height_mm = 40;
+  reference_params.body_height_mm = 132;
   reference_params.stride_len_mm = cfg.gait.stride_len_mm;
   reference_params.step_height_mm = 30;
   reference_params.duty_x255 = 128;
@@ -531,16 +534,15 @@ void test_extreme_body_pose_is_reach_limited_not_unreachable() {
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 
-// Regression for the "robot does not walk" collapse: the near-boundary home
-// stance used to path-scale the WHOLE trajectory (stride AND swing lift) down
-// to a few millimetres. With the walking stance bias and lift decoupled from
-// horizontal reach limiting, a default full-stick forward walk must emit real
-// steps: a large horizontal sweep and a real swing lift on every leg.
+// Regression for the "robot does not walk" collapse: the broken short-tibia
+// model used to path-scale a 60 mm commanded stride down to ~10 mm. With the
+// measured CAD geometry the default full-stick forward walk must emit real
+// steps: a near-full horizontal sweep and a real swing lift on every leg.
 void test_default_forward_walk_takes_real_steps() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Tripod);
-  pipe.setParams(40, 60, 30, 159, 255);
+  pipe.setParams(132, 60, 30, 159, 255);
   pipe.setTwist(0.0f, 1.0f, 0.0f);  // full forward (+Y mechanical front)
 
   // Let the stance-bias / shape filters converge (~1 s).
@@ -565,10 +567,10 @@ void test_default_forward_walk_takes_real_steps() {
     }
   }
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
-    // Horizontal sweep remains clearly visible after CAD workspace limiting.
-    TEST_ASSERT_TRUE(max_y[leg] - min_y[leg] >= 6.0f);
-    // Swing lift survives reach and calibrated joint limiting.
-    TEST_ASSERT_TRUE(max_z[leg] - min_z[leg] >= 15.0f);
+    // The full 60 mm commanded stroke survives (no reach-limit collapse).
+    TEST_ASSERT_TRUE(max_y[leg] - min_y[leg] >= 40.0f);
+    // Swing lift reaches the configured 30 mm step height.
+    TEST_ASSERT_TRUE(max_z[leg] - min_z[leg] >= 25.0f);
   }
 }
 
@@ -576,7 +578,7 @@ void test_full_rc_stride_uses_meaningful_coxa_range_on_every_leg() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Tripod);
-  pipe.setParams(40, config::kMaxGaitStrideMm, 30, 159, 128);
+  pipe.setParams(132, config::kMaxGaitStrideMm, 30, 159, 128);
   pipe.setTwist(0.0f, 1.0f, 0.0f);
   dxl::ServoMap servo_map(cfg);
 
@@ -616,7 +618,7 @@ void test_body_pose_overlay_keeps_gait_stepping() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Tripod);
-  pipe.setParams(40, 60, 30, 128, 255);
+  pipe.setParams(132, 60, 30, 128, 255);
   pipe.setTwist(0.0f, 1.0f, 0.0f);
   BodyPose pose;
   pose.x_mm = 15.0f;

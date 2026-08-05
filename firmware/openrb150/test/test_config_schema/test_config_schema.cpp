@@ -75,26 +75,26 @@ void test_default_servo_map() {
 void test_default_geometry() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
-  TEST_ASSERT_EQUAL_UINT16(5608, cfg.links.coxa_cmm);
+  TEST_ASSERT_EQUAL_UINT16(5200, cfg.links.coxa_cmm);
   TEST_ASSERT_EQUAL_UINT16(6651, cfg.links.femur_cmm);
-  TEST_ASSERT_EQUAL_UINT16(2486, cfg.links.tibia_cmm);
-  TEST_ASSERT_EQUAL_UINT16(12700, cfg.geometry.home_radius_cmm);
-  TEST_ASSERT_EQUAL_INT16(-4455, cfg.geometry.home_foot_z_cmm);
-  TEST_ASSERT_EQUAL_UINT16(2100, cfg.geometry.coxa_lift_cmm);
+  TEST_ASSERT_EQUAL_UINT16(11716, cfg.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(12675, cfg.geometry.home_radius_cmm);
+  TEST_ASSERT_EQUAL_INT16(-13173, cfg.geometry.home_foot_z_cmm);
+  TEST_ASSERT_EQUAL_UINT16(0, cfg.geometry.coxa_lift_cmm);
   // Leg 1 rear-left mount.
   TEST_ASSERT_EQUAL_INT16(-656, cfg.legs[0].mount_x_dmm);
   TEST_ASSERT_EQUAL_INT16(-1156, cfg.legs[0].mount_y_dmm);
   TEST_ASSERT_EQUAL_INT16(13500, cfg.legs[0].mount_yaw_cdeg);
-  // Mark III coxa axes lie on the body reference plane.
+  // Measured CAD: every coxa rotation centre sits on the body mid-plane.
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
-    TEST_ASSERT_EQUAL_INT16(-165, cfg.legs[leg].mount_z_dmm);
+    TEST_ASSERT_EQUAL_INT16(0, cfg.legs[leg].mount_z_dmm);
   }
 }
 
 void test_default_gait_and_features() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
-  TEST_ASSERT_EQUAL_UINT16(40, cfg.gait.body_height_mm);
+  TEST_ASSERT_EQUAL_UINT16(132, cfg.gait.body_height_mm);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(GaitId::Stand), cfg.gait.gait);
   // Conservative defaults: only sensor polling on (so present boards stream raw
   // data); no other optional feature and no foot sensor enabled (lmt.7).
@@ -248,7 +248,10 @@ void test_deserialize_migrates_v3_payload_with_default_rc_and_body_limits() {
   TEST_ASSERT_TRUE(deserializeRobotConfig(v3, sizeof(v3), migrated));
   TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
   TEST_ASSERT_EQUAL_INT16(-27, migrated.servos[6].trim_ticks);
-  TEST_ASSERT_EQUAL_UINT16(71, migrated.gait.stride_len_mm);
+  // Kinematics (links/geometry/gait defaults) are replaced by the measured
+  // CAD profile on migration; servo calibration above is preserved.
+  TEST_ASSERT_EQUAL_UINT16(11716, migrated.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(60, migrated.gait.stride_len_mm);
   TEST_ASSERT_TRUE(validateRcInputCalibration(migrated.rc_input));
   TEST_ASSERT_TRUE(validateBodyCommandLimits(migrated.body_command));
   TEST_ASSERT_TRUE(validateRobotConfig(migrated));
@@ -286,7 +289,7 @@ void test_deserialize_migrates_v4_payload_with_default_body_limits() {
   TEST_ASSERT_TRUE(validateBodyCommandLimits(migrated.body_command));
 }
 
-void test_deserialize_preserves_v5_robot_motion_profile() {
+void test_deserialize_migrates_v5_kinematics_preserving_servo_calibration() {
   RobotConfig legacy;
   defaultRobotConfig(legacy);
   applyLegacySequentialMotionProfile(legacy);
@@ -307,13 +310,54 @@ void test_deserialize_preserves_v5_robot_motion_profile() {
   TEST_ASSERT_TRUE(deserializeRobotConfig(payload, sizeof(payload), migrated));
   TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
   TEST_ASSERT_EQUAL_STRING("LegacyV5", migrated.robot_name);
-  TEST_ASSERT_EQUAL_UINT16(2486, migrated.links.tibia_cmm);
+  // Measured CAD kinematics replace the stale v5 model...
+  TEST_ASSERT_EQUAL_UINT16(11716, migrated.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(12675, migrated.geometry.home_radius_cmm);
+  TEST_ASSERT_EQUAL_UINT16(60, migrated.gait.stride_len_mm);
+  TEST_ASSERT_EQUAL_UINT16(132, migrated.gait.body_height_mm);
+  // ...while measured servo calibration survives.
   TEST_ASSERT_EQUAL_UINT8(7, migrated.servos[6].id);
   TEST_ASSERT_EQUAL_INT16(77, migrated.servos[6].trim_ticks);
   TEST_ASSERT_EQUAL_UINT16(1300, migrated.servos[6].min_tick);
   TEST_ASSERT_EQUAL_UINT16(2800, migrated.servos[6].max_tick);
-  TEST_ASSERT_EQUAL_UINT16(80, migrated.gait.stride_len_mm);
   TEST_ASSERT_EQUAL_UINT16(85, migrated.rc_input.channels[0].filter_tau_ms);
+  TEST_ASSERT_TRUE(validateRobotConfig(migrated));
+}
+
+// v8 carried the verified servo map with the broken URDF tibia-frame
+// kinematics. Migration must swap in the measured CAD model without touching
+// per-servo calibration (signs, trims, limits).
+void test_deserialize_migrates_v8_kinematics_preserving_servo_calibration() {
+  RobotConfig legacy;
+  defaultRobotConfig(legacy);
+  legacy.schema_version = kLegacySchemaVersionV8;
+  legacy.links = LinkLengths{5608, 6651, 2486};
+  legacy.geometry = BodyGeometry{12700, -4455, 2100};
+  legacy.gait.body_height_mm = 40;
+  legacy.servos[5].sign = -1;
+  legacy.servos[5].trim_ticks = -212;
+  legacy.servos[5].min_tick = 1100;
+  legacy.servos[5].max_tick = 2900;
+
+  uint8_t payload[kConfigPayloadSize];
+  TEST_ASSERT_EQUAL_UINT16(
+      kConfigPayloadSize,
+      serializeRobotConfig(legacy, payload, sizeof(payload)));
+  RobotConfig migrated;
+  TEST_ASSERT_TRUE(deserializeRobotConfig(payload, sizeof(payload), migrated));
+  TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
+  TEST_ASSERT_EQUAL_UINT16(5200, migrated.links.coxa_cmm);
+  TEST_ASSERT_EQUAL_UINT16(11716, migrated.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(12675, migrated.geometry.home_radius_cmm);
+  TEST_ASSERT_EQUAL_INT16(-13173, migrated.geometry.home_foot_z_cmm);
+  TEST_ASSERT_EQUAL_UINT16(0, migrated.geometry.coxa_lift_cmm);
+  TEST_ASSERT_EQUAL_INT16(0, migrated.legs[0].mount_z_dmm);
+  TEST_ASSERT_EQUAL_UINT16(132, migrated.gait.body_height_mm);
+  // Measured servo calibration preserved exactly.
+  TEST_ASSERT_EQUAL_INT8(-1, migrated.servos[5].sign);
+  TEST_ASSERT_EQUAL_INT16(-212, migrated.servos[5].trim_ticks);
+  TEST_ASSERT_EQUAL_UINT16(1100, migrated.servos[5].min_tick);
+  TEST_ASSERT_EQUAL_UINT16(2900, migrated.servos[5].max_tick);
   TEST_ASSERT_TRUE(validateRobotConfig(migrated));
 }
 
@@ -342,9 +386,9 @@ void test_deserialize_corrects_v6_mark_iii_profile() {
   for (uint8_t index = 0; index < kNumServos; ++index) {
     TEST_ASSERT_EQUAL_UINT8(index + 1, migrated.servos[index].id);
   }
-  TEST_ASSERT_EQUAL_UINT16(5608, migrated.links.coxa_cmm);
+  TEST_ASSERT_EQUAL_UINT16(5200, migrated.links.coxa_cmm);
   TEST_ASSERT_EQUAL_UINT16(6651, migrated.links.femur_cmm);
-  TEST_ASSERT_EQUAL_UINT16(2486, migrated.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(11716, migrated.links.tibia_cmm);
   TEST_ASSERT_EQUAL_INT16(0, migrated.servos[4].trim_ticks);
   TEST_ASSERT_EQUAL_INT8(1, migrated.servos[4].sign);
   TEST_ASSERT_EQUAL_UINT16(1024, migrated.servos[4].min_tick);
@@ -369,10 +413,10 @@ void test_deserialize_corrects_v7_mark_iii_profile() {
   RobotConfig migrated;
   TEST_ASSERT_TRUE(deserializeRobotConfig(payload, sizeof(payload), migrated));
   TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, migrated.schema_version);
-  TEST_ASSERT_EQUAL_UINT16(2486, migrated.links.tibia_cmm);
+  TEST_ASSERT_EQUAL_UINT16(11716, migrated.links.tibia_cmm);
   TEST_ASSERT_EQUAL_INT8(1, migrated.servos[5].sign);
   TEST_ASSERT_EQUAL_INT16(0, migrated.servos[5].trim_ticks);
-  TEST_ASSERT_EQUAL_UINT16(40, migrated.gait.body_height_mm);
+  TEST_ASSERT_EQUAL_UINT16(132, migrated.gait.body_height_mm);
 }
 
 void test_validate_rejects_duplicate_id() {
@@ -567,7 +611,7 @@ void test_default_payload_crc_matches_host_vector() {
   uint16_t n = serializeRobotConfig(cfg, buf, sizeof(buf));
   TEST_ASSERT_EQUAL_UINT16(kConfigPayloadSize, n);
   // frames.json config.default_payload_crc (CRC-16/CCITT-FALSE).
-  TEST_ASSERT_EQUAL_UINT16(16603, protocol::crc16(buf, n));
+  TEST_ASSERT_EQUAL_UINT16(57866, protocol::crc16(buf, n));
 }
 
 int main(int, char**) {
@@ -583,9 +627,10 @@ int main(int, char**) {
   RUN_TEST(test_deserialize_rejects_bad_version);
   RUN_TEST(test_deserialize_migrates_v3_payload_with_default_rc_and_body_limits);
   RUN_TEST(test_deserialize_migrates_v4_payload_with_default_body_limits);
-  RUN_TEST(test_deserialize_preserves_v5_robot_motion_profile);
+  RUN_TEST(test_deserialize_migrates_v5_kinematics_preserving_servo_calibration);
   RUN_TEST(test_deserialize_corrects_v6_mark_iii_profile);
   RUN_TEST(test_deserialize_corrects_v7_mark_iii_profile);
+  RUN_TEST(test_deserialize_migrates_v8_kinematics_preserving_servo_calibration);
   RUN_TEST(test_validate_rejects_duplicate_id);
   RUN_TEST(test_validate_rejects_bad_ranges);
   RUN_TEST(test_validate_rejects_zero_home_radius);

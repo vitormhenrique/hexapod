@@ -15,19 +15,20 @@ using namespace config;
 
 namespace {
 
-// HexNav link lengths (mm), measured from CAD/URDF.
-constexpr float kL1 = 56.08f;
+// HexNav link lengths (mm), measured on the CAD (dimensions.md).
+constexpr float kL1 = 52.00f;
 constexpr float kL2 = 66.51f;
-constexpr float kL3 = 24.86f;
+constexpr float kL3 = 117.16f;
 
-// Home foot positions in body-centered frame B (mm), IK ref section 13.
+// Home foot positions in body-centered frame B (mm), measured on the CAD
+// with all servos centered (dimensions.md).
 struct Vec3 {
   float x, y, z;
 };
 constexpr Vec3 kHomeFootB[kNumLegs] = {
-  {-155.4f, -205.4f, -40.05f}, {155.4f, -205.4f, -40.05f},
-  {196.8f, 0.0f, -40.05f},     {155.4f, 205.4f, -40.05f},
-  {-155.4f, 205.4f, -40.05f},  {-196.8f, 0.0f, -40.05f},
+  {-155.205f, -205.205f, -131.73f}, {155.205f, -205.205f, -131.73f},
+  {196.534f, 0.0f, -131.73f},       {155.205f, 205.205f, -131.73f},
+  {-155.205f, 205.205f, -131.73f},  {-196.534f, 0.0f, -131.73f},
 };
 
 }  // namespace
@@ -46,8 +47,8 @@ void test_home_foot_maps_to_urdf_zero() {
 void test_coxa_yaw_from_lateral_offset() {
   LegIk ik(kL1, kL2, kL3);
   // Foot pushed to +Y should yield a positive coxa yaw; -Y negative.
-  IkResult left = ik.solve(120.0f, 40.0f, -44.55f);
-  IkResult right = ik.solve(120.0f, -40.0f, -44.55f);
+  IkResult left = ik.solve(120.0f, 40.0f, -131.73f);
+  IkResult right = ik.solve(120.0f, -40.0f, -131.73f);
   TEST_ASSERT_TRUE(left.coxa > 0.05f);
   TEST_ASSERT_TRUE(right.coxa < -0.05f);
   TEST_ASSERT_FLOAT_WITHIN(1e-5f, atan2f(40.0f, 120.0f), left.coxa);
@@ -55,7 +56,7 @@ void test_coxa_yaw_from_lateral_offset() {
 
 void test_fk_round_trip_nominal() {
   LegIk ik(kL1, kL2, kL3);
-  const float tx = 120.0f, ty = 10.0f, tz = -50.0f;
+  const float tx = 120.0f, ty = 10.0f, tz = -110.0f;
   IkResult r = ik.solve(tx, ty, tz);
   TEST_ASSERT_TRUE(r.reachable);
 
@@ -72,7 +73,7 @@ void test_fk_round_trip_nominal() {
 void test_edge_full_extension_is_reachable_boundary() {
   LegIk ik(kL1, kL2, kL3);
   // d exactly L2+L3 along the radial axis: planar_r = L2+L3, z = 0.
-  const float x = kL1 + (kL2 + kL3);  // 147.45
+  const float x = kL1 + (kL2 + kL3);  // 235.67
   IkResult r = ik.solve(x, 0.0f, 0.0f);
   TEST_ASSERT_TRUE(r.reachable);
   // Knee straight: raw tibia ~ 0 -> relative tibia is -rest.
@@ -88,7 +89,7 @@ void test_edge_too_far_is_unreachable() {
 void test_edge_too_close_is_unreachable() {
   LegIk ik(kL1, kL2, kL3);
   // d below |L2-L3| -> folded, unreachable.
-  const float x = kL1 + 30.0f;  // planar_r = 30 < 41.65
+  const float x = kL1 + 30.0f;  // planar_r = 30 < 50.65
   IkResult r = ik.solve(x, 0.0f, 0.0f);
   TEST_ASSERT_FALSE(r.reachable);
 }
@@ -130,7 +131,7 @@ void test_leg_ik_home_params_shift_rest_offset() {
 
 // ---- clampToReach (lmt.14 reachability-aware stride limiting) -------------
 
-// The documented home stance (~92% of full reach) is already inside the 95%
+// The documented home stance (~87% of full reach) is already inside the 95%
 // margin, so it must pass through untouched.
 void test_clamp_reach_leaves_home_unchanged() {
   LegIk ik(kL1, kL2, kL3);
@@ -146,7 +147,7 @@ void test_clamp_reach_leaves_home_unchanged() {
 // the foot height preserved and the result solidly reachable.
 void test_clamp_reach_pulls_overreach_to_margin_keeping_height() {
   LegIk ik(kL1, kL2, kL3);
-  float x = 270.0f, y = 0.0f, z = kHomeFootZMm;  // past full reach
+  float x = 320.0f, y = 0.0f, z = kHomeFootZMm;  // past full reach
   const bool clamped = ik.clampToReach(x, y, z);
   TEST_ASSERT_TRUE(clamped);
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, kHomeFootZMm, z);  // height kept
@@ -165,8 +166,8 @@ void test_clamp_reach_pulls_overreach_to_margin_keeping_height() {
 // A diagonal over-reach keeps its hip-yaw direction (x and y scale together).
 void test_clamp_reach_preserves_hip_yaw() {
   LegIk ik(kL1, kL2, kL3);
-  const float yaw_in = atan2f(150.0f, 220.0f);
-  float x = 220.0f, y = 150.0f, z = kHomeFootZMm;
+  const float yaw_in = atan2f(180.0f, 260.0f);
+  float x = 260.0f, y = 180.0f, z = kHomeFootZMm;
   const bool clamped = ik.clampToReach(x, y, z);
   TEST_ASSERT_TRUE(clamped);
   TEST_ASSERT_FLOAT_WITHIN(1e-4f, yaw_in, atan2f(y, x));  // direction kept

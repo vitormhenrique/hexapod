@@ -8,26 +8,33 @@
 // axis), return the three URDF-zero-relative joint angles (coxa/femur/tibia, in
 // radians, where 0 == the 180deg servo home pose) plus a reachability flag.
 //
-// Math follows HexNav_description/docs/inverse_kinematics.md section 8 (hip yaw
-// + 2-link planar arm, law of cosines). The raw planar solution is offset so
-// that the Mark III home foot (147 mm radial, 25 mm down)
-// maps to all-zero joint angles; this makes the output directly consumable by
-// the servo map (dxl/servo_map.h: tick = 2048 + sign*deg(angle)).
+// Math is a hip yaw + 2-link planar arm (law of cosines). Link lengths and the
+// home stance come from the measured CAD (dimensions.md, the dimension source
+// of truth): L1 = 52.00 mm hip-yaw axis -> femur axis (femur axis at the same
+// height as the coxa axis), L2 = 66.51 mm femur axis -> tibia axis, L3 =
+// 117.16 mm tibia (knee) axis -> foot tip. The raw planar solution is offset
+// so the measured centered-servo foot (126.75 mm radial, 131.73 mm down) maps
+// to all-zero joint angles; this makes the output directly consumable by the
+// servo map (dxl/servo_map.h: tick = 2048 + sign*deg(angle)).
 //
-// Deterministic, branch-stable ("knee-up" = +acos), no heap, float math. The
-// two-link reachable annulus is |L2 - L3| <= d <= (L2 + L3); targets outside it
-// are clamped (straight or fully folded) and reported unreachable so the caller
-// (gait/safety) can react instead of commanding an impossible pose.
+// Deterministic, branch-stable knee: beta = -acos(...) selects the knee-out /
+// negative branch, which is the branch the physical HexNav leg rests on (at
+// the centered pose the measured knee interior angle is -72.1 deg). No heap,
+// float math. The two-link reachable annulus is |L2 - L3| <= d <= (L2 + L3);
+// targets outside it are clamped (straight or fully folded) and reported
+// unreachable so the caller (gait/safety) can react instead of commanding an
+// impossible pose.
 // ===========================================================================
 
 #include <stdint.h>
 
 namespace gait {
 
-// Foot-tip offset baked into L_TIBIA points to the URDF foot frame; the home
-// foot in the coxa frame (identical for all six legs, IK ref section 12).
-constexpr float kHomeRadiusMm = 127.0f;
-constexpr float kHomeFootZMm = -44.55f;
+// Measured centered-servo foot TIP in the coxa frame (identical for all six
+// legs; dimensions.md). The coxa frame origin sits on the hip-yaw axis at the
+// body mid-plane (z = 0 in body frame B), so the tip is 131.73 mm below it.
+constexpr float kHomeRadiusMm = 126.75f;
+constexpr float kHomeFootZMm = -131.73f;
 
 // Reachability-aware stride limit (lmt.14): generated foot targets are pulled
 // radially inward by clampToReach() so the planar reach distance never exceeds

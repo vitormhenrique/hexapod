@@ -25,18 +25,24 @@
 
 namespace gait {
 
-// Safety clamps for generated targets (mm). Keep well inside the leg workspace.
+// Safety clamps for generated targets (mm). Derived from the measured CAD
+// workspace (dimensions.md): centered servos put the foot 131.73 mm below the
+// body mid-plane; the two-link annulus (66.51 + 117.16 mm at a 95% margin)
+// allows foot depths to about -158 mm at the home radius.
 constexpr float kMaxStrideMm = 80.0f;   // max per-axis foot stroke
 constexpr float kMaxStepMm = 50.0f;     // max swing lift
-constexpr float kMinFootZMm = -120.0f;  // lowest commanded foot Z in B
-constexpr float kMaxFootZMm = -5.0f;    // highest commanded foot Z in B
-constexpr float kSitFootZMm = -8.0f;    // body-down sit pose
+constexpr float kMinFootZMm = -158.0f;  // lowest commanded foot Z in B
+constexpr float kMaxFootZMm = -40.0f;   // highest commanded foot Z in B
+constexpr float kSitFootZMm = -60.0f;   // body-down sit pose
 
 constexpr float kStrokeEnvelopeFrac = 0.5f;
-constexpr float kMarkIiiYawTravelRad = 0.55850536f;  // 32 degrees end-to-end
-constexpr float kMinStepPeriodMs = 20.0f;
-constexpr float kNeutralStepPeriodMs = 50.0f;
-constexpr float kMaxStepPeriodMs = 80.0f;
+// Largest body-centre-to-foot radius of the home stance (corner legs at
+// sqrt(155.2^2 + 205.2^2) mm). Yaw strokes are sized against it so a full yaw
+// command sweeps the same arc length a full translation command strides.
+constexpr float kMaxLegRadiusMm = 257.3f;
+constexpr float kMinStepPeriodMs = 60.0f;
+constexpr float kNeutralStepPeriodMs = 80.0f;
+constexpr float kMaxStepPeriodMs = 120.0f;
 // BodyCommandShaper owns acceleration/deceleration. The gait engine receives
 // an already-shaped twist and keeps only this small neutral threshold so
 // imperceptible transport residue cannot make the feet bob in place.
@@ -51,10 +57,12 @@ constexpr float kMotionDeadband = 0.03f;
 // Mark III APG tables own duty/support timing; duty_x255 remains a compatible
 // wire input but does not alter those fixed safety patterns.
 
-// HexNav CAD-safe height envelope around its 40 mm home stance.
-constexpr float kRcBodyHeightMinMm = 31.0f;
-constexpr float kRcBodyHeightNeutralMm = 40.0f;
-constexpr float kRcBodyHeightMaxMm = 45.0f;
+// Reach-safe ride-height envelope around the measured 131.73 mm centered-servo
+// stance (dimensions.md). At the home radius the leg keeps a comfortable
+// workspace margin across this whole range.
+constexpr float kRcBodyHeightMinMm = 100.0f;
+constexpr float kRcBodyHeightNeutralMm = 132.0f;
+constexpr float kRcBodyHeightMaxMm = 150.0f;
 
 // Map the Pot2 0..1 fraction onto the reach-safe height envelope, piecewise
 // linear about the neutral centre.
@@ -130,12 +138,12 @@ class GaitEngine {
   // values below, advanced in update()). Seeded from the first configure().
   float stride_mm_ = 60.0f;
   float step_mm_ = 30.0f;
-  float body_height_mm_ = 40.0f;
+  float body_height_mm_ = 132.0f;
   float speed_ = 0.5f;  // 0..1 normalised
   // Raw configure() targets for the filtered parameters.
   float stride_target_ = 60.0f;
   float step_target_ = 30.0f;
-  float height_target_ = 40.0f;
+  float height_target_ = 132.0f;
   float speed_target_ = 0.5f;
   bool params_seeded_ = false;
   BodyTwist twist_;  // already-shaped command from ControllerCore

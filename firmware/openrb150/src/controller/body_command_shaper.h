@@ -31,7 +31,7 @@ struct BodyCommand {
   float vx = 0.0f;
   float vy = 0.0f;
   float wz = 0.0f;
-  float body_height_mm = 40.0f;
+  float body_height_mm = 132.0f;
   gait::BodyPose pose{};
 };
 

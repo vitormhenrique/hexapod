@@ -7,11 +7,13 @@
 namespace gait {
 namespace {
 
-// HexNav CAD home feet in body frame B. Mark III supplies gait phase/keyframe
-// behavior only; physical dimensions always come from this robot's model.
+// Measured CAD home feet in body frame B (dimensions.md): each foot tip sits
+// 126.75 mm radially out from its coxa axis along the leg's home azimuth.
+// Mark III supplies gait phase/keyframe behavior only; physical dimensions
+// always come from this robot's measured model.
 constexpr float kHomeFootXy[config::kNumLegs][2] = {
-  {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
-  {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
+  {-155.2f, -205.2f}, {155.2f, -205.2f}, {196.5f, 0.0f},
+  {155.2f, 205.2f},   {-155.2f, 205.2f}, {-196.5f, 0.0f},
 };
 
 struct MarkIiiGait {
@@ -144,18 +146,24 @@ void GaitEngine::footAt(uint8_t leg, float longitudinal,
                         float& z) const {
   float home_x, home_y, home_z;
   homeFoot(leg, home_x, home_y, home_z);
-  const float yaw = twist_.wz * kMarkIiiYawTravelRad * longitudinal;
+  // Yaw stroke sized so a full yaw command sweeps the same arc length that a
+  // full translation command strides on the largest-radius leg. A fixed body
+  // angle (the old Mark III 32 deg) would move corner feet ~2.4x the stride
+  // and immediately saturate the reach limiter, crushing translation.
+  float yaw_ratio = stride_mm_ / (2.0f * kMaxLegRadiusMm);
+  yaw_ratio = clampf(yaw_ratio, 0.0f, 1.0f);
+  const float yaw_travel = 2.0f * asinf(yaw_ratio);
+  const float yaw = twist_.wz * yaw_travel * longitudinal;
   const float cosine = cosf(yaw);
   const float sine = sinf(yaw);
   x = home_x * cosine - home_y * sine +
       twist_.vx * stride_mm_ * longitudinal;
   y = home_x * sine + home_y * cosine +
       twist_.vy * stride_mm_ * longitudinal;
-    const float command_scale =
-      fmaxf(fabsf(twist_.vx), fmaxf(fabsf(twist_.vy), fabsf(twist_.wz)));
-    const float lift_scale = clampf(command_scale * 4.0f, 0.0f, 1.0f);
-    z = clampf(home_z + step_mm_ * lift_scale *
-                clampf(lift_fraction, 0.0f, 1.0f),
+  // Swing clearance is a gait parameter, not a function of stick deflection:
+  // a small travel command still gets the full configured step height so slow
+  // walking never drags feet (Phoenix keeps LegLiftHeight fixed the same way).
+  z = clampf(home_z + step_mm_ * clampf(lift_fraction, 0.0f, 1.0f),
              kMinFootZMm, kMaxFootZMm);
 }
 

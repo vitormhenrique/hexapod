@@ -22,12 +22,12 @@ from hexapod_protocol import config as cfg
 from hexapod_protocol import telemetry as tlm
 
 # Reference stance/coxa geometry, used as a fallback when a config omits the
-# persisted BodyGeometry block (firmware lmt.11). Mirror gait::kCoxaLiftMm and
-# gait::kHomeRadiusMm / kHomeFootZMm. All-zero joint angles -> the home foot in
-# the coxa frame.
-COXA_LIFT_MM = 21.0
-HOME_RADIUS_MM = 127.0
-HOME_FOOT_Z_MM = -44.55
+# persisted BodyGeometry block (firmware lmt.11). Mirror the measured CAD model
+# (dimensions.md / gait::kHomeRadiusMm, kHomeFootZMm): coxa axes on the body
+# mid-plane, foot tip 126.75 mm out and 131.73 mm down at centered servos.
+COXA_LIFT_MM = 0.0
+HOME_RADIUS_MM = 126.75
+HOME_FOOT_Z_MM = -131.73
 
 _HALF_PI = math.pi / 2.0
 
@@ -103,7 +103,9 @@ class _LegFk:
             2.0 * self.l2 * self.l3
         )
         cos_k = max(-1.0, min(1.0, cos_k))
-        beta = math.acos(cos_k)
+        # Negative (knee-out) branch: mirrors gait::LegIk (the physical HexNav
+        # leg rests at beta = -72.1 deg, measured on the CAD).
+        beta = -math.acos(cos_k)
         a = math.atan2(dz, planar_r)
         b = math.atan2(self.l3 * math.sin(beta), self.l2 + self.l3 * math.cos(beta))
         return a - b, beta

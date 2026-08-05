@@ -65,7 +65,8 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 //     retaining Mark III geometry, angles, side inversions, and gait timing.
 // v8: restores HexNav CAD dimensions, mounts, zero-centred servo calibration,
 //     and ride height. Mark III remains a gait/IK-method reference only.
-constexpr uint16_t kSchemaVersion = 8;
+constexpr uint16_t kSchemaVersion = 9;
+constexpr uint16_t kLegacySchemaVersionV8 = 8;
 constexpr uint16_t kLegacySchemaVersionV7 = 7;
 constexpr uint16_t kLegacySchemaVersionV6 = 6;
 constexpr uint16_t kLegacySchemaVersionV5 = 5;
@@ -130,13 +131,14 @@ constexpr uint32_t kKnownFeatureBits = kFeatFootContact | kFeatTerrainLeveling |
 
 // Safe envelope for persisted gait defaults (validateRobotConfig). Mirrors the
 // gait engine's runtime clamps (gait/gait_engine.h: kMaxStrideMm 80, kMaxStepMm
-// 50, foot-Z floor -120 mm) without a layering dependency. A persisted default
+// 50, foot-Z floor -158 mm) without a layering dependency. A persisted default
 // outside this envelope is a configuration error -- the engine would otherwise
 // silently clamp it -- so it is rejected rather than stored as a "safe" default.
+// Heights follow the measured CAD stance (centered servos stand at 131.73 mm).
 constexpr uint16_t kMaxGaitStrideMm = 80;
 constexpr uint16_t kMaxGaitStepMm = 50;
-constexpr uint16_t kMinGaitBodyHeightMm = 5;
-constexpr uint16_t kMaxGaitBodyHeightMm = 120;
+constexpr uint16_t kMinGaitBodyHeightMm = 40;
+constexpr uint16_t kMaxGaitBodyHeightMm = 160;
 
 // ---------------------------------------------------------------------------
 // Sub-structures.

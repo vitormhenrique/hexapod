@@ -12,18 +12,22 @@ constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kTicksPerDeg = 4096.0f / 360.0f;
 constexpr float kStrideMm = 2.0f;
 constexpr float kLiftMm = 5.0f;
-constexpr float kBodyHeightMm = 40.0f;
-constexpr float kYawTravelRad = 32.0f * kDegToRad;
-constexpr float kCoxaMm = 56.08f;
+constexpr float kBodyHeightMm = 132.0f;
+// Engine yaw stroke: sized so a full yaw sweeps the stride arc on the
+// largest-radius leg (gait_engine.h kMaxLegRadiusMm).
+constexpr float kMaxLegRadiusMm = 257.3f;
+constexpr float kStepPeriodMs = 80.0f;  // neutral speed_x255 = 128 cadence
+// Measured CAD leg model (dimensions.md).
+constexpr float kCoxaMm = 52.00f;
 constexpr float kFemurMm = 66.51f;
-constexpr float kTibiaMm = 24.86f;
-constexpr float kHomeRadiusMm = 127.0f;
-constexpr float kHomeLocalZMm = -44.55f;
-constexpr float kCoxaFrameZMm = 4.5f;
+constexpr float kTibiaMm = 117.16f;
+constexpr float kHomeRadiusMm = 126.75f;
+constexpr float kHomeLocalZMm = -131.73f;
+constexpr float kCoxaFrameZMm = 0.0f;
 
 constexpr float kHome[config::kNumLegs][2] = {
-  {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
-  {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
+  {-155.2f, -205.2f}, {155.2f, -205.2f}, {196.5f, 0.0f},
+  {155.2f, 205.2f},   {-155.2f, 205.2f}, {-196.5f, 0.0f},
 };
 
 constexpr float kMount[config::kNumLegs][3] = {
@@ -95,7 +99,7 @@ void referenceFoot(const ReferenceGait& gait, const ReferenceCommand& command,
                    uint8_t leg, uint32_t elapsed_ms, float& x, float& y,
                    float& z) {
   const float step_phase =
-      fmodf(static_cast<float>(elapsed_ms) / 50.0f,
+      fmodf(static_cast<float>(elapsed_ms) / kStepPeriodMs,
             static_cast<float>(gait.steps));
   const uint8_t current_step =
       static_cast<uint8_t>(floorf(step_phase)) + 1;
@@ -113,18 +117,17 @@ void referenceFoot(const ReferenceGait& gait, const ReferenceCommand& command,
       (next_longitudinal - current_longitudinal) * interpolation;
   const float lift =
       current_lift + (next_lift - current_lift) * interpolation;
-  const float yaw = command.yaw * kYawTravelRad * longitudinal;
+  const float yaw_travel =
+      2.0f * asinf(kStrideMm / (2.0f * kMaxLegRadiusMm));
+  const float yaw = command.yaw * yaw_travel * longitudinal;
   const float cosine = cosf(yaw);
   const float sine = sinf(yaw);
   x = kHome[leg][0] * cosine - kHome[leg][1] * sine +
       command.body_x * kStrideMm * longitudinal;
   y = kHome[leg][0] * sine + kHome[leg][1] * cosine +
       command.body_y * kStrideMm * longitudinal;
-  const float command_scale = fmaxf(
-      fabsf(command.body_x),
-      fmaxf(fabsf(command.body_y), fabsf(command.yaw)));
-  const float lift_scale = fminf(1.0f, command_scale * 4.0f);
-  z = -kBodyHeightMm + kLiftMm * lift_scale * lift;
+  // Swing clearance is independent of command magnitude (full step height).
+  z = -kBodyHeightMm + kLiftMm * lift;
 }
 
 void rawPlanar(float radius, float z, float& femur, float& tibia) {
@@ -133,7 +136,7 @@ void rawPlanar(float radius, float z, float& femur, float& tibia) {
   const float knee_cosine = clampUnit(
       (distance * distance - kFemurMm * kFemurMm - kTibiaMm * kTibiaMm) /
       (2.0f * kFemurMm * kTibiaMm));
-  tibia = acosf(knee_cosine);
+  tibia = -acosf(knee_cosine);  // measured knee-out (negative) branch
   const float line = atan2f(z, planar);
   const float shoulder = atan2f(
       kTibiaMm * sinf(tibia), kFemurMm + kTibiaMm * cosf(tibia));
@@ -188,7 +191,7 @@ void assertTimeSeriesParity(const ReferenceGait& gait,
                             const ReferenceCommand& command) {
   config::RobotConfig config;
   config::defaultRobotConfig(config);
-  config.gait.body_height_mm = 40;
+  config.gait.body_height_mm = 132;
   config.gait.stride_len_mm = 2;
   config.gait.step_height_mm = 5;
   config.gait.duty_x255 = 159;
@@ -199,14 +202,15 @@ void assertTimeSeriesParity(const ReferenceGait& gait,
 
   gait::PipelineOutput output;
   pipeline.update(0, output);
+  const uint32_t step_ms = static_cast<uint32_t>(kStepPeriodMs);
   const uint32_t duration_ms =
-      static_cast<uint32_t>(gait.steps) * 50u * 2u;
+      static_cast<uint32_t>(gait.steps) * step_ms * 2u;
   // Phoenix defines joint endpoints once per NomGaitSpeed interval. Compare
-  // those authoritative 50 ms keyframes over two complete cycles; production
-  // uses smooth Cartesian interpolation between the same endpoints.
+  // those authoritative keyframes over two complete cycles; production uses
+  // smooth Cartesian interpolation between the same endpoints.
   for (uint32_t elapsed_ms = 0; elapsed_ms < duration_ms;
-       elapsed_ms += 50u) {
-    if (elapsed_ms != 0) pipeline.update(50, output);
+       elapsed_ms += step_ms) {
+    if (elapsed_ms != 0) pipeline.update(step_ms, output);
     TEST_ASSERT_EQUAL_UINT8(config::kNumServos, output.count);
     TEST_ASSERT_FALSE(output.any_unreachable);
     TEST_ASSERT_FALSE(output.any_reach_limited);

@@ -1,5 +1,5 @@
 // 3-DOF leg inverse kinematics (portable, host-tested).
-// See leg_ik.h. Math from HexNav_description/docs/inverse_kinematics.md section 8.
+// See leg_ik.h. Geometry from the measured CAD (dimensions.md).
 
 #include "leg_ik.h"
 
@@ -48,7 +48,12 @@ IkResult LegIk::solveRaw(float x_mm, float y_mm, float z_mm) const {
 
   float cos_k = (d * d - l2_ * l2_ - l3_ * l3_) / (2.0f * l2_ * l3_);
   cos_k = clampf(cos_k, -1.0f, 1.0f);
-  const float beta = acosf(cos_k);  // knee interior angle (knee-up branch)
+  // Knee interior angle. The physical HexNav leg rests on the NEGATIVE
+  // (knee-out) branch: at the measured centered pose the tibia link points
+  // steeply down past the knee (beta = -72.1 deg, dimensions.md). Selecting
+  // +acos here would command the mirrored solution and the real toe would
+  // diverge from the target everywhere except the home pose.
+  const float beta = -acosf(cos_k);
 
   // Step 4: femur angle.
   const float a = atan2f(dz, planar_r);

@@ -38,7 +38,8 @@ ROBOT_NAME_LEN = 16  # incl. NUL terminator
 # v7 restores the assembled robot's verified sequential DXL IDs 1..18 while
 # retaining Mark III geometry, angles, side inversions, and gait timing.
 # v8 restores HexNav CAD dimensions and zero-centered servo calibration.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+LEGACY_SCHEMA_VERSION_V8 = 8
 LEGACY_SCHEMA_VERSION_V7 = 7
 LEGACY_SCHEMA_VERSION_V6 = 6
 LEGACY_SCHEMA_VERSION_V5 = 5
@@ -296,7 +297,11 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
         schema_version == LEGACY_SCHEMA_VERSION_V7
         and len(payload) == CONFIG_PAYLOAD_SIZE
     )
-    if not legacy_v3 and not legacy_v4 and not legacy_v5 and not legacy_v6 and not legacy_v7 and (
+    legacy_v8 = (
+        schema_version == LEGACY_SCHEMA_VERSION_V8
+        and len(payload) == CONFIG_PAYLOAD_SIZE
+    )
+    if not legacy_v3 and not legacy_v4 and not legacy_v5 and not legacy_v6 and not legacy_v7 and not legacy_v8 and (
         schema_version != SCHEMA_VERSION or len(payload) != CONFIG_PAYLOAD_SIZE
     ):
         raise ConfigDecodeError(
@@ -372,7 +377,8 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     config = RobotConfig(
         schema_version=(
             SCHEMA_VERSION
-            if (legacy_v3 or legacy_v4 or legacy_v5 or legacy_v6 or legacy_v7)
+            if (legacy_v3 or legacy_v4 or legacy_v5 or legacy_v6 or legacy_v7
+                or legacy_v8)
             else schema_version
         ),
         robot_name=robot_name,
@@ -388,6 +394,10 @@ def decode_robot_config(payload: bytes) -> RobotConfig:
     )
     if legacy_v6 or legacy_v7:
         _apply_robot_motion_profile(config)
+    elif legacy_v3 or legacy_v4 or legacy_v5 or legacy_v8:
+        # These schemas carried verified servo calibration but a pre-measured
+        # (URDF tibia-frame) kinematic model: replace only the kinematics.
+        _apply_robot_kinematics_profile(config)
     return config
 
 
@@ -486,22 +496,35 @@ def encode_robot_config(cfg: RobotConfig) -> bytes:
     return bytes(out)
 
 
-# Per-leg coxa mount placement seeds + sign rule (mirror config_schema.cpp).
+# Per-leg coxa mount placement seeds (mirror config_schema.cpp; measured CAD,
+# coxa rotation centres on the body mid-plane so mount z = 0).
 _LEG_SEEDS = (
-    (-656, -1156, -165, 13500),
-    (656, -1156, -165, -13500),
-    (698, 0, -165, -9000),
-    (656, 1156, -165, -4500),
-    (-656, 1156, -165, 4500),
-    (-698, 0, -165, 9000),
+    (-656, -1156, 0, 13500),
+    (656, -1156, 0, -13500),
+    (698, 0, 0, -9000),
+    (656, 1156, 0, -4500),
+    (-656, 1156, 0, 4500),
+    (-698, 0, 0, 9000),
 )
 
-def _apply_robot_motion_profile(cfg: RobotConfig) -> None:
-    cfg.links = LinkLengths(coxa_cmm=5608, femur_cmm=6651, tibia_cmm=2486)
+def _apply_robot_kinematics_profile(cfg: RobotConfig) -> None:
+    """Measured CAD kinematics (dimensions.md), mirroring config_schema.cpp."""
+    cfg.links = LinkLengths(coxa_cmm=5200, femur_cmm=6651, tibia_cmm=11716)
     cfg.geometry = BodyGeometry(
-        home_radius_cmm=12700, home_foot_z_cmm=-4455, coxa_lift_cmm=2100
+        home_radius_cmm=12675, home_foot_z_cmm=-13173, coxa_lift_cmm=0
     )
     cfg.legs = [LegGeometry(*seed) for seed in _LEG_SEEDS]
+    cfg.gait = GaitDefaults(
+        body_height_mm=132,
+        stride_len_mm=60,
+        step_height_mm=30,
+        duty_x255=159,
+        speed_x255=128,
+        gait=0,
+    )
+
+def _apply_robot_motion_profile(cfg: RobotConfig) -> None:
+    _apply_robot_kinematics_profile(cfg)
     cfg.servos = []
     for leg in range(NUM_LEGS):
         for joint in range(JOINTS_PER_LEG):
@@ -516,14 +539,6 @@ def _apply_robot_motion_profile(cfg: RobotConfig) -> None:
                     max_tick=3072,
                 )
             )
-    cfg.gait = GaitDefaults(
-        body_height_mm=40,
-        stride_len_mm=60,
-        step_height_mm=30,
-        duty_x255=159,
-        speed_x255=128,
-        gait=0,
-    )
 def default_robot_config() -> RobotConfig:
     """Compiled safe defaults, mirroring the HexNav CAD profile."""
     cfg = RobotConfig(schema_version=SCHEMA_VERSION, robot_name="HexNav")
@@ -640,8 +655,8 @@ def validate_robot_config(config: RobotConfig) -> list[str]:
     gait = config.gait
     if gait.gait not in GAIT_NAMES:
         errors.append(f"gait {gait.gait} is unknown")
-    if not 5 <= gait.body_height_mm <= 120:
-        errors.append("body height must be within 5..120 mm")
+    if not 40 <= gait.body_height_mm <= 160:
+        errors.append("body height must be within 40..160 mm")
     if not 0 <= gait.stride_len_mm <= 80:
         errors.append("stride length must be within 0..80 mm")
     if not 0 <= gait.step_height_mm <= 50:

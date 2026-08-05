@@ -58,8 +58,9 @@ int32_t getI32(const uint8_t* b, uint16_t& o) {
   return static_cast<int32_t>(getU32(b, o));
 }
 
-// Per-leg coxa mount placement (body-centered frame B), HexNav IK ref section 3.
-// 0.1 mm / 0.01 deg. Order: x, y, z, home yaw.
+// Per-leg coxa mount placement (body-centered frame B, x right / y forward /
+// z up). Measured on the CAD (dimensions.md): coxa rotation centres sit on the
+// body mid-plane (z = 0). 0.1 mm / 0.01 deg. Order: x, y, z, home yaw.
 struct LegSeed {
   int16_t x_dmm;
   int16_t y_dmm;
@@ -67,29 +68,51 @@ struct LegSeed {
   int16_t yaw_cdeg;
 };
 constexpr LegSeed kLegSeeds[kNumLegs] = {
-    {-656, -1156, -165, 13500},   // leg 1 rear-left
-    {656, -1156, -165, -13500},   // leg 2 rear-right
-    {698, 0, -165, -9000},        // leg 3 mid-right
-    {656, 1156, -165, -4500},     // leg 4 front-right
-    {-656, 1156, -165, 4500},     // leg 5 front-left
-    {-698, 0, -165, 9000},        // leg 6 mid-left
+    {-656, -1156, 0, 13500},   // leg 1 rear-left
+    {656, -1156, 0, -13500},   // leg 2 rear-right
+    {698, 0, 0, -9000},        // leg 3 mid-right
+    {656, 1156, 0, -4500},     // leg 4 front-right
+    {-656, 1156, 0, 4500},     // leg 5 front-left
+    {-698, 0, 0, 9000},        // leg 6 mid-left
 };
 
-void applyRobotMotionProfile(RobotConfig& cfg) {
-  cfg.links.coxa_cmm = 5608;
+// Kinematic model + gait defaults measured on the CAD (dimensions.md).
+//   L1 coxa   = 52.00 mm   hip-yaw axis -> femur axis (radial; same height)
+//   L2 femur  = 66.51 mm   femur axis -> tibia axis
+//   L3 tibia  = 117.16 mm  tibia (knee) axis -> foot tip
+//   home foot = 126.75 mm radial, 131.73 mm below the coxa axis (centered
+//               servos); body centre stands 131.73 mm above ground.
+// Applied to fresh configs and to legacy schema migrations that predate the
+// measured model. Servo id/sign/trim/limit calibration is set separately so
+// migrations that must preserve measured servo calibration can skip it.
+void applyRobotKinematicsProfile(RobotConfig& cfg) {
+  cfg.links.coxa_cmm = 5200;
   cfg.links.femur_cmm = 6651;
-  cfg.links.tibia_cmm = 2486;
+  cfg.links.tibia_cmm = 11716;
 
-  cfg.geometry.home_radius_cmm = 12700;
-  cfg.geometry.home_foot_z_cmm = -4455;
-  cfg.geometry.coxa_lift_cmm = 2100;
+  cfg.geometry.home_radius_cmm = 12675;
+  cfg.geometry.home_foot_z_cmm = -13173;
+  cfg.geometry.coxa_lift_cmm = 0;
 
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     cfg.legs[leg].mount_x_dmm = kLegSeeds[leg].x_dmm;
     cfg.legs[leg].mount_y_dmm = kLegSeeds[leg].y_dmm;
     cfg.legs[leg].mount_z_dmm = kLegSeeds[leg].z_dmm;
     cfg.legs[leg].mount_yaw_cdeg = kLegSeeds[leg].yaw_cdeg;
+  }
 
+  cfg.gait.body_height_mm = 132;  // centered-servo standing height (131.73)
+  cfg.gait.stride_len_mm = 60;
+  cfg.gait.step_height_mm = 30;
+  cfg.gait.duty_x255 = 159;   // Mark III 8-step tripod: 5/8 grounded
+  cfg.gait.speed_x255 = 128;  // nominal keyframe cadence
+  cfg.gait.gait = static_cast<uint8_t>(GaitId::Stand);
+}
+
+void applyRobotMotionProfile(RobotConfig& cfg) {
+  applyRobotKinematicsProfile(cfg);
+
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     for (uint8_t joint = 0; joint < kJointsPerLeg; ++joint) {
       const uint8_t slot = static_cast<uint8_t>(leg * kJointsPerLeg + joint);
       ServoConfig& servo = cfg.servos[slot];
@@ -102,13 +125,6 @@ void applyRobotMotionProfile(RobotConfig& cfg) {
       servo.max_tick = 3072;
     }
   }
-
-  cfg.gait.body_height_mm = 40;
-  cfg.gait.stride_len_mm = 60;
-  cfg.gait.step_height_mm = 30;
-  cfg.gait.duty_x255 = 159;   // Mark III 8-step tripod: 5/8 grounded
-  cfg.gait.speed_x255 = 128;  // Mark III nominal 50 ms per gait keyframe
-  cfg.gait.gait = static_cast<uint8_t>(GaitId::Stand);
 }
 
 }  // namespace
@@ -237,7 +253,10 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
                          len == kConfigPayloadSize;
   const bool legacy_v7 = out.schema_version == kLegacySchemaVersionV7 &&
                          len == kConfigPayloadSize;
+  const bool legacy_v8 = out.schema_version == kLegacySchemaVersionV8 &&
+                         len == kConfigPayloadSize;
   if (!legacy_v3 && !legacy_v4 && !legacy_v5 && !legacy_v6 && !legacy_v7 &&
+      !legacy_v8 &&
       (out.schema_version != kSchemaVersion || len != kConfigPayloadSize)) {
     return false;
   }
@@ -329,7 +348,17 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
 
   if (o != len) return false;
   if (legacy_v6 || legacy_v7) {
+    // Pre-verified-hardware profiles: replace the complete motion profile,
+    // including the servo map.
     applyRobotMotionProfile(out);
+  } else if (legacy_v3 || legacy_v4 || legacy_v5 || legacy_v8) {
+    // These schemas carried verified servo maps (ids/signs/trims/limits) but
+    // their kinematic model (links/home/mounts/gait) predates the measured
+    // CAD (dimensions.md): they used the URDF tibia-frame reduction whose
+    // 24.86 mm "tibia" is a mesh-frame offset, not the physical leg. Replace
+    // only the kinematics; preserve the per-servo calibration (safety:
+    // migration must never silently erase measured calibration).
+    applyRobotKinematicsProfile(out);
   }
   // The in-memory config always carries the active schema after migration.
   out.schema_version = kSchemaVersion;

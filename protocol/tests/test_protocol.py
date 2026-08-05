@@ -1427,7 +1427,7 @@ def test_decode_robot_config_migrates_v3_and_v4_payloads():
     assert v4_config.body_command.forward_accel_milli_per_s == 1200
 
 
-def test_decode_robot_config_preserves_v5_robot_motion_profile():
+def test_decode_robot_config_migrates_v5_kinematics_preserving_servos():
     legacy = _legacy_sequential_config()
     legacy.schema_version = cfgmod.LEGACY_SCHEMA_VERSION_V5
     legacy.robot_name = "LegacyV5"
@@ -1441,12 +1441,16 @@ def test_decode_robot_config_preserves_v5_robot_motion_profile():
 
     assert migrated.schema_version == cfgmod.SCHEMA_VERSION
     assert migrated.robot_name == "LegacyV5"
-    assert migrated.links.tibia_cmm == 2486
+    # Measured CAD kinematics replace the stale v5 model...
+    assert migrated.links.tibia_cmm == 11716
+    assert migrated.geometry.home_radius_cmm == 12675
+    assert migrated.gait.stride_len_mm == 60
+    assert migrated.gait.body_height_mm == 132
+    # ...while measured servo calibration survives.
     assert migrated.servos[6].id == 7
     assert migrated.servos[6].trim_ticks == 77
     assert migrated.servos[6].min_tick == 1300
     assert migrated.servos[6].max_tick == 2800
-    assert migrated.gait.stride_len_mm == 80
     assert migrated.rc_input.channels[0].filter_tau_ms == 85
     assert cfgmod.validate_robot_config(migrated) == []
 
@@ -1464,8 +1468,8 @@ def test_decode_robot_config_corrects_v6_mark_iii_profile():
     migrated = cfgmod.decode_robot_config(cfgmod.encode_robot_config(legacy))
 
     assert [servo.id for servo in migrated.servos] == list(range(1, 19))
-    assert migrated.links == cfgmod.LinkLengths(5608, 6651, 2486)
-    assert migrated.geometry == cfgmod.BodyGeometry(12700, -4455, 2100)
+    assert migrated.links == cfgmod.LinkLengths(5200, 6651, 11716)
+    assert migrated.geometry == cfgmod.BodyGeometry(12675, -13173, 0)
     assert migrated.servos[4].trim_ticks == 0
     assert migrated.servos[4].sign == 1
     assert migrated.servos[4].min_tick == 1024
@@ -1485,10 +1489,35 @@ def test_decode_robot_config_corrects_v7_mark_iii_profile():
     migrated = cfgmod.decode_robot_config(cfgmod.encode_robot_config(legacy))
 
     assert migrated.schema_version == cfgmod.SCHEMA_VERSION
-    assert migrated.links == cfgmod.LinkLengths(5608, 6651, 2486)
+    assert migrated.links == cfgmod.LinkLengths(5200, 6651, 11716)
     assert migrated.servos[5].sign == 1
     assert migrated.servos[5].trim_ticks == 0
-    assert migrated.gait.body_height_mm == 40
+    assert migrated.gait.body_height_mm == 132
+    assert cfgmod.validate_robot_config(migrated) == []
+
+
+def test_decode_robot_config_migrates_v8_kinematics_preserving_servos():
+    legacy = cfgmod.default_robot_config()
+    legacy.schema_version = cfgmod.LEGACY_SCHEMA_VERSION_V8
+    legacy.links = cfgmod.LinkLengths(5608, 6651, 2486)
+    legacy.geometry = cfgmod.BodyGeometry(12700, -4455, 2100)
+    legacy.gait.body_height_mm = 40
+    legacy.servos[5].sign = -1
+    legacy.servos[5].trim_ticks = -212
+    legacy.servos[5].min_tick = 1100
+    legacy.servos[5].max_tick = 2900
+
+    migrated = cfgmod.decode_robot_config(cfgmod.encode_robot_config(legacy))
+
+    assert migrated.schema_version == cfgmod.SCHEMA_VERSION
+    assert migrated.links == cfgmod.LinkLengths(5200, 6651, 11716)
+    assert migrated.geometry == cfgmod.BodyGeometry(12675, -13173, 0)
+    assert migrated.gait.body_height_mm == 132
+    # Measured servo calibration preserved exactly.
+    assert migrated.servos[5].sign == -1
+    assert migrated.servos[5].trim_ticks == -212
+    assert migrated.servos[5].min_tick == 1100
+    assert migrated.servos[5].max_tick == 2900
     assert cfgmod.validate_robot_config(migrated) == []
 
 
@@ -1534,7 +1563,7 @@ def test_decode_robot_config_rejects_bad_length_and_schema():
     with pytest.raises(cfgmod.ConfigDecodeError):
         cfgmod.decode_robot_config(b"\x00" * (cfgmod.CONFIG_PAYLOAD_SIZE - 1))
     payload = bytearray(cfgmod.encode_robot_config(cfgmod.default_robot_config()))
-    payload[0] = 0x09  # bogus schema version (low byte)
+    payload[0] = 0x63  # bogus schema version (low byte)
     with pytest.raises(cfgmod.ConfigDecodeError):
         cfgmod.decode_robot_config(bytes(payload))
 

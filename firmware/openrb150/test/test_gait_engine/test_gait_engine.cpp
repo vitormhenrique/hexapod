@@ -15,8 +15,8 @@ using namespace config;
 namespace {
 
 constexpr float kHomeXy[kNumLegs][2] = {
-  {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
-  {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
+  {-155.2f, -205.2f}, {155.2f, -205.2f}, {196.5f, 0.0f},
+  {155.2f, 205.2f},   {-155.2f, 205.2f}, {-196.5f, 0.0f},
 };
 
 GaitDefaults defaultGait() {
@@ -337,7 +337,10 @@ void test_rc_body_height_envelope_keeps_feet_reachable() {
   }
 }
 
-void test_low_command_restart_scales_swing_lift() {
+// Swing clearance is a gait parameter, not a function of stick deflection: a
+// barely-above-deadband command must still lift swing feet by the full
+// configured step height so slow walking never drags feet.
+void test_low_command_keeps_full_swing_clearance() {
   GaitEngine ge;
   GaitDefaults defaults = defaultGait();
   defaults.gait = static_cast<uint8_t>(GaitId::Tripod);
@@ -345,32 +348,19 @@ void test_low_command_restart_scales_swing_lift() {
   ge.configure(defaults);
 
   BodyTwist command;
-  command.vy = 1.0f;
+  command.vy = 0.05f;  // just above the motion deadband
   ge.setTwist(command);
   GaitOutput out;
-  float phase_at_peak = 0.0f;
   float peak_lift = 0.0f;
-  for (int step = 0; step < 80; ++step) {
+  for (int step = 0; step < 400; ++step) {
     ge.update(10, out);
-    const float lift = out.feet[0].z_mm + defaults.body_height_mm;
-    if (lift > peak_lift) {
-      peak_lift = lift;
-      phase_at_peak = ge.phase();
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      const float lift = out.feet[leg].z_mm + defaults.body_height_mm;
+      if (lift > peak_lift) peak_lift = lift;
     }
-    if (peak_lift > 29.0f) break;
   }
-  TEST_ASSERT_TRUE(peak_lift > 25.0f);
-
-  command.vy = 0.0f;
-  ge.setTwist(command);
-  ge.update(0, out);
-  TEST_ASSERT_FLOAT_WITHIN(1e-6f, phase_at_peak, ge.phase());
-
-  command.vy = 0.04f;
-  ge.setTwist(command);
-  ge.update(0, out);
-  const float restart_lift = out.feet[0].z_mm + defaults.body_height_mm;
-  TEST_ASSERT_TRUE(restart_lift <= defaults.step_height_mm * 0.17f);
+  TEST_ASSERT_FLOAT_WITHIN(2.0f, static_cast<float>(defaults.step_height_mm),
+                           peak_lift);
 }
 
 void test_all_gait_targets_are_ik_reachable() {
@@ -434,7 +424,7 @@ int main(int, char**) {
   RUN_TEST(test_centering_shaped_command_parks_phase);
   RUN_TEST(test_rc_body_height_pot_neutral_at_center);
   RUN_TEST(test_rc_body_height_envelope_keeps_feet_reachable);
-  RUN_TEST(test_low_command_restart_scales_swing_lift);
+  RUN_TEST(test_low_command_keeps_full_swing_clearance);
   RUN_TEST(test_all_gait_targets_are_ik_reachable);
   RUN_TEST(test_phase_wraps_and_advances);
   return UNITY_END();

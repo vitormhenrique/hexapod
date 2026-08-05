@@ -9,14 +9,15 @@ from hexapod_protocol import telemetry as tlm
 
 from models.pose_model import HexapodPoseModel, HOME_FOOT_Z_MM, HOME_RADIUS_MM
 
-# Home foot positions in body frame B (mm), mirror test_leg_ik.cpp kHomeFootB.
+# Home foot positions in body frame B (mm), measured CAD (dimensions.md);
+# mirror test_leg_ik.cpp kHomeFootB / test_cad_geometry.cpp kCadFootTip.
 HOME_FOOT_B = [
-    (-155.4, -205.4, -40.05),
-    (155.4, -205.4, -40.05),
-    (196.8, 0.0, -40.05),
-    (155.4, 205.4, -40.05),
-    (-155.4, 205.4, -40.05),
-    (-196.8, 0.0, -40.05),
+    (-155.205, -205.205, -131.73),
+    (155.205, -205.205, -131.73),
+    (196.534, 0.0, -131.73),
+    (155.205, 205.205, -131.73),
+    (-155.205, 205.205, -131.73),
+    (-196.534, 0.0, -131.73),
 ]
 
 
@@ -161,8 +162,8 @@ def test_out_of_range_indices_are_ignored() -> None:
 
 
 def test_home_constants_exposed() -> None:
-    assert HOME_RADIUS_MM == 127.0
-    assert HOME_FOOT_Z_MM == -44.55
+    assert HOME_RADIUS_MM == 126.75
+    assert HOME_FOOT_Z_MM == -131.73
 
 
 def test_calibrated_geometry_shifts_hip_lift() -> None:
