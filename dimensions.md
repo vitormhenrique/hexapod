@@ -21,7 +21,7 @@ With all servos centered the distance between the center of the robot and the ti
 
 for leg 6 coordinates from the center to the center of coxa rotation (0,69.78,0)
 for leg 6 coordinates from the center to the center of femur rotation (0,121.78,0)
-for leg 6 coordinates from the center to the center of tibia rotation (0,186.58,15.00)
+for leg 6 coordinates from the center to the center of tibia rotation (0,186.58,-15.00)
 for leg 6 coordinates from the center to the tip of the leg (0,196.534,131.734)
 
 for leg 1 coordinates from the center to the center of coxa rotation (115.577 mm, 65.577 mm,0)
