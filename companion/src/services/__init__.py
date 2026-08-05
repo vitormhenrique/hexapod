@@ -55,6 +55,7 @@ class ConnectionService(QObject):
     maint_result = Signal(object)  # api.MaintResultMsg
     leg_target_result = Signal(object)  # api.LegTargetResult (None on failure)
     joint_target_result = Signal(object)  # api.JointTargetResult (None on failure)
+    servo_torque_changed = Signal(int, bool, bool)  # id, enabled, verified
     config_loaded = Signal(object)  # config.RobotConfig (None on failure)
     config_summary = Signal(object)  # config.ConfigSummary (None on failure)
     config_staged = Signal(bool)  # True if every CFG_SET_BLOCK was acked
@@ -69,6 +70,7 @@ class ConnectionService(QObject):
     passive_result = Signal(str, object)  # kind, api.PassiveResult
     passive_rate_result = Signal(object)  # api.PassiveRateResult
     maint_lock_changed = Signal(bool, int)  # held, token
+    maintenance_setup_changed = Signal(bool, bool, str)  # busy, ready, detail
     gait_test_changed = Signal(bool, str)  # active, phase/detail
     gait_test_busy_changed = Signal(bool)
     state_changed = Signal(int)  # latest safety state (-1 = unknown/disconnected)
@@ -95,6 +97,8 @@ class ConnectionService(QObject):
         # thread has no Qt event loop.)
         self.connected.connect(self._on_connected_changed)
         self._maint_token: int = 0
+        self._maint_setup_busy = False
+        self._maint_setup_ready = False
         # Maintenance-lock keepalive: the firmware lock TTL is 1 s without a
         # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
         # background thread or MacMaintenance silently lapses to Disarmed.
@@ -583,6 +587,7 @@ class ConnectionService(QObject):
                 return False
             st = client.get_status()
             if st is not None and st.state == target:
+                self.status_received.emit(st)
                 return True
             time.sleep(0.1)
         return False
@@ -597,6 +602,8 @@ class ConnectionService(QObject):
         self._maint_token = res.token
         self._start_maint_heartbeat(client, res.token)
         self.maint_lock_changed.emit(True, res.token)
+        self.maint_result.emit(res)
+        self.event.emit("commit", f"maintenance lock acquired (token {res.token})")
         return True
 
     def _release_maint_lock(self, client: ProtocolClient) -> None:
@@ -780,53 +787,77 @@ class ConnectionService(QObject):
         if client is None:
             self.error.emit("maintenance: not connected")
             return
+        if self._maint_setup_busy:
+            return
+        self._maint_setup_busy = True
+        self._maint_setup_ready = False
+        self.maintenance_setup_changed.emit(True, False, "acquiring maintenance")
 
         def worker() -> None:
-            res = client.enter_maintenance()
-            if res is None:
-                self.error.emit("maintenance: no response")
-                return
-            if not (res.ok and res.token):
-                self.event.emit("error", "maintenance lock rejected")
-                self.maint_result.emit(res)
-                return
-            self._maint_token = res.token
-            self._start_maint_heartbeat(client, res.token)
-            self.maint_lock_changed.emit(True, res.token)
-            self.event.emit("commit", f"maintenance lock acquired (token {res.token})")
-            self.maint_result.emit(res)
+            ready = False
+            detail = "maintenance setup failed"
+            try:
+                if not self._acquire_maint_lock(client):
+                    detail = "maintenance lock rejected"
+                    self.error.emit(f"maintenance: {detail}")
+                    return
+                self.maintenance_setup_changed.emit(
+                    True, False, "waiting for MacMaintenance"
+                )
+                if not self._wait_state(
+                    client, _STATE_MAC_MAINTENANCE, timeout=2.0
+                ):
+                    detail = "did not reach MacMaintenance"
+                    self.error.emit(f"maintenance: {detail}")
+                    return
 
-            if not self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0):
-                self.error.emit("maintenance: did not reach MacMaintenance")
-                return
+                # GET_STATUS can observe MacMaintenance one control cycle before
+                # the DXL API's copied gate state. Retry the cheap power job so
+                # one operator click carries through that handoff.
+                self.maintenance_setup_changed.emit(
+                    True, False, "powering DXL bus"
+                )
+                pw = None
+                pr = None
+                for _ in range(5):
+                    pw = client.dxl_power(True)
+                    pr = pw.power() if pw and pw.done else None
+                    if pr is not None and pr.power_on:
+                        break
+                    time.sleep(0.1)
+                self.dxl_result.emit("power", pw)
+                if pr is None or not pr.power_on:
+                    detail = "DXL power on failed"
+                    self.error.emit(f"maintenance: {detail}")
+                    return
+                self.event.emit("commit", "maintenance: DXL power on")
 
-            # Power the DXL rail so servos can be scanned/moved.
-            pw = client.dxl_power(True)
-            self.dxl_result.emit("power", pw)
-            pr = pw.power() if pw and pw.done else None
-            if pr is None or not pr.power_on:
-                self.error.emit("maintenance: DXL power on failed")
-                return
-            self.event.emit("commit", "maintenance: DXL power on")
-
-            # Scan so present positions/profiles exist. Freshly powered MX-28s
-            # take ~1 s to answer, so retry. Scan 1..18 (not the full config
-            # space) to avoid the out-of-range scan watchdog trip (hexapod_src-29n).
-            scan = None
-            servos: list = []
-            for _ in range(4):
-                time.sleep(1.0)
-                if self._client is not client:
-                    return  # disconnected mid-flow
-                scan = client.dxl_scan(1, 18)
-                servos = scan.servos() if scan and scan.done else []
-                if servos:
-                    break
-            self.dxl_result.emit("scan", scan)
-            if not servos:
-                self.error.emit("maintenance: no servos found on scan")
-                return
-            self.event.emit("commit", f"maintenance: {len(servos)} servos scanned")
+                self.maintenance_setup_changed.emit(
+                    True, False, "scanning servos"
+                )
+                scan = None
+                servos: list = []
+                for _ in range(4):
+                    time.sleep(1.0)
+                    if self._client is not client:
+                        detail = "connection lost"
+                        return
+                    scan = client.dxl_scan(1, 18)
+                    servos = scan.servos() if scan and scan.done else []
+                    if servos:
+                        break
+                self.dxl_result.emit("scan", scan)
+                if not servos:
+                    detail = "no servos found on scan"
+                    self.error.emit(f"maintenance: {detail}")
+                    return
+                ready = True
+                detail = f"ready: {len(servos)} servos scanned"
+                self.event.emit("commit", f"maintenance: {len(servos)} servos scanned")
+            finally:
+                self._maint_setup_busy = False
+                self._maint_setup_ready = ready
+                self.maintenance_setup_changed.emit(False, ready, detail)
 
         threading.Thread(target=worker, name="hexapod-enter-maint", daemon=True).start()
 
@@ -846,7 +877,12 @@ class ConnectionService(QObject):
                 return
             if res.ok:
                 self._maint_token = 0
+                self._maint_setup_busy = False
+                self._maint_setup_ready = False
                 self.maint_lock_changed.emit(False, 0)
+                self.maintenance_setup_changed.emit(
+                    False, False, "maintenance exited"
+                )
                 self.event.emit("commit", "maintenance lock released")
             self.maint_result.emit(res)
 
@@ -901,6 +937,9 @@ class ConnectionService(QObject):
     def _drop_maint_lock(self, notify: bool = True) -> None:
         """Clear local lock state (link is going away; no EXIT possible)."""
         self._stop_maint_heartbeat()
+        self._maint_setup_busy = False
+        self._maint_setup_ready = False
+        self.maintenance_setup_changed.emit(False, False, "connection lost")
         if self._maint_token:
             self._maint_token = 0
             self.maint_lock_changed.emit(False, 0)
@@ -1285,6 +1324,34 @@ class ConnectionService(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def set_joint_target_with_torque(
+        self, servo_id: int, leg: int, joint: int, angle_cdeg: int
+    ) -> None:
+        """Enable one servo with read-back verification, then command its joint."""
+        client = self._client
+        if client is None:
+            self.error.emit("joint target: not connected")
+            return
+
+        def worker() -> None:
+            res = client.set_joint_target(leg, joint, angle_cdeg)
+            self.joint_target_result.emit(res)
+            if res is None or not res.ok:
+                self.error.emit("joint target: rejected before torque enable")
+                return
+            # While this servo is torque-off, let controlTask publish and
+            # dxlTask write the new Goal Position before making it stiff.
+            time.sleep(0.08)
+            torque = client.dxl_set_param(
+                servo_id, api.DXL_PARAM_TORQUE_ENABLE, 1
+            )
+            verified = self._torque_write_verified(torque, True)
+            self.servo_torque_changed.emit(servo_id, True, verified)
+            if not verified:
+                self.error.emit(f"joint target: servo {servo_id} torque enable failed")
+
+        threading.Thread(target=worker, daemon=True).start()
+
     # --- EEPROM-backed robot config --------------------------------------
 
     def load_config(self) -> None:
@@ -1387,14 +1454,14 @@ class ConnectionService(QObject):
         )
 
     def center_all_joints(self) -> None:
-        """Send every (leg, joint) target in ONE atomic batch command.
+        """Safely arm every servo, then center all joints atomically.
 
         Read the active servo map and invert raw tick 2048 for each joint. A
         The CAD default maps zero relative angle and raw tick 2048 to the same
         pose, while calibrated configs may carry per-servo trims/signs. The 18
-        mapped angles are sent atomically so all servos move in one Sync-Write.
-        Firmware still clamps every target to configured travel and requires
-        MacMaintenance + lock.
+        mapped angles are sent atomically after DXL_TORQUE-on has seeded every
+        Goal Position from Present Position. Firmware still clamps every target
+        to configured travel and requires MacMaintenance + lock.
         """
         client = self._client
         if client is None:
@@ -1415,6 +1482,21 @@ class ConnectionService(QObject):
                         leg, joint, cfg.SERVO_CENTER_TICK
                     )
                     angles_cdeg.append(round(angle * cfg.RAD_TO_DEG * 100.0))
+            torque = client.dxl_torque(True)
+            torque_ok = (
+                torque is not None
+                and torque.done
+                and torque.code == api.DXL_CODE_OK
+                and len(torque.data) >= 2
+                and torque.data[0] == 1
+                and torque.data[1] == len(robot_config.servos)
+            )
+            if not torque_ok:
+                self.event.emit("error", "center all: failed to arm every servo")
+                self.joint_target_result.emit(None)
+                return
+            for servo in robot_config.servos:
+                self.servo_torque_changed.emit(servo.id, True, True)
             res = client.set_all_joint_targets(angles_cdeg)
             if res is None:
                 self.event.emit("error", "center all: rejected or timed out")
@@ -1433,6 +1515,37 @@ class ConnectionService(QObject):
 
     def dxl_set_param(self, servo_id: int, param: int, value: int) -> None:
         self._run_dxl("set_param", lambda c: c.dxl_set_param(servo_id, param, value))
+
+    def set_servo_torque(self, servo_id: int, enabled: bool) -> None:
+        """Set and read-back verify torque for one servo."""
+        client = self._client
+        if client is None:
+            self.error.emit("servo torque: not connected")
+            return
+
+        def worker() -> None:
+            res = client.dxl_set_param(
+                servo_id, api.DXL_PARAM_TORQUE_ENABLE, int(enabled)
+            )
+            verified = self._torque_write_verified(res, enabled)
+            if not verified:
+                self.error.emit(f"servo torque: servo {servo_id} write failed")
+            self.servo_torque_changed.emit(servo_id, enabled, verified)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    @staticmethod
+    def _torque_write_verified(result, enabled: bool) -> bool:
+        param = result.set_param() if result is not None else None
+        return bool(
+            result is not None
+            and result.done
+            and result.code == api.DXL_CODE_OK
+            and param is not None
+            and param.param == api.DXL_PARAM_TORQUE_ENABLE
+            and param.verified
+            and param.readback == int(enabled)
+        )
 
     def dxl_set_servo_limits(self, servo_id: int, min_tick: int, max_tick: int) -> None:
         self._run_dxl(

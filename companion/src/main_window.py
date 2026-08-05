@@ -16,6 +16,7 @@ from ui.pages import (
     DiagnosticsPage,
     FootContactPage,
     GaitLabPage,
+    JointMatrixPage,
     LegLabPage,
     ModeSafetyPage,
     ModelViewerPage,
@@ -57,6 +58,7 @@ class MainWindow(QMainWindow):
         self.nav.add_item("passive_pose", "Passive Pose")
         self.nav.add_section("Tune")
         self.nav.add_item("leg_lab", "Leg Lab")
+        self.nav.add_item("joint_matrix", "Joint Matrix")
         self.nav.add_item("servo_config", "Servo Config")
         self.nav.add_item("servo_tuning", "Servo && DXL")
         self.nav.add_section("Analyze")
@@ -100,6 +102,7 @@ class MainWindow(QMainWindow):
             ("foot_contact", FootContactPage(self.service)),
             ("passive_pose", PassivePosePage(self.service)),
             ("leg_lab", LegLabPage(self.service)),
+            ("joint_matrix", JointMatrixPage(self.service)),
             ("servo_config", ServoConfigPage(self.service)),
             ("servo_tuning", ServoTuningPage(self.service)),
             ("plots", PlotWorkbenchPage(self.service)),
@@ -188,6 +191,7 @@ class MainWindow(QMainWindow):
             "foot_contact",
             "passive_pose",
             "leg_lab",
+            "joint_matrix",
             "servo_config",
             "servo_tuning",
             "sensors",

@@ -8,6 +8,8 @@ a :class:`ProtocolClient` is injected directly so no serial hardware is needed.
 from __future__ import annotations
 
 import os
+import struct
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -90,20 +92,36 @@ def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
         def __init__(self) -> None:
             self.config = cfg.default_robot_config()
             self.angles = None
+            self.calls = []
 
         def read_config(self):
             return self.config
 
+        def dxl_torque(self, on):
+            self.calls.append(("torque", on))
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([1, 18])
+            )
+
         def set_all_joint_targets(self, angles):
+            self.calls.append(("targets",))
             self.angles = list(angles)
             return api.AllJointTargetResult(api.MAINT_TARGET_OK, 8, 18, 0)
 
     service = ConnectionService()
     client = FakeClient()
     service._client = client  # type: ignore[assignment]
+    torque_states = []
+    service.servo_torque_changed.connect(
+        lambda servo_id, enabled, verified: torque_states.append(
+            (servo_id, enabled, verified)
+        )
+    )
     with qtbot.waitSignal(service.joint_target_result, timeout=2000):
         service.center_all_joints()
 
+    assert client.calls == [("torque", True), ("targets",)]
+    assert torque_states == [(servo.id, True, True) for servo in client.config.servos]
     assert client.angles is not None and len(client.angles) == 18
     servo_map = cfg.ServoMap(client.config)
     for index, angle_cdeg in enumerate(client.angles):
@@ -114,6 +132,93 @@ def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
         )
         assert abs(command.tick - cfg.SERVO_CENTER_TICK) <= 1
         assert not command.clamped_low and not command.clamped_high
+
+
+def test_enter_maintenance_one_call_retries_gate_then_scans(qtbot, monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.enter_calls = 0
+            self.power_calls = 0
+            self.scan_calls = 0
+
+        def enter_maintenance(self):
+            self.enter_calls += 1
+            return api.MaintResultMsg(api.MAINT_OK, 2, 77)
+
+        def get_status(self):
+            return SimpleNamespace(state=int(tlm.SafetyState.MAC_MAINTENANCE))
+
+        def dxl_power(self, _on):
+            self.power_calls += 1
+            if self.power_calls == 1:
+                return None
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([1, 1])
+            )
+
+        def dxl_scan(self, _first, _last):
+            self.scan_calls += 1
+            records = b"".join(
+                bytes([sid, 29, 0, 1, 2, 1]) for sid in range(1, 19)
+            )
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([18]) + records
+            )
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    service._start_maint_heartbeat = lambda *_args: None  # type: ignore[method-assign]
+    monkeypatch.setattr(services_mod.time, "sleep", lambda _seconds: None)
+
+    setup_states = []
+    service.maintenance_setup_changed.connect(
+        lambda busy, ready, detail: setup_states.append((busy, ready, detail))
+    )
+    service.enter_maintenance()
+    qtbot.waitUntil(
+        lambda: bool(setup_states) and setup_states[-1][0] is False,
+        timeout=2000,
+    )
+    assert setup_states[0][0] is True
+    assert setup_states[-1][0] is False and setup_states[-1][1] is True
+    assert client.enter_calls == 1
+    assert client.power_calls == 2
+    assert client.scan_calls == 1
+
+
+def test_released_joint_stages_goal_before_enabling_torque(qtbot, monkeypatch) -> None:
+    from services import ConnectionService
+    import services as services_mod
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def set_joint_target(self, leg, joint, angle):
+            self.calls.append(("target", leg, joint, angle))
+            return api.JointTargetResult(api.MAINT_TARGET_OK, 8, False, False, 2048)
+
+        def dxl_set_param(self, servo_id, param, value):
+            self.calls.append(("torque", servo_id, param, value))
+            data = bytes([param, 1]) + struct.pack("<iiB", value, value, 1)
+            return api.DxlJobResult(api.DXL_SLOT_DONE, api.DXL_CODE_OK, data)
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    monkeypatch.setattr(services_mod.time, "sleep", lambda _seconds: None)
+
+    with qtbot.waitSignal(service.servo_torque_changed, timeout=2000) as changed:
+        service.set_joint_target_with_torque(1, 0, 0, 0)
+    assert changed.args == [1, True, True]
+    assert client.calls == [
+        ("target", 0, 0, 0),
+        ("torque", 1, api.DXL_PARAM_TORQUE_ENABLE, 1),
+    ]
 
 
 def test_gait_test_session_sets_up_and_unwinds_without_rc(qtbot, monkeypatch) -> None:

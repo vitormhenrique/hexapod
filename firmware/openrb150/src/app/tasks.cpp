@@ -380,6 +380,19 @@ volatile bool g_ctrlPendingBindingsValid = false;
 // is set true again after dxlTask disables torque; the goal-write/torque-enable
 // path (when wired) is the only place that clears it.
 volatile bool g_dxlTorqueOff = true;
+// Per-discovered-servo torque-off choices made through the maintenance logical
+// parameter API. A released joint must stay limp even while maintenance goal
+// frames continue and another torque-on path runs. dxlTask owns this mask.
+uint32_t g_maintenanceReleasedMask = 0;
+
+bool maintenanceServoReleased(uint8_t id) {
+  for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
+    if (g_dxlBus.profile(i).id == id) {
+      return (g_maintenanceReleasedMask & (uint32_t{1} << i)) != 0;
+    }
+  }
+  return false;
+}
 
 // Hard DXL fault published by dxlTask (lmt.5). Set when a servo reports a
 // hardware error bit (MX 2.0 Hardware Error Status) or the bus stops answering
@@ -1580,6 +1593,32 @@ protocol::dxljob::Code writeParamChecked(uint8_t id, dxl::LogicalParam param,
   if (!dxl::paramDescriptor(p->table_kind, param, d) || !d.writable) {
     return Code::Unsupported;
   }
+  if (param == dxl::LogicalParam::TorqueEnable) {
+    if (value != 0 && value != 1) return Code::VerifyFailed;
+    if (!g_dxlBus.setTorqueOne(id, p->table_kind, value != 0)) {
+      return Code::BusError;
+    }
+    bool torque_on = false;
+    if (!g_dxlBus.torqueState(id, p->table_kind, torque_on)) {
+      return Code::BusError;
+    }
+    readback = torque_on ? 1 : 0;
+    verified = (readback == value);
+    if (verified) {
+      for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
+        if (g_dxlBus.profile(i).id == id) {
+          const uint32_t bit = (uint32_t{1} << i);
+          if (value == 0) {
+            g_maintenanceReleasedMask |= bit;
+          } else {
+            g_maintenanceReleasedMask &= ~bit;
+          }
+          break;
+        }
+      }
+    }
+    return verified ? Code::Ok : Code::VerifyFailed;
+  }
   if (d.region == dxl::ParamRegion::Eeprom) {
     // EEPROM writes are locked while torque is on: disable and confirm.
     if (!g_dxlBus.setTorqueOne(id, p->table_kind, false)) return Code::BusError;
@@ -1758,6 +1797,9 @@ void runQueuedDxlJob() {
       const uint8_t servo_count = g_dxlBus.servoCount();
       uint8_t acked = 0;
       if (on) {
+        // Explicit all-servo arm (used by Center All) supersedes individual
+        // maintenance releases.
+        g_maintenanceReleasedMask = 0;
         // Torque-on is all-or-nothing: every discovered servo must have a
         // fresh, valid present position and receive Goal := Present before any
         // servo is energised. A partial snapshot must never enable the rest
@@ -2115,6 +2157,21 @@ void dxlTask(void*) {
         }
       }
     }
+    if (!board::dxlPowerEnabled()) {
+      g_maintenanceReleasedMask = 0;
+    } else if (live_state == safety::State::MacMaintenance &&
+               g_maintenanceReleasedMask != 0) {
+      // Reassert only when another firmware path changed the cached torque
+      // state back to ON; this avoids writing torque-off every 20 ms.
+      for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
+        const uint32_t bit = (uint32_t{1} << i);
+        const dxl::ServoProfile& profile = g_dxlBus.profile(i);
+        if ((g_maintenanceReleasedMask & bit) != 0 &&
+            profile.torque_enabled) {
+          g_dxlBus.setTorqueOne(profile.id, profile.table_kind, false);
+        }
+      }
+    }
     prev_authorized = authorized;
     // Publish torque-off confirmation for the safety FSM (passive pose gating).
     // Power-off is inherently safe. While powered, require every configured
@@ -2146,10 +2203,15 @@ void dxlTask(void*) {
       // microseconds, so this never approaches the 20 ms dxl period budget.
       if (xSemaphoreTake(g_goalMutex, pdMS_TO_TICKS(kGoalReadWaitMs)) ==
           pdTRUE) {
-        count = g_goalFrame.count;
-        for (uint8_t i = 0; i < count; ++i) {
-          targets[i].id = g_goalFrame.joints[i].id;
-          targets[i].tick = g_goalFrame.joints[i].tick;
+        const uint8_t frame_count = g_goalFrame.count;
+        for (uint8_t i = 0; i < frame_count; ++i) {
+          const uint8_t id = g_goalFrame.joints[i].id;
+          if (maint_authority && maintenanceServoReleased(id)) {
+            continue;
+          }
+          targets[count].id = id;
+          targets[count].tick = g_goalFrame.joints[i].tick;
+          ++count;
         }
         xSemaphoreGive(g_goalMutex);
       }

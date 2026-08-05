@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QAbstractItemView,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -4875,3 +4876,468 @@ class UrdfViewerPage(BasePage):
             self._stop_play()
             return
         self.set_replay_index(nxt)
+
+
+class JointMatrixCell(QWidget):
+    """One calibrated joint command with a per-servo torque-release action."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(8, 6, 8, 6)
+        lay.setSpacing(6)
+        self.value = QSpinBox()
+        self._staged = False
+        self.value.setRange(0, 360)
+        self.value.setValue(180)
+        self.value.setSuffix(" deg")
+        self.value.setAccelerated(True)
+        self.value.valueChanged.connect(self._stage_value)
+        self.apply = QPushButton("Set")
+        self.release = QPushButton("Release")
+        self._released = False
+        self.release.setToolTip("Disable torque only for this mapped servo.")
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        actions.addWidget(self.apply)
+        actions.addWidget(self.release, 1)
+        lay.addWidget(self.value)
+        lay.addLayout(actions)
+
+    def set_angle_mode(self, minimum: int, maximum: int) -> None:
+        self.value.setRange(minimum, maximum)
+        self.value.setSuffix(" deg")
+
+    def set_tick_mode(self, minimum: int, maximum: int) -> None:
+        self.value.setRange(minimum, maximum)
+        self.value.setSuffix(" ticks")
+
+    def set_display_value(self, value: int, force: bool = False) -> None:
+        if self._staged and not force:
+            return
+        self.value.blockSignals(True)
+        self.value.setValue(value)
+        self.value.blockSignals(False)
+
+    def clear_staged_value(self) -> None:
+        self._staged = False
+
+    @property
+    def released(self) -> bool:
+        return self._released
+
+    def set_released(self, released: bool) -> None:
+        self._released = released
+        self.value.setStyleSheet(
+            f"color: {DRACULA.comment};" if released else ""
+        )
+        self.release.setText("Passive" if released else "Release")
+
+    def _stage_value(self, _value: int) -> None:
+        self._staged = True
+
+
+class JointMatrixPage(BasePage):
+    title = "Joint Matrix"
+    subtitle = (
+        "Six-leg maintenance targets with calibrated angle/tick conversion, "
+        "individual torque release, and passive-pose feedback."
+    )
+
+    JOINTS = (("Coxa", 0), ("Femur", 1), ("Tibia", 2))
+
+    def build(self) -> None:
+        from hexapod_protocol import config as cfg
+
+        self._cfg = cfg
+        self._robot_config = cfg.default_robot_config()
+        self._servo_map = cfg.ServoMap(self._robot_config)
+        self._cells: dict[tuple[int, int], JointMatrixCell] = {}
+        self._connected = False
+        self._lock_held = False
+        self._setup_busy = False
+        self._setup_ready = False
+        self._state = -1
+        self._ticks_mode = False
+        self._torque_expected: dict[int, bool] = {}
+
+        self.content.addWidget(self._maintenance_controls())
+        self.content.addWidget(self._matrix())
+        self.content.addWidget(self._status_panel())
+
+        self.banner = self.add_telemetry_banner(
+            [
+                (tlm.StreamId.JOINT_STATE, "joint_state"),
+                (tlm.StreamId.SERVO_STATUS, "servo_status"),
+            ],
+            hint="Passive pose supplies joint_state from present servo positions.",
+            require_all=False,
+        )
+
+        self.service.connected.connect(self._on_connected)
+        self.service.state_changed.connect(self._on_state_changed)
+        self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self.service.maint_result.connect(self._on_maint_result)
+        self.service.maintenance_setup_changed.connect(self._on_setup_changed)
+        self.service.config_loaded.connect(self._on_config_loaded)
+        self.service.dxl_result.connect(self._on_dxl_result)
+        self.service.servo_torque_changed.connect(self._on_servo_torque_changed)
+        self.service.passive_result.connect(self._on_passive_result)
+        self.service.telemetry.connect(self._on_telemetry)
+        self._apply_gates()
+
+    def _maintenance_controls(self) -> QGroupBox:
+        box = QGroupBox("Maintenance and display")
+        form = QFormLayout(box)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(12)
+
+        actions = QHBoxLayout()
+        self.enter_maint_btn = QPushButton("Enter Maintenance and Scan")
+        self.enter_maint_btn.setProperty("accent", True)
+        self.enter_maint_btn.clicked.connect(self.service.enter_maintenance)
+        self.rescan_btn = QPushButton("Rescan servos")
+        self.rescan_btn.clicked.connect(self.service.dxl_scan)
+        self.exit_maint_btn = QPushButton("Exit Maintenance")
+        self.exit_maint_btn.clicked.connect(self.service.exit_maintenance)
+        actions.addWidget(self.enter_maint_btn)
+        actions.addWidget(self.rescan_btn)
+        actions.addWidget(self.exit_maint_btn)
+        actions.addStretch(1)
+        form.addRow("Bench setup", self._wrap(actions))
+
+        mode = QWidget()
+        mode_lay = QHBoxLayout(mode)
+        mode_lay.setContentsMargins(0, 0, 0, 0)
+        self.angle_radio = QRadioButton("Servo angles")
+        self.tick_radio = QRadioButton("Raw ticks")
+        self.angle_radio.setChecked(True)
+        self.angle_radio.toggled.connect(
+            lambda checked: checked and self._set_value_mode(False)
+        )
+        self.tick_radio.toggled.connect(
+            lambda checked: checked and self._set_value_mode(True)
+        )
+        mode_lay.addWidget(self.angle_radio)
+        mode_lay.addWidget(self.tick_radio)
+        mode_lay.addStretch(1)
+        form.addRow("Input mode", mode)
+
+        center = QPushButton("Center all joints")
+        center.setToolTip("Command calibrated center (raw tick 2048) for all 18 joints.")
+        center.clicked.connect(self._center_all)
+        self.center_btn = center
+
+        self.passive_toggle = QCheckBox("Passive pose stream (all torque off)")
+        self.passive_toggle.toggled.connect(self._toggle_passive)
+        bottom = QHBoxLayout()
+        bottom.addWidget(center)
+        bottom.addWidget(self.passive_toggle)
+        bottom.addStretch(1)
+        form.addRow("Pose capture", self._wrap(bottom))
+
+        self.maintenance_lbl = QLabel("Maintenance lock: none")
+        self.maintenance_lbl.setObjectName("MonoLabel")
+        form.addRow("Lock", self.maintenance_lbl)
+        return box
+
+    def _matrix(self) -> QGroupBox:
+        box = QGroupBox("Joint targets")
+        lay = QVBoxLayout(box)
+        note = QLabel(
+            "Each Set command is maintenance-gated. Release disables torque for "
+            "only that servo; passive pose disables torque for all servos."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {DRACULA.comment};")
+        lay.addWidget(note)
+        self.matrix = QTableWidget(self._cfg.NUM_LEGS, 4)
+        self.matrix.setHorizontalHeaderLabels(["Leg", "Coxa", "Femur", "Tibia"])
+        self.matrix.verticalHeader().setVisible(False)
+        self.matrix.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.matrix.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.matrix.setFocusPolicy(Qt.NoFocus)
+        self.matrix.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        for column in range(1, 4):
+            self.matrix.horizontalHeader().setSectionResizeMode(
+                column, QHeaderView.Stretch
+            )
+        self.matrix.setColumnWidth(0, 100)
+        self.matrix.verticalHeader().setDefaultSectionSize(78)
+        self.matrix.setMinimumHeight(540)
+        for leg in range(self._cfg.NUM_LEGS):
+            self.matrix.setRowHeight(leg, 78)
+            self.matrix.setItem(leg, 0, QTableWidgetItem(f"Leg {leg + 1}"))
+            for column, (_name, joint) in enumerate(self.JOINTS, start=1):
+                cell = JointMatrixCell()
+                cell.apply.clicked.connect(
+                    lambda _checked=False, leg=leg, joint=joint: self._send_target(
+                        leg, joint
+                    )
+                )
+                cell.release.clicked.connect(
+                    lambda _checked=False, leg=leg, joint=joint: self._release_torque(
+                        leg, joint
+                    )
+                )
+                self._cells[(leg, joint)] = cell
+                self.matrix.setCellWidget(leg, column, cell)
+        lay.addWidget(self.matrix)
+        return box
+
+    def _status_panel(self) -> QGroupBox:
+        box = QGroupBox("Command status")
+        form = QFormLayout(box)
+        self.command_result = QLabel("--")
+        self.command_result.setObjectName("MonoLabel")
+        self.command_result.setWordWrap(True)
+        form.addRow("Last action", self.command_result)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        widget = QWidget()
+        widget.setLayout(layout)
+        return widget
+
+    def _center_all(self) -> None:
+        self.service.center_all_joints()
+        self.command_result.setText("centering all 18 joints...")
+        for cell in self._cells.values():
+            cell.clear_staged_value()
+            cell.set_display_value(
+                self._cfg.SERVO_CENTER_TICK if self._ticks_mode else 180, force=True
+            )
+
+    def _toggle_passive(self, enabled: bool) -> None:
+        if enabled:
+            self.command_result.setText("starting passive pose stream...")
+            self.service.passive_enter()
+        else:
+            self.command_result.setText("stopping passive pose stream...")
+            self.service.passive_exit()
+        self._apply_gates()
+
+    def _set_value_mode(self, ticks_mode: bool) -> None:
+        if ticks_mode == self._ticks_mode:
+            return
+        self._ticks_mode = ticks_mode
+        for (leg, joint), cell in self._cells.items():
+            servo = self._servo_map.servo_for(leg, joint)
+            if servo is None:
+                continue
+            if ticks_mode:
+                relative_rad = self._cfg.DEG_TO_RAD * (cell.value.value() - 180)
+                cell.set_tick_mode(servo.min_tick, servo.max_tick)
+                cell.set_display_value(
+                    self._servo_map.angle_to_tick(leg, joint, relative_rad).tick,
+                    force=True,
+                )
+            else:
+                relative_rad = self._servo_map.tick_to_angle(leg, joint, cell.value.value())
+                low = round(180 + self._cfg.RAD_TO_DEG * self._cfg.tick_to_angle(servo, servo.min_tick))
+                high = round(180 + self._cfg.RAD_TO_DEG * self._cfg.tick_to_angle(servo, servo.max_tick))
+                cell.set_angle_mode(max(0, min(low, high)), min(360, max(low, high)))
+                cell.set_display_value(
+                    round(180 + self._cfg.RAD_TO_DEG * relative_rad), force=True
+                )
+
+    def _send_target(self, leg: int, joint: int) -> None:
+        cell = self._cells[(leg, joint)]
+        servo = self._servo_map.servo_for(leg, joint)
+        if servo is None:
+            self.command_result.setText(
+                f"leg {leg + 1} {self.JOINTS[joint][0].lower()}: unmapped"
+            )
+            return
+        if self._ticks_mode:
+            relative_rad = self._servo_map.tick_to_angle(leg, joint, cell.value.value())
+            angle_cdeg = round(self._cfg.RAD_TO_DEG * relative_rad * 100)
+        else:
+            angle_cdeg = (cell.value.value() - 180) * 100
+        self.command_result.setText(
+            f"enabling servo {servo.id} and sending leg {leg + 1} "
+            f"{self.JOINTS[joint][0].lower()}..."
+        )
+        self.service.set_joint_target_with_torque(servo.id, leg, joint, angle_cdeg)
+        cell.clear_staged_value()
+
+    def _release_torque(self, leg: int, joint: int) -> None:
+        servo = self._servo_map.servo_for(leg, joint)
+        if servo is None:
+            self.command_result.setText(f"leg {leg + 1} {self.JOINTS[joint][0].lower()}: unmapped")
+            return
+        self.command_result.setText(f"releasing torque for servo {servo.id}...")
+        self.service.set_servo_torque(servo.id, False)
+
+    def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
+        if connected:
+            self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+            self.service.load_config()
+        else:
+            self._lock_held = False
+            self._setup_busy = False
+            self._setup_ready = False
+            self._torque_expected.clear()
+            self._state = -1
+            self.passive_toggle.blockSignals(True)
+            self.passive_toggle.setChecked(False)
+            self.passive_toggle.blockSignals(False)
+        self._apply_gates()
+
+    def _on_state_changed(self, state: int) -> None:
+        self._state = state
+        passive = state == tlm.SafetyState.PASSIVE_POSE_STREAM
+        self.passive_toggle.blockSignals(True)
+        self.passive_toggle.setChecked(passive)
+        self.passive_toggle.blockSignals(False)
+        self._apply_gates()
+
+    def _on_lock_changed(self, held: bool, token: int) -> None:
+        self._lock_held = held
+        if not held:
+            self._setup_ready = False
+            self._torque_expected.clear()
+        self.maintenance_lbl.setText(
+            f"Maintenance lock: {'held' if held else 'none'}" + (f" ({token})" if held else "")
+        )
+        self._apply_gates()
+
+    def _on_setup_changed(self, busy: bool, ready: bool, detail: str) -> None:
+        self._setup_busy = busy
+        self._setup_ready = ready
+        self.enter_maint_btn.setText(
+            detail if busy else ("Maintenance ready" if ready else "Retry Maintenance and Scan")
+        )
+        self.command_result.setText(detail)
+        self._apply_gates()
+
+    def _on_maint_result(self, res) -> None:
+        if res is None:
+            return
+        if res.ok and res.token:
+            self.maintenance_lbl.setText(f"Maintenance lock: held ({res.token})")
+        elif not res.ok:
+            self.command_result.setText(f"maintenance rejected ({res.result})")
+
+    def _on_config_loaded(self, config) -> None:
+        if config is None:
+            return
+        self._robot_config = config
+        self._servo_map = self._cfg.ServoMap(config)
+        for (leg, joint), cell in self._cells.items():
+            servo = self._servo_map.servo_for(leg, joint)
+            if servo is not None and self._ticks_mode:
+                cell.set_tick_mode(servo.min_tick, servo.max_tick)
+
+    def _on_dxl_result(self, kind: str, res) -> None:
+        if kind == "scan":
+            count = len(res.servos()) if res is not None and res.done else 0
+            self.command_result.setText(f"servo scan: {count} found")
+            if count and self._lock_held and not self._setup_busy:
+                self._setup_ready = True
+                self.enter_maint_btn.setText("Maintenance ready")
+                self._apply_gates()
+
+    def _on_servo_torque_changed(
+        self, servo_id: int, enabled: bool, verified: bool
+    ) -> None:
+        servo = self._servo_map.servo_for_id(servo_id)
+        if servo is None:
+            return
+        cell = self._cells[(servo.leg, servo.joint)]
+        if verified:
+            self._torque_expected[servo_id] = enabled
+            cell.set_released(not enabled)
+            action = "enabled" if enabled else "released"
+            self.command_result.setText(f"servo {servo_id} torque {action}")
+        else:
+            self.command_result.setText(f"servo {servo_id} torque command failed")
+
+    def _on_passive_result(self, kind: str, res) -> None:
+        if kind not in ("enter", "exit"):
+            return
+        if res is None or not res.ok:
+            self.command_result.setText(f"passive {kind}: rejected")
+            if kind == "enter":
+                self.passive_toggle.blockSignals(True)
+                self.passive_toggle.setChecked(False)
+                self.passive_toggle.blockSignals(False)
+        else:
+            self.command_result.setText(f"passive {kind}: active" if kind == "enter" else "passive stopped")
+        self._apply_gates()
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id == int(tlm.StreamId.JOINT_STATE):
+            for value in record.joints:
+                self._set_live_value(value.leg, value.joint, value.angle_deg)
+        elif stream_id == int(tlm.StreamId.SERVO_STATUS):
+            for status in record.servos:
+                servo = self._servo_map.servo_for_id(status.id)
+                if servo is None:
+                    continue
+                expected = self._torque_expected.get(status.id)
+                if expected is None:
+                    self._cells[(servo.leg, servo.joint)].set_released(
+                        not status.torque_enabled
+                    )
+                elif status.torque_enabled == expected:
+                    self._torque_expected.pop(status.id, None)
+                    self._cells[(servo.leg, servo.joint)].set_released(
+                        not status.torque_enabled
+                    )
+                if self._ticks_mode:
+                    self._cells[(servo.leg, servo.joint)].set_display_value(status.position)
+                else:
+                    relative_rad = self._cfg.tick_to_angle(servo, status.position)
+                    self._set_live_value(
+                        servo.leg, servo.joint, self._cfg.RAD_TO_DEG * relative_rad
+                    )
+
+    def _set_live_value(self, leg: int, joint: int, relative_deg: float) -> None:
+        cell = self._cells.get((leg, joint))
+        if cell is None:
+            return
+        if self._ticks_mode:
+            tick = self._servo_map.angle_to_tick(
+                leg, joint, relative_deg * self._cfg.DEG_TO_RAD
+            ).tick
+            cell.set_display_value(tick)
+        else:
+            cell.set_display_value(round(180 + relative_deg))
+
+    def _apply_gates(self) -> None:
+        passive = self._state == tlm.SafetyState.PASSIVE_POSE_STREAM or self.passive_toggle.isChecked()
+        bench_ready = (
+            self._connected
+            and self._lock_held
+            and self._setup_ready
+            and not self._setup_busy
+            and not passive
+        )
+        self.enter_maint_btn.setEnabled(
+            self._connected and not self._setup_busy and not self._setup_ready and not passive
+        )
+        self.rescan_btn.setEnabled(
+            self._connected and self._lock_held and not self._setup_busy and not passive
+        )
+        self.exit_maint_btn.setEnabled(
+            self._connected and self._lock_held and not self._setup_busy and not passive
+        )
+        self.center_btn.setEnabled(bench_ready)
+        self.angle_radio.setEnabled(not passive)
+        self.tick_radio.setEnabled(not passive)
+        self.passive_toggle.setEnabled(
+            self._connected
+            and self._state
+            in (-1, tlm.SafetyState.DISARMED, tlm.SafetyState.MAC_MAINTENANCE, tlm.SafetyState.PASSIVE_POSE_STREAM)
+        )
+        for cell in self._cells.values():
+            cell.value.setEnabled(not passive)
+            cell.value.setToolTip(
+                "Stage a target value. Set becomes available after entering "
+                "Maintenance and scanning the servos."
+            )
+            cell.apply.setEnabled(bench_ready)
+            cell.release.setEnabled(bench_ready)
