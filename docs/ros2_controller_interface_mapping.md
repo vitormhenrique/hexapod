@@ -53,31 +53,31 @@ flowchart LR
 
 ## Canonical Joint Map
 
-The firmware uses logical leg-major ordering with Mark III physical DXL IDs.
+The firmware uses logical leg-major ordering with verified sequential DXL IDs.
 The runtime map is always the active `RobotConfig.servo_map`, not these default
 IDs: calibration can change an ID, sign, trim, or travel limit without renaming
 a ROS joint.
 
 | Firmware leg | Role | Default DXL ID | ROS / URDF joint |
 | ---: | --- | ---: | --- |
-| 0 | coxa | 7 | `leg_1_coxa_joint` |
-| 0 | femur | 9 | `leg_1_femur_joint` |
-| 0 | tibia | 11 | `leg_1_tibia_joint` |
-| 1 | coxa | 8 | `leg_2_coxa_joint` |
-| 1 | femur | 10 | `leg_2_femur_joint` |
-| 1 | tibia | 12 | `leg_2_tibia_joint` |
-| 2 | coxa | 14 | `leg_3_coxa_joint` |
-| 2 | femur | 16 | `leg_3_femur_joint` |
-| 2 | tibia | 18 | `leg_3_tibia_joint` |
-| 3 | coxa | 2 | `leg_4_coxa_joint` |
-| 3 | femur | 4 | `leg_4_femur_joint` |
-| 3 | tibia | 6 | `leg_4_tibia_joint` |
-| 4 | coxa | 19 | `leg_5_coxa_joint` |
-| 4 | femur | 3 | `leg_5_femur_joint` |
-| 4 | tibia | 5 | `leg_5_tibia_joint` |
-| 5 | coxa | 13 | `leg_6_coxa_joint` |
-| 5 | femur | 15 | `leg_6_femur_joint` |
-| 5 | tibia | 17 | `leg_6_tibia_joint` |
+| 0 | coxa | 1 | `leg_1_coxa_joint` |
+| 0 | femur | 2 | `leg_1_femur_joint` |
+| 0 | tibia | 3 | `leg_1_tibia_joint` |
+| 1 | coxa | 4 | `leg_2_coxa_joint` |
+| 1 | femur | 5 | `leg_2_femur_joint` |
+| 1 | tibia | 6 | `leg_2_tibia_joint` |
+| 2 | coxa | 7 | `leg_3_coxa_joint` |
+| 2 | femur | 8 | `leg_3_femur_joint` |
+| 2 | tibia | 9 | `leg_3_tibia_joint` |
+| 3 | coxa | 10 | `leg_4_coxa_joint` |
+| 3 | femur | 11 | `leg_4_femur_joint` |
+| 3 | tibia | 12 | `leg_4_tibia_joint` |
+| 4 | coxa | 13 | `leg_5_coxa_joint` |
+| 4 | femur | 14 | `leg_5_femur_joint` |
+| 4 | tibia | 15 | `leg_5_tibia_joint` |
+| 5 | coxa | 16 | `leg_6_coxa_joint` |
+| 5 | femur | 17 | `leg_6_femur_joint` |
+| 5 | tibia | 18 | `leg_6_tibia_joint` |
 
 The name is the stable public key. All adapters must reject duplicate, missing,
 or unknown names rather than relying on a publisher vector position. SIL may

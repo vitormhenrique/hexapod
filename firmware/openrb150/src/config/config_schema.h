@@ -61,7 +61,13 @@ constexpr uint8_t kRobotNameLen = 16;                     // incl. NUL terminato
 // v6: replaces the motion profile with the Mark III Phoenix geometry, servo
 //     wiring, side inversions, horn offsets, limits, and gait defaults. Older
 //     payloads retain non-motion settings but receive the v6 motion profile.
-constexpr uint16_t kSchemaVersion = 6;
+// v7: restores the assembled robot's verified sequential DXL IDs 1..18 while
+//     retaining Mark III geometry, angles, side inversions, and gait timing.
+// v8: restores HexNav CAD dimensions, mounts, zero-centred servo calibration,
+//     and ride height. Mark III remains a gait/IK-method reference only.
+constexpr uint16_t kSchemaVersion = 8;
+constexpr uint16_t kLegacySchemaVersionV7 = 7;
+constexpr uint16_t kLegacySchemaVersionV6 = 6;
 constexpr uint16_t kLegacySchemaVersionV5 = 5;
 constexpr uint16_t kLegacySchemaVersionV4 = 4;
 constexpr uint16_t kLegacySchemaVersionV3 = 3;

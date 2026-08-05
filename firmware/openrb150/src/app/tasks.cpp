@@ -9,6 +9,7 @@
 #include "../config/eeprom_24lc32.h"
 #include "../controller/controller_core.h"
 #include "../dxl/dxl_bus.h"
+#include "../dxl/dxl_fault_monitor.h"
 #include "../dxl/hold_targets.h"
 #include "../dxl/dxl_params.h"
 #include "../dxl/scan_cursor.h"
@@ -50,6 +51,7 @@
 #include "../safety/watchdog.h"
 #include "task_config.h"
 #include "controller_time_adapter.h"
+#include "status_led.h"
 
 namespace app {
 namespace {
@@ -1982,6 +1984,7 @@ void dxlTask(void*) {
   constexpr uint16_t kServoBootDelayMs = 500;
   // Sustained dead-bus window before declaring a hard bus fault (lmt.5).
   constexpr uint16_t kDxlBusFailLimit = 50;  // ~1 s at the 50 Hz dxl period
+  dxl::FaultMonitor servo_fault_monitor;
   for (;;) {
     tick(watchdog::TaskId::Dxl);
 
@@ -2191,10 +2194,17 @@ void dxlTask(void*) {
       static uint8_t rr_servo = 0;
       if (n > 0 && !arming) {
         if (rr_servo >= cnt) rr_servo = 0;
-        const uint8_t rr_id = g_dxlBus.profile(rr_servo).id;
+        const dxl::ServoProfile& rr_profile = g_dxlBus.profile(rr_servo);
+        const uint8_t rr_id = rr_profile.id;
         watchdog::markProgress(71);
-        g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
+        const bool detail_ok =
+            g_dxlBus.readStatus(rr_id, g_servoStatus[rr_servo]);
         g_servoStatus[rr_servo].id = rr_id;  // readStatus does not set id
+        if (detail_ok) {
+          servo_fault_monitor.observe(
+              rr_servo, rr_profile.table_kind,
+              g_servoStatus[rr_servo].hardware_error);
+        }
         ++rr_servo;
       }
 
@@ -2209,21 +2219,17 @@ void dxlTask(void*) {
       } else {
         consec_zero_reads = 0;
       }
-      bool hw_error = false;
-      for (uint8_t i = 0; i < cnt; ++i) {
-        if (g_servoStatus[i].hardware_error != 0) {
-          hw_error = true;
-          break;
-        }
-      }
-      g_dxlHardFault = torque_enable_fault || hw_error ||
+      g_dxlHardFault = torque_enable_fault || servo_fault_monitor.faulted() ||
                        (consec_zero_reads >= kDxlBusFailLimit);
     } else {
       // No scanned servos or DXL power is off: there is no powered bus to
       // fault on (FaultHard itself force-cuts power above, so keeping the
       // fault asserted here would deadlock CLEAR_FAULT recovery).
       consec_zero_reads = 0;
-      if (!board::dxlPowerEnabled()) torque_enable_fault = false;
+      if (!board::dxlPowerEnabled()) {
+        torque_enable_fault = false;
+        servo_fault_monitor.reset();
+      }
       g_dxlHardFault = torque_enable_fault;
     }
     publishServoReadiness();
@@ -2936,15 +2942,24 @@ void i2cTask(void*) {
 
 void healthTask(void*) {
   TickType_t next = xTaskGetTickCount();
+  uint32_t last_watchdog_eval_ms = 0;
   for (;;) {
     tick(watchdog::TaskId::Health);
 
-    watchdog::evaluate();
-    if (watchdog::criticalStalled()) {
-      board::setUserLed(true);
-    } else {
-      board::toggleUserLed();
+    const uint32_t now_ms =
+        static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
+    if (last_watchdog_eval_ms == 0 ||
+        (now_ms - last_watchdog_eval_ms) >= 500u) {
+      watchdog::evaluate();
+      last_watchdog_eval_ms = now_ms;
     }
+    status_led::Inputs led;
+    led.state = static_cast<safety::State>(g_safetyState);
+    led.fault = static_cast<safety::FaultReason>(g_faultReason);
+    led.configured_servo_coverage = g_configuredServoCoverage;
+    led.all_servo_poses_known = g_poseKnownMask == kAllServoPosesKnown;
+    led.watchdog_stalled = watchdog::criticalStalled();
+    board::setUserLed(status_led::ledOn(led, now_ms));
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }

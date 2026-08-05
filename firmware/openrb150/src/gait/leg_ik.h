@@ -26,15 +26,14 @@ namespace gait {
 
 // Foot-tip offset baked into L_TIBIA points to the URDF foot frame; the home
 // foot in the coxa frame (identical for all six legs, IK ref section 12).
-constexpr float kHomeRadiusMm = 147.0f;
-constexpr float kHomeFootZMm = -25.0f;
+constexpr float kHomeRadiusMm = 127.0f;
+constexpr float kHomeFootZMm = -44.55f;
 
 // Reachability-aware stride limit (lmt.14): generated foot targets are pulled
 // radially inward by clampToReach() so the planar reach distance never exceeds
-// this fraction of the full two-link extension (l2 + l3). Mark III lateral
-// travel deliberately approaches the folded boundary, so a 1% margin retains
-// roughly 2 mm of clearance without shortening the reference gait globally.
-constexpr float kReachMarginFrac = 0.99f;
+// this fraction of the full two-link extension (l2 + l3). HexNav home is near
+// full extension, so retain a conservative 5% workspace margin.
+constexpr float kReachMarginFrac = 0.95f;
 
 // Result of a single-leg IK solve. Angles are URDF-zero-relative radians.
 struct IkResult {

@@ -90,12 +90,12 @@ def test_row_selection_drills_into_detail(qtbot) -> None:
 def test_servo_goals_supplies_target_tick(qtbot) -> None:
     service, page = _make_page(qtbot)
     status = tlm.ServoStatusTelemetry(
-        servos=[tlm.ServoStatus(7, 2048, 0, 5, 11700, 38, 0x00, True)]
+        servos=[tlm.ServoStatus(1, 2048, 0, 5, 11700, 38, 0x00, True)]
     )
     service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), status)
     page.table.selectRow(0)
 
-    # Mark III servo id 7 maps to left-rear coxa.
+    # Verified sequential servo id 1 maps to left-rear coxa.
     goals = tlm.ServoGoalsTelemetry(
         goals=[tlm.ServoGoal(leg=0, joint=0, angle_centideg=0, clamped=False)]
     )

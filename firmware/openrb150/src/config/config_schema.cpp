@@ -67,36 +67,22 @@ struct LegSeed {
   int16_t yaw_cdeg;
 };
 constexpr LegSeed kLegSeeds[kNumLegs] = {
-    {-600, -1200, 0, 13500},   // leg 1 left rear
-    {600, -1200, 0, -13500},   // leg 2 right rear
-    {1000, 0, 0, -9000},       // leg 3 right middle
-    {600, 1200, 0, -4500},     // leg 4 right front
-    {-600, 1200, 0, 4500},     // leg 5 left front
-    {-1000, 0, 0, 9000},       // leg 6 left middle
+    {-656, -1156, -165, 13500},   // leg 1 rear-left
+    {656, -1156, -165, -13500},   // leg 2 rear-right
+    {698, 0, -165, -9000},        // leg 3 mid-right
+    {656, 1156, -165, -4500},     // leg 4 front-right
+    {-656, 1156, -165, 4500},     // leg 5 front-left
+    {-698, 0, -165, 9000},        // leg 6 mid-left
 };
 
-// Mark III Hex_Cfg.h wiring, normalized to this firmware's geometric leg
-// order (LR, RR, RM, RF, LF, LM). LF coxa is ID 19 because the reference build
-// enables OPT_CHECK_SERVO_RESET and deliberately leaves ID 1 unused.
-constexpr uint8_t kMarkIiiServoIds[kNumLegs][kJointsPerLeg] = {
-    {7, 9, 11}, {8, 10, 12}, {14, 16, 18},
-    {2, 4, 6},  {19, 3, 5},  {13, 15, 17},
-};
+void applyRobotMotionProfile(RobotConfig& cfg) {
+  cfg.links.coxa_cmm = 5608;
+  cfg.links.femur_cmm = 6651;
+  cfg.links.tibia_cmm = 2486;
 
-void applyMarkIiiMotionProfile(RobotConfig& cfg,
-                               bool preserve_servo_calibration = false) {
-  ServoConfig prior_servos[kNumServos];
-  if (preserve_servo_calibration) {
-    memcpy(prior_servos, cfg.servos, sizeof(prior_servos));
-  }
-
-  cfg.links.coxa_cmm = 5200;
-  cfg.links.femur_cmm = 6600;
-  cfg.links.tibia_cmm = 13300;
-
-  cfg.geometry.home_radius_cmm = 14700;
-  cfg.geometry.home_foot_z_cmm = -2500;
-  cfg.geometry.coxa_lift_cmm = 0;
+  cfg.geometry.home_radius_cmm = 12700;
+  cfg.geometry.home_foot_z_cmm = -4455;
+  cfg.geometry.coxa_lift_cmm = 2100;
 
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
     cfg.legs[leg].mount_x_dmm = kLegSeeds[leg].x_dmm;
@@ -104,55 +90,25 @@ void applyMarkIiiMotionProfile(RobotConfig& cfg,
     cfg.legs[leg].mount_z_dmm = kLegSeeds[leg].z_dmm;
     cfg.legs[leg].mount_yaw_cdeg = kLegSeeds[leg].yaw_cdeg;
 
-    const bool right_side = leg == 1 || leg == 2 || leg == 3;
     for (uint8_t joint = 0; joint < kJointsPerLeg; ++joint) {
-      ServoConfig& servo = cfg.servos[leg * kJointsPerLeg + joint];
-      servo.id = kMarkIiiServoIds[leg][joint];
+      const uint8_t slot = static_cast<uint8_t>(leg * kJointsPerLeg + joint);
+      ServoConfig& servo = cfg.servos[slot];
+      servo.id = static_cast<uint8_t>(slot + 1);
       servo.leg = leg;
       servo.joint = joint;
-      servo.sign = right_side ? -1 : 1;
-      if (joint == static_cast<uint8_t>(JointRole::Coxa)) {
-        servo.trim_ticks = 0;
-        const bool wide_middle = leg == 5;
-        servo.min_tick = wide_middle ? 910 : 1195;   // -100 / -75 deg
-        servo.max_tick = wide_middle ? 3186 : 2901;  // +100 / +75 deg
-      } else if (joint == static_cast<uint8_t>(JointRole::Femur)) {
-        servo.trim_ticks = right_side ? 395 : -395;
-        servo.min_tick = 910;   // -100 deg
-        servo.max_tick = 3186;  // +100 deg
-      } else {
-        servo.trim_ticks = right_side ? -1038 : 1038;
-        servo.min_tick = right_side ? 887 : 1286;   // R -102 / L -67 deg
-        servo.max_tick = right_side ? 2810 : 3209;  // R +67 / L +102 deg
-      }
+      servo.sign = 1;
+      servo.trim_ticks = 0;
+      servo.min_tick = 1024;
+      servo.max_tick = 3072;
     }
   }
 
-  cfg.gait.body_height_mm = 60;
-  cfg.gait.stride_len_mm = 50;
-  cfg.gait.step_height_mm = 50;
+  cfg.gait.body_height_mm = 40;
+  cfg.gait.stride_len_mm = 60;
+  cfg.gait.step_height_mm = 30;
   cfg.gait.duty_x255 = 159;   // Mark III 8-step tripod: 5/8 grounded
   cfg.gait.speed_x255 = 128;  // Mark III nominal 50 ms per gait keyframe
   cfg.gait.gait = static_cast<uint8_t>(GaitId::Stand);
-
-  if (!preserve_servo_calibration) return;
-  for (uint8_t index = 0; index < kNumServos; ++index) {
-    ServoConfig& servo = cfg.servos[index];
-    for (uint8_t prior_index = 0; prior_index < kNumServos; ++prior_index) {
-      const ServoConfig& prior = prior_servos[prior_index];
-      if (prior.id != servo.id) continue;
-      int32_t trim = static_cast<int32_t>(servo.trim_ticks) + prior.trim_ticks;
-      if (trim < -32768) trim = -32768;
-      if (trim > 32767) trim = 32767;
-      servo.trim_ticks = static_cast<int16_t>(trim);
-      if (prior.min_tick < prior.max_tick &&
-          prior.max_tick <= kServoMaxTick) {
-        if (prior.min_tick > servo.min_tick) servo.min_tick = prior.min_tick;
-        if (prior.max_tick < servo.max_tick) servo.max_tick = prior.max_tick;
-      }
-      break;
-    }
-  }
 }
 
 }  // namespace
@@ -163,7 +119,7 @@ void defaultRobotConfig(RobotConfig& cfg) {
   memset(cfg.robot_name, 0, sizeof(cfg.robot_name));
   strncpy(cfg.robot_name, "HexNav", sizeof(cfg.robot_name) - 1);
 
-  applyMarkIiiMotionProfile(cfg);
+  applyRobotMotionProfile(cfg);
 
   defaultRcInputCalibration(cfg.rc_input);
   defaultBodyCommandLimits(cfg.body_command);
@@ -277,7 +233,11 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
                          len == kLegacyConfigPayloadSizeV4;
   const bool legacy_v5 = out.schema_version == kLegacySchemaVersionV5 &&
                          len == kConfigPayloadSize;
-  if (!legacy_v3 && !legacy_v4 && !legacy_v5 &&
+  const bool legacy_v6 = out.schema_version == kLegacySchemaVersionV6 &&
+                         len == kConfigPayloadSize;
+  const bool legacy_v7 = out.schema_version == kLegacySchemaVersionV7 &&
+                         len == kConfigPayloadSize;
+  if (!legacy_v3 && !legacy_v4 && !legacy_v5 && !legacy_v6 && !legacy_v7 &&
       (out.schema_version != kSchemaVersion || len != kConfigPayloadSize)) {
     return false;
   }
@@ -368,8 +328,8 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
   out.feature_defaults = getU32(in, o);
 
   if (o != len) return false;
-  if (legacy_v3 || legacy_v4 || legacy_v5) {
-    applyMarkIiiMotionProfile(out, true);
+  if (legacy_v6 || legacy_v7) {
+    applyRobotMotionProfile(out);
   }
   // The in-memory config always carries the active schema after migration.
   out.schema_version = kSchemaVersion;

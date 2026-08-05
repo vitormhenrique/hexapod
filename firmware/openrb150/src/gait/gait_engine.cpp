@@ -7,12 +7,11 @@
 namespace gait {
 namespace {
 
-// Mark III feet converted from Phoenix coordinates to body frame B. Firmware
-// leg order is LR, RR, RM, RF, LF, LM so physical legs 3 and 6 remain the two
-// middle legs used by existing telemetry and calibration.
+// HexNav CAD home feet in body frame B. Mark III supplies gait phase/keyframe
+// behavior only; physical dimensions always come from this robot's model.
 constexpr float kHomeFootXy[config::kNumLegs][2] = {
-    {-164.0f, -224.0f}, {164.0f, -224.0f}, {247.0f, 0.0f},
-    {164.0f, 224.0f},   {-164.0f, 224.0f}, {-247.0f, 0.0f},
+  {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
+  {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
 };
 
 struct MarkIiiGait {

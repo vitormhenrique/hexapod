@@ -35,12 +35,13 @@ constexpr uint16_t kDxl = 512;
 // this task. A retained FreeRTOS overflow record captured a receiver-triggered
 // failure at 192 words, so reserve enough headroom for the complete frame path.
 constexpr uint16_t kRc = 320;
-// Request/response buffers are static; static stack analysis bounds the normal
-// dispatcher below 576 words. HIL trace fragmentation adds a separate path.
+// Request/response buffers are static, but live hardware retained an API-task
+// overflow at 576 words while companion maintenance/config traffic was active.
+// Keep enough measured headroom for nested dispatch and serial framing.
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 constexpr uint16_t kApi = 768;
 #else
-constexpr uint16_t kApi = 576;
+constexpr uint16_t kApi = 704;
 #endif
 constexpr uint16_t kI2c = 384;   // boot: scanAll() + config load; deep call chain
 constexpr uint16_t kHealth = 256;
@@ -64,7 +65,7 @@ constexpr uint32_t kDxl = 20;       // 50 Hz
 constexpr uint32_t kRc = 10;        // 100 Hz
 constexpr uint32_t kApi = 5;        // 200 Hz poll
 constexpr uint32_t kI2c = 20;       // 50 Hz
-constexpr uint32_t kHealth = 500;   // 2 Hz reporting + watchdog evaluate
+constexpr uint32_t kHealth = 100;   // 10 Hz LED; watchdog remains 2 Hz
 
 // Runtime-tunable bounds for the i2c/sensor poll loop period (SENSOR_SET_RATE,
 // lmt.9). The host requests a poll rate in Hz; the i2c task derives its loop

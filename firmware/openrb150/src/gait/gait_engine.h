@@ -28,9 +28,9 @@ namespace gait {
 // Safety clamps for generated targets (mm). Keep well inside the leg workspace.
 constexpr float kMaxStrideMm = 80.0f;   // max per-axis foot stroke
 constexpr float kMaxStepMm = 50.0f;     // max swing lift
-constexpr float kMinFootZMm = -150.0f;  // lowest commanded foot Z in B
-constexpr float kMaxFootZMm = 50.0f;    // Mark III swing may rise above coxa
-constexpr float kSitFootZMm = -25.0f;   // Mark III rest/sit height
+constexpr float kMinFootZMm = -120.0f;  // lowest commanded foot Z in B
+constexpr float kMaxFootZMm = -5.0f;    // highest commanded foot Z in B
+constexpr float kSitFootZMm = -8.0f;    // body-down sit pose
 
 constexpr float kStrokeEnvelopeFrac = 0.5f;
 constexpr float kMarkIiiYawTravelRad = 0.55850536f;  // 32 degrees end-to-end
@@ -51,11 +51,10 @@ constexpr float kMotionDeadband = 0.03f;
 // Mark III APG tables own duty/support timing; duty_x255 remains a compatible
 // wire input but does not alter those fixed safety patterns.
 
-// Mark III rests at 25 mm and walks at a 60 mm neutral body height. Height
-// changes move only foot Z while keeping the X/Y stance planted.
-constexpr float kRcBodyHeightMinMm = 25.0f;
-constexpr float kRcBodyHeightNeutralMm = 60.0f;
-constexpr float kRcBodyHeightMaxMm = 120.0f;
+// HexNav CAD-safe height envelope around its 40 mm home stance.
+constexpr float kRcBodyHeightMinMm = 31.0f;
+constexpr float kRcBodyHeightNeutralMm = 40.0f;
+constexpr float kRcBodyHeightMaxMm = 45.0f;
 
 // Map the Pot2 0..1 fraction onto the reach-safe height envelope, piecewise
 // linear about the neutral centre.
@@ -131,12 +130,12 @@ class GaitEngine {
   // values below, advanced in update()). Seeded from the first configure().
   float stride_mm_ = 60.0f;
   float step_mm_ = 30.0f;
-  float body_height_mm_ = 60.0f;
+  float body_height_mm_ = 40.0f;
   float speed_ = 0.5f;  // 0..1 normalised
   // Raw configure() targets for the filtered parameters.
   float stride_target_ = 60.0f;
   float step_target_ = 30.0f;
-  float height_target_ = 60.0f;
+  float height_target_ = 40.0f;
   float speed_target_ = 0.5f;
   bool params_seeded_ = false;
   BodyTwist twist_;  // already-shaped command from ControllerCore

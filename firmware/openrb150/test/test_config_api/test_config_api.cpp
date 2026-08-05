@@ -460,7 +460,7 @@ void test_adopt_payload_seeds_shadow() {
   TEST_ASSERT_EQUAL_STRING("Booted", reinterpret_cast<char*>(&s.buf[11]));
 }
 
-void test_adopt_v3_payload_migrates_staging_to_v6() {
+void test_adopt_v3_payload_migrates_staging_to_v8() {
   FakeEeprom mem;
   ConfigStore store(mem);
   StorePersistence persist(store, true);
@@ -498,10 +498,10 @@ void test_adopt_v3_payload_migrates_staging_to_v6() {
 
   TEST_ASSERT_TRUE(api.adoptPayload(v3, sizeof(v3)));
   TEST_ASSERT_EQUAL_UINT16(kSchemaVersion, api.config().schema_version);
-  TEST_ASSERT_EQUAL_INT16(1007, api.config().servos[2].trim_ticks);
+  TEST_ASSERT_EQUAL_INT16(-31, api.config().servos[10].trim_ticks);
   TEST_ASSERT_TRUE(validateRcInputCalibration(api.config().rc_input));
 
-  // Staging was upgraded to v6, so its final byte remains readable through
+  // Staging was upgraded to v8, so its final byte remains readable through
   // CFG_GET_BLOCK instead of retaining the shorter legacy payload length.
   uint8_t req[4];
   const uint16_t offset = kConfigPayloadSize - 1;
@@ -610,7 +610,7 @@ int main(int, char**) {
   RUN_TEST(test_commit_surfaces_store_failure);
   RUN_TEST(test_reset_defaults_restores_staging);
   RUN_TEST(test_adopt_payload_seeds_shadow);
-  RUN_TEST(test_adopt_v3_payload_migrates_staging_to_v6);
+  RUN_TEST(test_adopt_v3_payload_migrates_staging_to_v8);
   RUN_TEST(test_non_config_msg_not_handled);
   RUN_TEST(test_revision_bumps_only_on_shadow_change);
   RUN_TEST(test_default_config_enables_sensor_polling_bit);

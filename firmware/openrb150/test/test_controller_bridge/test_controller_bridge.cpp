@@ -286,11 +286,11 @@ void test_encoder_integrates_stride_trim() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
   in.encoder[0] = 600;
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.5f, feed(b, in, 10).stride);  // seed = mid
-  in.encoder[0] = 600 + 256;  // +256 counts = +0.25 of 1024 full-scale
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, feed(b, in, 10).stride);
+  in.encoder[0] = 568;  // -32 counts = -0.25 of 128 full-scale
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.75f, feed(b, in, 20).stride);
-  in.encoder[0] = 600;  // back down -256 -> 0.5
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.5f, feed(b, in, 30).stride);
+  in.encoder[0] = 600;  // +32 counts -> full stride again
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, feed(b, in, 30).stride);
 }
 
 void test_encoder_wrap_is_shortest_delta() {
@@ -301,8 +301,8 @@ void test_encoder_wrap_is_shortest_delta() {
   // Wrap 10 -> 2046 is a -12 step, not +2036.
   in.encoder[0] = 2046;
   const ControllerCommand& c = feed(b, in, 20);
-  // 0.5 + (-12/1024) ~= 0.488
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.5f - 12.0f / 1024.0f, c.stride);
+  // Full stride plus a -12/128 adjustment.
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f - 12.0f / 128.0f, c.stride);
 }
 
 // --- features --------------------------------------------------------------

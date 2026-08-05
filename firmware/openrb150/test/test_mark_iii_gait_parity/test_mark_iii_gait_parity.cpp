@@ -10,25 +10,31 @@ constexpr float kPi = 3.14159265358979323846f;
 constexpr float kRadToDeg = 180.0f / kPi;
 constexpr float kDegToRad = kPi / 180.0f;
 constexpr float kTicksPerDeg = 4096.0f / 360.0f;
-constexpr float kStrideMm = 50.0f;
-constexpr float kLiftMm = 50.0f;
-constexpr float kBodyHeightMm = 60.0f;
+constexpr float kStrideMm = 2.0f;
+constexpr float kLiftMm = 5.0f;
+constexpr float kBodyHeightMm = 40.0f;
 constexpr float kYawTravelRad = 32.0f * kDegToRad;
+constexpr float kCoxaMm = 56.08f;
+constexpr float kFemurMm = 66.51f;
+constexpr float kTibiaMm = 24.86f;
+constexpr float kHomeRadiusMm = 127.0f;
+constexpr float kHomeLocalZMm = -44.55f;
+constexpr float kCoxaFrameZMm = 4.5f;
 
 constexpr float kHome[config::kNumLegs][2] = {
-    {-164.0f, -224.0f}, {164.0f, -224.0f}, {247.0f, 0.0f},
-    {164.0f, 224.0f},   {-164.0f, 224.0f}, {-247.0f, 0.0f},
+  {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
+  {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
 };
 
 constexpr float kMount[config::kNumLegs][3] = {
-    {-60.0f, -120.0f, 135.0f}, {60.0f, -120.0f, -135.0f},
-    {100.0f, 0.0f, -90.0f},    {60.0f, 120.0f, -45.0f},
-    {-60.0f, 120.0f, 45.0f},   {-100.0f, 0.0f, 90.0f},
+  {-65.6f, -115.6f, 135.0f}, {65.6f, -115.6f, -135.0f},
+  {69.8f, 0.0f, -90.0f},     {65.6f, 115.6f, -45.0f},
+  {-65.6f, 115.6f, 45.0f},   {-69.8f, 0.0f, 90.0f},
 };
 
 constexpr uint8_t kServoIds[config::kNumLegs][config::kJointsPerLeg] = {
-    {7, 9, 11}, {8, 10, 12}, {14, 16, 18},
-    {2, 4, 6},  {19, 3, 5},  {13, 15, 17},
+  {1, 2, 3},   {4, 5, 6},   {7, 8, 9},
+  {10, 11, 12}, {13, 14, 15}, {16, 17, 18},
 };
 
 struct ReferenceGait {
@@ -53,7 +59,7 @@ struct ReferenceCommand {
 constexpr ReferenceCommand kCommands[] = {
     {0.0f, 1.0f, 0.0f},  // forward
     {1.0f, 0.0f, 0.0f},  // strafe right in body frame
-    {0.0f, 0.0f, 1.0f},  // counter-clockwise yaw
+  {0.0f, 0.0f, 0.04f},  // small counter-clockwise yaw above motion deadband
 };
 
 float clampUnit(float value) {
@@ -114,7 +120,24 @@ void referenceFoot(const ReferenceGait& gait, const ReferenceCommand& command,
       command.body_x * kStrideMm * longitudinal;
   y = kHome[leg][0] * sine + kHome[leg][1] * cosine +
       command.body_y * kStrideMm * longitudinal;
-  z = -kBodyHeightMm + kLiftMm * lift;
+  const float command_scale = fmaxf(
+      fabsf(command.body_x),
+      fmaxf(fabsf(command.body_y), fabsf(command.yaw)));
+  const float lift_scale = fminf(1.0f, command_scale * 4.0f);
+  z = -kBodyHeightMm + kLiftMm * lift_scale * lift;
+}
+
+void rawPlanar(float radius, float z, float& femur, float& tibia) {
+  const float planar = radius - kCoxaMm;
+  const float distance = sqrtf(planar * planar + z * z);
+  const float knee_cosine = clampUnit(
+      (distance * distance - kFemurMm * kFemurMm - kTibiaMm * kTibiaMm) /
+      (2.0f * kFemurMm * kTibiaMm));
+  tibia = acosf(knee_cosine);
+  const float line = atan2f(z, planar);
+  const float shoulder = atan2f(
+      kTibiaMm * sinf(tibia), kFemurMm + kTibiaMm * cosf(tibia));
+  femur = line - shoulder;
 }
 
 uint16_t referenceServoTick(uint8_t leg, uint8_t joint, float body_x,
@@ -126,43 +149,24 @@ uint16_t referenceServoTick(uint8_t leg, uint8_t joint, float body_x,
                         sinf(transform) * delta_y;
   const float local_y = sinf(transform) * delta_x +
                         cosf(transform) * delta_y;
-  const float planar = sqrtf(local_x * local_x + local_y * local_y) - 52.0f;
-  const float down = -body_z;
-  const float distance = sqrtf(planar * planar + down * down);
-  const bool right_side = leg == 1 || leg == 2 || leg == 3;
+  const float radius = sqrtf(local_x * local_x + local_y * local_y);
+  const float local_z = body_z - kCoxaFrameZMm;
+  float home_femur, home_tibia;
+  rawPlanar(kHomeRadiusMm, kHomeLocalZMm, home_femur, home_tibia);
+  float target_femur, target_tibia;
+  rawPlanar(radius, local_z, target_femur, target_tibia);
 
   float servo_degrees = 0.0f;
   if (joint == static_cast<uint8_t>(config::JointRole::Coxa)) {
-    const float coxa = atan2f(local_y, local_x) * kRadToDeg;
-    servo_degrees = right_side ? -coxa : coxa;
+    servo_degrees = atan2f(local_y, local_x) * kRadToDeg;
   } else if (joint == static_cast<uint8_t>(config::JointRole::Femur)) {
-    const float shoulder_line = atan2f(down, planar);
-    const float shoulder_cosine = clampUnit(
-        (66.0f * 66.0f - 133.0f * 133.0f + distance * distance) /
-        (2.0f * 66.0f * distance));
-    const float shoulder = acosf(shoulder_cosine);
-    const float phoenix_femur =
-        90.0f - (shoulder_line + shoulder) * kRadToDeg - 3.5f;
-    servo_degrees = right_side ? -phoenix_femur : phoenix_femur;
+    servo_degrees = (target_femur - home_femur) * kRadToDeg;
   } else {
-    const float knee_cosine = clampUnit(
-        (66.0f * 66.0f + 133.0f * 133.0f - distance * distance) /
-        (2.0f * 66.0f * 133.0f));
-    const float phoenix_tibia = acosf(knee_cosine) * kRadToDeg - 136.3f;
-    servo_degrees = right_side ? phoenix_tibia : -phoenix_tibia;
+    servo_degrees = (target_tibia - home_tibia) * kRadToDeg;
   }
 
-  float minimum = -100.0f;
-  float maximum = 100.0f;
-  if (joint == static_cast<uint8_t>(config::JointRole::Coxa)) {
-    if (leg != 5) {
-      minimum = -75.0f;
-      maximum = 75.0f;
-    }
-  } else if (joint == static_cast<uint8_t>(config::JointRole::Tibia)) {
-    minimum = right_side ? -102.0f : -67.0f;
-    maximum = right_side ? 67.0f : 102.0f;
-  }
+  const float minimum = -90.0f;
+  const float maximum = 90.0f;
   clamped = servo_degrees < minimum || servo_degrees > maximum;
   if (servo_degrees < minimum) servo_degrees = minimum;
   if (servo_degrees > maximum) servo_degrees = maximum;
@@ -184,9 +188,13 @@ void assertTimeSeriesParity(const ReferenceGait& gait,
                             const ReferenceCommand& command) {
   config::RobotConfig config;
   config::defaultRobotConfig(config);
+  config.gait.body_height_mm = 40;
+  config.gait.stride_len_mm = 2;
+  config.gait.step_height_mm = 5;
+  config.gait.duty_x255 = 159;
+  config.gait.speed_x255 = 128;
   gait::GaitPipeline pipeline(config);
   pipeline.setGait(gait.id);
-  pipeline.setParams(60, 50, 50, 159, 128);
   pipeline.setTwist(command.body_x, command.body_y, command.yaw);
 
   gait::PipelineOutput output;

@@ -95,14 +95,9 @@ void test_default_stand_uses_natural_joint_pose() {
   PipelineOutput out;
   pipe.update(20, out);
 
-  const uint16_t left_ticks[kJointsPerLeg] = {2048, 1610, 2944};
-  const uint16_t right_ticks[kJointsPerLeg] = {2048, 2486, 1152};
   for (uint8_t i = 0; i < out.count; ++i) {
     const PipelineJoint& joint = out.joints[i];
-    const bool right_side = joint.leg == 1 || joint.leg == 2 || joint.leg == 3;
-    const uint16_t expected =
-        right_side ? right_ticks[joint.joint] : left_ticks[joint.joint];
-    TEST_ASSERT_UINT16_WITHIN(2, expected, joint.tick);
+    TEST_ASSERT_UINT16_WITHIN(2, kServoCenterTick, joint.tick);
   }
 }
 
@@ -114,7 +109,7 @@ void test_seeded_goals_ramp_from_present_pose() {
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Stand);
   // Speed 0 -> slowest slew (600 ticks/s = 12 ticks per 20 ms cycle).
-  pipe.setParams(25, 50, 50, 128, 0);
+  pipe.setParams(40, 60, 30, 128, 0);
 
   // All servos start 400 ticks below center (robot slumped after torque-off).
   for (uint8_t index = 0; index < kNumServos; ++index) {
@@ -134,19 +129,21 @@ void test_seeded_goals_ramp_from_present_pose() {
   }
   TEST_ASSERT_TRUE(any_moving);
 
-  // The ramp converges to the Mark III horn-adjusted home pose.
+  // The ramp converges to the zero-centered CAD home pose.
   PipelineOutput out;
   for (int i = 0; i < 400; ++i) pipe.update(20, out);
   for (uint8_t i = 0; i < out.count; ++i) {
     const ServoConfig* servo = servoById(cfg, out.joints[i].id);
     TEST_ASSERT_NOT_NULL(servo);
-    const uint16_t neutral = static_cast<uint16_t>(
-        static_cast<int32_t>(kServoCenterTick) + servo->trim_ticks);
+    int32_t neutral = static_cast<int32_t>(kServoCenterTick) +
+              servo->trim_ticks;
+    if (neutral < servo->min_tick) neutral = servo->min_tick;
+    if (neutral > servo->max_tick) neutral = servo->max_tick;
     TEST_ASSERT_UINT16_WITHIN(2, neutral, out.joints[i].tick);
   }
 }
 
-// The emitted (leg, joint, id) triples match the Mark III physical servo map.
+// The emitted (leg, joint, id) triples match the physical servo map.
 void test_joint_ids_match_default_servo_map() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
@@ -529,9 +526,8 @@ void test_extreme_body_pose_is_reach_limited_not_unreachable() {
 
   PipelineOutput out;
   pipe.update(20, out);
-  // The Mark III 133 mm tibia keeps this valid body-pose envelope reachable
-  // without requiring the old short-leg model's radial correction.
-  TEST_ASSERT_FALSE(out.any_reach_limited);
+  // The controller clamps a valid command to the HexNav short-link workspace.
+  TEST_ASSERT_TRUE(out.any_reach_limited);
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 
@@ -544,7 +540,7 @@ void test_default_forward_walk_takes_real_steps() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
   pipe.setGait(GaitId::Tripod);
-  pipe.setParams(40, 60, 30, 128, 255);
+  pipe.setParams(40, 60, 30, 159, 255);
   pipe.setTwist(0.0f, 1.0f, 0.0f);  // full forward (+Y mechanical front)
 
   // Let the stance-bias / shape filters converge (~1 s).
@@ -569,10 +565,47 @@ void test_default_forward_walk_takes_real_steps() {
     }
   }
   for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
-    // Horizontal sweep: a healthy fraction of the 60 mm commanded stride.
-    TEST_ASSERT_TRUE(max_y[leg] - min_y[leg] >= 30.0f);
-    // Swing lift survives reach limiting (30 mm commanded).
+    // Horizontal sweep remains clearly visible after CAD workspace limiting.
+    TEST_ASSERT_TRUE(max_y[leg] - min_y[leg] >= 6.0f);
+    // Swing lift survives reach and calibrated joint limiting.
     TEST_ASSERT_TRUE(max_z[leg] - min_z[leg] >= 15.0f);
+  }
+}
+
+void test_full_rc_stride_uses_meaningful_coxa_range_on_every_leg() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Tripod);
+  pipe.setParams(40, config::kMaxGaitStrideMm, 30, 159, 128);
+  pipe.setTwist(0.0f, 1.0f, 0.0f);
+  dxl::ServoMap servo_map(cfg);
+
+  PipelineOutput output;
+  for (int step = 0; step < 100; ++step) pipe.update(10, output);
+
+  float minimum[kNumLegs];
+  float maximum[kNumLegs];
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    minimum[leg] = 1e9f;
+    maximum[leg] = -1e9f;
+  }
+  for (int step = 0; step < 160; ++step) {
+    pipe.update(10, output);
+    TEST_ASSERT_FALSE(output.any_unreachable);
+    for (uint8_t index = 0; index < output.count; ++index) {
+      const PipelineJoint& goal = output.joints[index];
+      if (goal.joint != static_cast<uint8_t>(JointRole::Coxa)) continue;
+      const float angle = servo_map.tickToAngle(goal.leg, goal.joint, goal.tick);
+      if (angle < minimum[goal.leg]) minimum[goal.leg] = angle;
+      if (angle > maximum[goal.leg]) maximum[goal.leg] = angle;
+    }
+  }
+
+  constexpr float kRadiansToDegrees = 180.0f / 3.14159265358979323846f;
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    const float excursion_degrees =
+        (maximum[leg] - minimum[leg]) * kRadiansToDegrees;
+    TEST_ASSERT_TRUE(excursion_degrees >= 3.0f);
   }
 }
 
@@ -628,6 +661,7 @@ int main(int, char**) {
   RUN_TEST(test_body_pose_neutral_restores_walk_path);
   RUN_TEST(test_extreme_body_pose_is_reach_limited_not_unreachable);
   RUN_TEST(test_default_forward_walk_takes_real_steps);
+  RUN_TEST(test_full_rc_stride_uses_meaningful_coxa_range_on_every_leg);
   RUN_TEST(test_body_pose_overlay_keeps_gait_stepping);
   return UNITY_END();
 }

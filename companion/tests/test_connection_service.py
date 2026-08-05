@@ -13,7 +13,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from hexapod_protocol import api, telemetry as tlm
+from hexapod_protocol import api, config as cfg, telemetry as tlm
 
 pytest.importorskip("PySide6")
 
@@ -81,6 +81,39 @@ def test_command_when_disconnected_emits_error(qtbot) -> None:
         service.clear_fault()
     (msg,) = blocker.args
     assert "not connected" in msg
+
+
+def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.config = cfg.default_robot_config()
+            self.angles = None
+
+        def read_config(self):
+            return self.config
+
+        def set_all_joint_targets(self, angles):
+            self.angles = list(angles)
+            return api.AllJointTargetResult(api.MAINT_TARGET_OK, 8, 18, 0)
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    with qtbot.waitSignal(service.joint_target_result, timeout=2000):
+        service.center_all_joints()
+
+    assert client.angles is not None and len(client.angles) == 18
+    servo_map = cfg.ServoMap(client.config)
+    for index, angle_cdeg in enumerate(client.angles):
+        leg = index // cfg.JOINTS_PER_LEG
+        joint = index % cfg.JOINTS_PER_LEG
+        command = servo_map.angle_to_tick(
+            leg, joint, angle_cdeg / 100.0 * cfg.DEG_TO_RAD
+        )
+        assert abs(command.tick - cfg.SERVO_CENTER_TICK) <= 1
+        assert not command.clamped_low and not command.clamped_high
 
 
 def test_gait_test_session_sets_up_and_unwinds_without_rc(qtbot, monkeypatch) -> None:

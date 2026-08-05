@@ -11,12 +11,12 @@ from models.pose_model import HexapodPoseModel, HOME_FOOT_Z_MM, HOME_RADIUS_MM
 
 # Home foot positions in body frame B (mm), mirror test_leg_ik.cpp kHomeFootB.
 HOME_FOOT_B = [
-    (-164.0, -224.0, -25.0),
-    (164.0, -224.0, -25.0),
-    (247.0, 0.0, -25.0),
-    (164.0, 224.0, -25.0),
-    (-164.0, 224.0, -25.0),
-    (-247.0, 0.0, -25.0),
+    (-155.4, -205.4, -40.05),
+    (155.4, -205.4, -40.05),
+    (196.8, 0.0, -40.05),
+    (155.4, 205.4, -40.05),
+    (-155.4, 205.4, -40.05),
+    (-196.8, 0.0, -40.05),
 ]
 
 
@@ -161,8 +161,8 @@ def test_out_of_range_indices_are_ignored() -> None:
 
 
 def test_home_constants_exposed() -> None:
-    assert HOME_RADIUS_MM == 147.0
-    assert HOME_FOOT_Z_MM == -25.0
+    assert HOME_RADIUS_MM == 127.0
+    assert HOME_FOOT_Z_MM == -44.55
 
 
 def test_calibrated_geometry_shifts_hip_lift() -> None:
@@ -173,7 +173,10 @@ def test_calibrated_geometry_shifts_hip_lift() -> None:
     m = HexapodPoseModel(config)
     for i, leg in enumerate(config.legs):
         hip = m.leg(i).hip
-        assert math.isclose(hip.z, leg.mount_z_dmm / 10.0 + 10.0, abs_tol=1e-6)
+        expected = (
+            leg.mount_z_dmm / 10.0 + config.geometry.coxa_lift_cmm / 100.0
+        )
+        assert math.isclose(hip.z, expected, abs_tol=1e-6)
 
 
 def test_zero_geometry_config_falls_back_to_nominals() -> None:

@@ -61,10 +61,10 @@ def test_joint_defaults_to_180_and_sends_relative_centidegrees(
         lambda leg, joint, angle: sent.append((leg, joint, angle)),
     )
 
-    assert page.joint_angle.minimum() == 106
-    assert page.joint_angle.maximum() == 254
+    assert page.joint_angle.minimum() == 90
+    assert page.joint_angle.maximum() == 270
     assert page.joint_angle.value() == 180
-    assert "1195–2901 ticks" in page.joint_limit_hint.text()
+    assert "1024–3072 ticks" in page.joint_limit_hint.text()
     page._send_joint_target()
     assert sent[-1] == (0, 0, 0)
 

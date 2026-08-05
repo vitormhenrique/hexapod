@@ -15,8 +15,8 @@ using namespace config;
 namespace {
 
 constexpr float kHomeXy[kNumLegs][2] = {
-  {-164.0f, -224.0f}, {164.0f, -224.0f}, {247.0f, 0.0f},
-  {164.0f, 224.0f},   {-164.0f, 224.0f}, {-247.0f, 0.0f},
+  {-155.4f, -205.4f}, {155.4f, -205.4f}, {196.8f, 0.0f},
+  {155.4f, 205.4f},   {-155.4f, 205.4f}, {-196.8f, 0.0f},
 };
 
 GaitDefaults defaultGait() {
@@ -308,7 +308,7 @@ void test_rc_body_height_pot_neutral_at_center() {
   TEST_ASSERT_TRUE(rcBodyHeightMm(0.75f) > kRcBodyHeightNeutralMm);
 }
 
-// Mark III height changes keep stance X/Y fixed and vary only foot Z. Every
+// Height changes keep stance X/Y fixed and vary only foot Z. Every
 // point in the configured Pot2 envelope must remain inside the safe annulus.
 void test_rc_body_height_envelope_keeps_feet_reachable() {
   RobotConfig cfg;
@@ -357,9 +357,9 @@ void test_low_command_restart_scales_swing_lift() {
       peak_lift = lift;
       phase_at_peak = ge.phase();
     }
-    if (peak_lift > 49.0f) break;
+    if (peak_lift > 29.0f) break;
   }
-  TEST_ASSERT_TRUE(peak_lift > 40.0f);
+  TEST_ASSERT_TRUE(peak_lift > 25.0f);
 
   command.vy = 0.0f;
   ge.setTwist(command);

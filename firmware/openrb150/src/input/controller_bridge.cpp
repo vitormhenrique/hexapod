@@ -191,7 +191,7 @@ void ControllerBridge::reset() {
   for (uint8_t i = 0; i < 2; ++i) {
     enc_last_[i] = 0;
     enc_seen_[i] = false;
-    enc_accum_[i] = 0.5f;  // start shape trims at mid-scale
+    enc_accum_[i] = i == 0 ? 1.0f : 0.5f;  // full stride, medium lift
   }
   for (uint8_t i = 0; i < kNumEdgeSlots; ++i) {
     edge_prev_[i] = false;

@@ -85,8 +85,9 @@ while the gait continues, with all targets clamped to the IK envelope.
 
 Encoders are **continuous** and have no absolute zero, so the bridge integrates
 their wrapped delta (shortest path across the 0↔2047 boundary) into a value
-clamped to 0..1, seeded at 0.5 (mid) on reset. This makes ENC1/ENC2 act like
-infinite-turn trim knobs for stride and step height.
+clamped to 0..1. On reset, ENC1 starts at 1.0 (the full safe `80 mm` stride)
+and ENC2 starts at 0.5 (`25 mm` of the `50 mm` lift range). A 128-count change
+covers the full 0..1 adjustment range.
 
 ---
 
@@ -130,7 +131,7 @@ implemented by the control-task trick engine in `oha.5`.
 | --- | --- | --- |
 | `BTN_1` | `StandUp` | Stand up from rest |
 | `BTN_2` | `SitDown` | Sit/rest down |
-| `BTN_3` | `Wave` | Lift a front leg and wave |
+| `BTN_3` | `Wave` | Rock the standing body side to side |
 | `BTN_4` | `CrouchToggle` | Toggle crouch height |
 | `NAV2 Up` | `Twirl` | Rotate body 360° in place |
 | `NAV2 Down` | `Stretch` | Full-body stretch sequence |

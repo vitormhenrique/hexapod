@@ -15,19 +15,19 @@ using namespace config;
 
 namespace {
 
-// Mark III link lengths (mm), Phantom_Phoenix/Hex_Cfg.h.
-constexpr float kL1 = 52.0f;
-constexpr float kL2 = 66.0f;
-constexpr float kL3 = 133.0f;
+// HexNav link lengths (mm), measured from CAD/URDF.
+constexpr float kL1 = 56.08f;
+constexpr float kL2 = 66.51f;
+constexpr float kL3 = 24.86f;
 
 // Home foot positions in body-centered frame B (mm), IK ref section 13.
 struct Vec3 {
   float x, y, z;
 };
 constexpr Vec3 kHomeFootB[kNumLegs] = {
-  {-164.0f, -224.0f, -25.0f}, {164.0f, -224.0f, -25.0f},
-  {247.0f, 0.0f, -25.0f},     {164.0f, 224.0f, -25.0f},
-  {-164.0f, 224.0f, -25.0f},  {-247.0f, 0.0f, -25.0f},
+  {-155.4f, -205.4f, -40.05f}, {155.4f, -205.4f, -40.05f},
+  {196.8f, 0.0f, -40.05f},     {155.4f, 205.4f, -40.05f},
+  {-155.4f, 205.4f, -40.05f},  {-196.8f, 0.0f, -40.05f},
 };
 
 }  // namespace
@@ -195,7 +195,7 @@ void test_body_to_coxa_maps_home_to_radial() {
     float cx, cy, cz;
     bk.footBodyToCoxa(leg, kHomeFootB[leg].x, kHomeFootB[leg].y,
                       kHomeFootB[leg].z, cx, cy, cz);
-    // Every leg's home foot lands on the coxa +X radial axis at ~147 mm.
+    // Every leg's home foot lands on the coxa +X radial axis at 127 mm.
     TEST_ASSERT_FLOAT_WITHIN(0.5f, kHomeRadiusMm, cx);
     TEST_ASSERT_FLOAT_WITHIN(0.5f, 0.0f, cy);
     TEST_ASSERT_FLOAT_WITHIN(0.2f, kHomeFootZMm, cz);

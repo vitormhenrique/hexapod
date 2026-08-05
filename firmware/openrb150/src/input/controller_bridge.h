@@ -212,7 +212,7 @@ constexpr float kMaxRotRad = 0.4363f;  // ~25 deg
 }  // namespace poselim
 
 // Encoder sensitivity: raw counts that sweep a shape-trim from 0 to 1.
-constexpr int32_t kEncoderCountsFullScale = 1024;
+constexpr int32_t kEncoderCountsFullScale = 128;
 // Operator pose-trim step applied per nav press, and its clamp.
 constexpr float kTrimStepRad = 0.0174533f;  // 1 deg / press
 constexpr float kTrimMaxRad = poselim::kMaxRotRad;

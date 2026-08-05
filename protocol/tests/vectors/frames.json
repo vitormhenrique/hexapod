@@ -635,20 +635,20 @@
   },
   "config": {
     "payload_size": 485,
-    "default_payload": "06004865784e6176000000000000000000005014c819f4336c393cf60000a8fd50fb0000bc34580250fb000044cbe80300000000d8dc5802b00400006ceea8fdb0040000941118fc000000002823070000010000ab04550b0900010175fe8e03720c0b0002010e040605890c080100ff0000ab04550b0a0101ff8b018e03720c0c0102fff2fb7703fa0a0e0200ff0000ab04550b100201ff8b018e03720c120202fff2fb7703fa0a020300ff0000ab04550b040301ff8b018e03720c060302fff2fb7703fa0a130400010000ab04550b0304010175fe8e03720c050402010e040605890c0d05000100008e03720c0f05010175fe8e03720c110502010e040605890c3c00320032009f8000010018fc0000e803000d003c000000020018fc0000e803000d003c000000030018fc0000e803000d003c000000040018fc0000e803000d003c000000050100000000e80300000078000000060100000000e80300000078000000070200000000ff0700000000000000080200000000ff0700000000000000e803e803e803e803b0040807e803dc05dc05d00714001e003c00f40100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000",
-    "default_payload_crc": 40784,
-    "schema_version": 6,
+    "default_payload": "08004865784e617600000000000000000000e815fb19b6099c3199ee340870fd7cfb5bffbc3490027cfb5bff44cbba0200005bffd8dc900284045bff6cee70fd84045bff941146fd00005bff28230100000100000004000c0200010100000004000c0300020100000004000c0401000100000004000c0501010100000004000c0601020100000004000c0702000100000004000c0802010100000004000c0902020100000004000c0a03000100000004000c0b03010100000004000c0c03020100000004000c0d04000100000004000c0e04010100000004000c0f04020100000004000c1005000100000004000c1105010100000004000c1205020100000004000c28003c001e009f8000010018fc0000e803000d003c000000020018fc0000e803000d003c000000030018fc0000e803000d003c000000040018fc0000e803000d003c000000050100000000e80300000078000000060100000000e80300000078000000070200000000ff0700000000000000080200000000ff0700000000000000e803e803e803e803b0040807e803dc05dc05d00714001e003c00f40100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000004000000",
+    "default_payload_crc": 16603,
+    "schema_version": 8,
     "robot_name": "HexNav",
     "feature_defaults": 4,
     "links": {
-      "coxa_cmm": 5200,
-      "femur_cmm": 6600,
-      "tibia_cmm": 13300
+      "coxa_cmm": 5608,
+      "femur_cmm": 6651,
+      "tibia_cmm": 2486
     },
     "gait": {
-      "body_height_mm": 60,
-      "stride_len_mm": 50,
-      "step_height_mm": 50,
+      "body_height_mm": 40,
+      "stride_len_mm": 60,
+      "step_height_mm": 30,
       "duty_x255": 159,
       "speed_x255": 128,
       "gait": 0
@@ -656,53 +656,53 @@
     "servos": [
       {
         "index": 0,
-        "id": 7,
+        "id": 1,
         "leg": 0,
         "joint": 0,
         "sign": 1,
         "trim_ticks": 0,
-        "min_tick": 1195,
-        "max_tick": 2901
+        "min_tick": 1024,
+        "max_tick": 3072
       },
       {
         "index": 1,
-        "id": 9,
+        "id": 2,
         "leg": 0,
         "joint": 1,
         "sign": 1,
-        "trim_ticks": -395,
-        "min_tick": 910,
-        "max_tick": 3186
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
       },
       {
         "index": 2,
-        "id": 11,
+        "id": 3,
         "leg": 0,
         "joint": 2,
         "sign": 1,
-        "trim_ticks": 1038,
-        "min_tick": 1286,
-        "max_tick": 3209
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
       },
       {
         "index": 15,
-        "id": 13,
+        "id": 16,
         "leg": 5,
         "joint": 0,
         "sign": 1,
         "trim_ticks": 0,
-        "min_tick": 910,
-        "max_tick": 3186
+        "min_tick": 1024,
+        "max_tick": 3072
       },
       {
         "index": 17,
-        "id": 17,
+        "id": 18,
         "leg": 5,
         "joint": 2,
         "sign": 1,
-        "trim_ticks": 1038,
-        "min_tick": 1286,
-        "max_tick": 3209
+        "trim_ticks": 0,
+        "min_tick": 1024,
+        "max_tick": 3072
       }
     ],
     "tick_to_angle": [
@@ -717,29 +717,29 @@
         "leg": 0,
         "joint": 1,
         "tick": 2389,
-        "angle_rad": 1.1290098598838318,
-        "angle_deg": 64.6875
+        "angle_rad": 0.5230874486690037,
+        "angle_deg": 29.970703125000004
       },
       {
         "leg": 1,
         "joint": 0,
         "tick": 2048,
-        "angle_rad": -0.0,
-        "angle_deg": -0.0
+        "angle_rad": 0.0,
+        "angle_deg": 0.0
       },
       {
         "leg": 1,
         "joint": 2,
         "tick": 1024,
-        "angle_rad": -0.021475731030398976,
-        "angle_deg": -1.23046875
+        "angle_rad": -1.5707963267948966,
+        "angle_deg": -90.0
       },
       {
         "leg": 4,
         "joint": 1,
         "tick": 3072,
-        "angle_rad": 2.176718738009725,
-        "angle_deg": 124.71679687500001
+        "angle_rad": 1.5707963267948966,
+        "angle_deg": 90.0
       }
     ],
     "angle_to_tick": [
@@ -755,7 +755,7 @@
         "leg": 0,
         "joint": 1,
         "angle_deg": 30.0,
-        "tick": 1994,
+        "tick": 2389,
         "clamped_low": false,
         "clamped_high": false
       },
@@ -763,7 +763,7 @@
         "leg": 1,
         "joint": 0,
         "angle_deg": -45.0,
-        "tick": 2560,
+        "tick": 1536,
         "clamped_low": false,
         "clamped_high": false
       },
@@ -771,15 +771,15 @@
         "leg": 1,
         "joint": 2,
         "angle_deg": 200.0,
-        "tick": 887,
-        "clamped_low": true,
-        "clamped_high": false
+        "tick": 3072,
+        "clamped_low": false,
+        "clamped_high": true
       },
       {
         "leg": 4,
         "joint": 1,
         "angle_deg": -200.0,
-        "tick": 910,
+        "tick": 1024,
         "clamped_low": true,
         "clamped_high": false
       }

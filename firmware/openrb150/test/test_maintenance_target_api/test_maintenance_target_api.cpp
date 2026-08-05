@@ -258,9 +258,9 @@ void test_all_joints_stores_atomically_and_bumps_seq_once() {
   api_obj.setConfig(&cfg);
   api_obj.setLiveState(kMacMaintenance, true);
 
-  // 18 angles, leg-major (leg*3 + joint). Use a small in-travel value so the
-  // asymmetric Mark III tibia limits remain clear and the clamp mask is zero.
-  const int16_t cdeg = 300;  // 3.00 deg
+  // 18 angles, leg-major (leg*3 + joint). -30 degrees lies inside every
+  // asymmetric calibrated window, including the measured right-tibia floor.
+  const int16_t cdeg = -3000;
   const float ang = cdeg * (3.14159265358979323846f / 180.0f / 100.0f);
   dxl::ServoMap sm(cfg);
 

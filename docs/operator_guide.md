@@ -23,7 +23,7 @@ first-line troubleshooting. Read it before connecting DYNAMIXEL power.
 | Connection | Required arrangement |
 | --- | --- |
 | DYNAMIXEL TTL bus | Connect the servo data bus to the OpenRB-150 `Serial1` DYNAMIXEL TTL bus. The firmware controls the board power FET, while the servo supply must be the external fused 12 V distribution described above. |
-| Servo IDs | The default map follows Mark III wiring and uses IDs 2 through 19 with ID 1 unused. Confirm the actual map before motion; see the [canonical map](ros2_controller_interface_mapping.md#canonical-joint-map). |
+| Servo IDs | The assembled robot uses verified sequential IDs 1 through 18 in logical leg/joint order. Confirm the active map before motion; see the [canonical map](ros2_controller_interface_mapping.md#canonical-joint-map). |
 | RC receiver | Connect the ExpressLRS CRSF UART to `Serial3`: D14 TX / D13 RX, crossed as a normal UART link, at 420000 baud. Keep the receiver and controller logic at 3.3 V. |
 | Foot sensors | Root I2C has the TCA9548A mux at `0x70` and the 24LC32 config EEPROM at `0x50`. Put one Robotic Finger Sensor v2 on each mux channel 0 through 5; channels 6 and 7 are reserved. Each board exposes VCNL4040 proximity at `0x60` and LPS25HB pressure at `0x5C`. |
 | Host connection | Use the OpenRB-150 USB CDC port directly for a Mac companion or Jetson bridge. When the Jetson owns USB, one Mac may use its authenticated TCP relay on a trusted network; see the [Jetson relay guide](../jetson/README.md#mac-tcp-relay). Only one high-authority USB client may control motion at once. |
@@ -88,6 +88,82 @@ the OpenRB-150; a successful `status` response is the required check.
 If an E-stop or fault occurs, remove the cause before requesting recovery. Do
 not treat `CLEAR_FAULT` as a way to override an active hardware or RC safety
 condition.
+
+## Complete RC Control Map
+
+The custom ESP32-S3 controller sends these defaults. Feature switch states are
+requests; firmware capability, authority, and safety checks remain final.
+
+| Physical control | Position / movement | Robot action |
+| --- | --- | --- |
+| Left gimbal X | Left / right | Strafe left / right in every mode |
+| Left gimbal Y | Forward / back | Walk forward / backward in every mode |
+| Right gimbal X | `SW_E` UP | Rotate robot left / right while walking |
+| Right gimbal Y | `SW_E` UP | Unassigned |
+| Right gimbal X/Y | `SW_E` CENTER | Shift body Y/X while left gimbal keeps walking |
+| Right gimbal X/Y | `SW_E` DOWN | Body roll/pitch while left gimbal keeps walking |
+| Pot 1 | 0..100% | Gait cadence and torque-enable recovery speed |
+| Pot 2 | 0..100% | Body height, `25..120 mm`; center is `60 mm` |
+| Encoder 1 | Rotate | Stride `0..80 mm`; resets to full `80 mm`; 128 counts = full range |
+| Encoder 2 | Rotate | Step lift `0..50 mm`; resets to `25 mm`; 128 counts = full range |
+| `SW_A` | ON | Request arm; ignored while kill/failsafe is active |
+| `SW_B` | ON | Immediate E-stop/kill and disarm request |
+| `SW_C` | ON | Request foot-contact detection |
+| `SW_D` | ON | Request terrain leveling |
+| `SW_E` | UP / CENTER / DOWN | Walk / translate body / rotate body mode |
+| `SW_F` | UP / CENTER / DOWN | Wave / ripple / tripod gait; latched in Walk mode |
+| `SW_G` | ON | Request torque-off passive-pose streaming |
+| `SW_H` | ON | Hand motion authority to the USB host or Jetson |
+| `BTN_1` | Press | Stand-up choreography |
+| `BTN_2` | Press | Sit-down choreography |
+| `BTN_3` | Press | Standing body-rock wave choreography |
+| `BTN_4` | Press | Toggle crouched/tall stance |
+| `NAV1` Up / Down | Press | Add / subtract 1 degree pitch trim |
+| `NAV1` Left / Right | Press | Add left / right 1 degree roll trim |
+| `NAV1` Center | Press | Reset roll and pitch trim |
+| `NAV2` Up | Press | Twirl in place |
+| `NAV2` Down | Press | Stretch/push-up sequence |
+| `NAV2` Left | Press | Hold lean/look pose until cancelled |
+| `NAV2` Right | Press | Unassigned |
+| `NAV2` Center | Press | Loop dance until stick input cancels it |
+
+Buttons and nav actions fire once on the rising edge with a 150 ms refractory
+window. Any active trick is cancelled when the operator moves a gait/body
+stick. Centered walking sticks park all feet at home without advancing phase.
+The detailed CRSF channel and TX16S-direct mappings are in the
+[controller bridge reference](controller_bridge.md).
+
+## OpenRB User LED Status
+
+The USER LED is a nonblocking status indicator. Short flashes are 100 ms;
+count the flashes before the longer pause.
+
+| LED pattern | Meaning |
+| --- | --- |
+| Fast 100 ms on / 100 ms off | Boot/config load, or arming checks complete and transitioning |
+| One short flash every 2 seconds | Healthy and disarmed |
+| Two short flashes, pause | Arming: discovering configured servo IDs |
+| Three short flashes, pause | Arming: IDs found, waiting for all present-position reads |
+| Solid on | Armed/ready/manual/contact/Jetson motion state |
+| Two short flashes every 2 seconds | Mac maintenance lock active |
+| 500 ms on / 500 ms off | Passive pose stream, torque off |
+| 1..7 short flashes every 3 seconds | Fault code shown below |
+
+Fault pulse codes:
+
+| Pulses | Fault |
+| ---: | --- |
+| 1 | RC kill switch |
+| 2 | Host E-stop |
+| 3 | RC link lost/failsafe |
+| 4 | Battery low |
+| 5 | Watchdog/task stall |
+| 6 | DYNAMIXEL hardware/bus fault |
+| 7 | Arming timeout, usually incomplete servo ID or pose coverage |
+
+After a seven-flash arming timeout, release `SW_A`, inspect DXL power/wiring and
+IDs, clear the soft fault, then re-arm. Do not repeatedly arm against an
+unresolved discovery failure.
 
 ## Config and Calibration
 

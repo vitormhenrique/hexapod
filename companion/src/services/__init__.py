@@ -14,7 +14,7 @@ from typing import Optional
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
-from hexapod_protocol import api, telemetry as tlm
+from hexapod_protocol import api, config as cfg, telemetry as tlm
 from hexapod_protocol.framing import VERSION_MAJOR, VERSION_MINOR, version_compatible
 
 from diagnostics import print_exception
@@ -1386,15 +1386,15 @@ class ConnectionService(QObject):
             "scan", lambda c: c.dxl_run(api.build_dxl_scan(1, 30), timeout=8.0)
         )
 
-    def center_all_joints(self, angle_cdeg: int = 0) -> None:
+    def center_all_joints(self) -> None:
         """Send every (leg, joint) target in ONE atomic batch command.
 
-        Angle 0 centidegrees maps to the servo center tick (2048 = 180 deg on
-        the horn). Honored only in MacMaintenance with the lock held. Because
-        all 18 joints are stored in a single firmware handler call, the control
-        loop rebuilds the whole goal frame in one cycle and every servo actuates
-        together in a single Sync-Write instead of cascading joint by joint.
-        Each target is clamped by the configured servo travel in firmware.
+        Read the active servo map and invert raw tick 2048 for each joint. A
+        The CAD default maps zero relative angle and raw tick 2048 to the same
+        pose, while calibrated configs may carry per-servo trims/signs. The 18
+        mapped angles are sent atomically so all servos move in one Sync-Write.
+        Firmware still clamps every target to configured travel and requires
+        MacMaintenance + lock.
         """
         client = self._client
         if client is None:
@@ -1402,7 +1402,20 @@ class ConnectionService(QObject):
             return
 
         def worker() -> None:
-            res = client.set_all_joint_targets([angle_cdeg] * 18)
+            robot_config = client.read_config()
+            if robot_config is None:
+                self.event.emit("error", "center all: failed to read active config")
+                self.joint_target_result.emit(None)
+                return
+            servo_map = cfg.ServoMap(robot_config)
+            angles_cdeg: list[int] = []
+            for leg in range(cfg.NUM_LEGS):
+                for joint in range(cfg.JOINTS_PER_LEG):
+                    angle = servo_map.tick_to_angle(
+                        leg, joint, cfg.SERVO_CENTER_TICK
+                    )
+                    angles_cdeg.append(round(angle * cfg.RAD_TO_DEG * 100.0))
+            res = client.set_all_joint_targets(angles_cdeg)
             if res is None:
                 self.event.emit("error", "center all: rejected or timed out")
             elif res.ok:

@@ -27,14 +27,14 @@ void test_lookup_by_slot_matches_wiring() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  // Mark III wiring normalized to firmware leg order LR, RR, RM, RF, LF, LM.
+  // Verified assembled-bus wiring is sequential in logical slot order.
   TEST_ASSERT_EQUAL_PTR(nullptr, map.servoFor(99, 0));
   const ServoConfig* leg1_coxa = map.servoFor(0, 0);
   TEST_ASSERT_NOT_NULL(leg1_coxa);
-  TEST_ASSERT_EQUAL_UINT8(7, leg1_coxa->id);
-  TEST_ASSERT_EQUAL_UINT8(9, map.servoFor(0, 1)->id);
-  TEST_ASSERT_EQUAL_UINT8(11, map.servoFor(0, 2)->id);
-  TEST_ASSERT_EQUAL_UINT8(17, map.servoFor(5, 2)->id);
+  TEST_ASSERT_EQUAL_UINT8(1, leg1_coxa->id);
+  TEST_ASSERT_EQUAL_UINT8(2, map.servoFor(0, 1)->id);
+  TEST_ASSERT_EQUAL_UINT8(3, map.servoFor(0, 2)->id);
+  TEST_ASSERT_EQUAL_UINT8(18, map.servoFor(5, 2)->id);
 }
 
 void test_lookup_by_id() {
@@ -42,10 +42,10 @@ void test_lookup_by_id() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  const ServoConfig* s = map.servoForId(11);  // left-rear tibia
+  const ServoConfig* s = map.servoForId(11);  // right-front femur
   TEST_ASSERT_NOT_NULL(s);
-  TEST_ASSERT_EQUAL_UINT8(0, s->leg);
-  TEST_ASSERT_EQUAL_UINT8(2, s->joint);
+  TEST_ASSERT_EQUAL_UINT8(3, s->leg);
+  TEST_ASSERT_EQUAL_UINT8(1, s->joint);
   TEST_ASSERT_EQUAL_PTR(nullptr, map.servoForId(200));
 }
 
@@ -66,12 +66,13 @@ void test_positive_angle_applies_sign() {
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
 
-  // +45 deg. Mark III mirrors the right side at the servo output.
+  // +45 deg. The CAD default uses the same positive direction on every slot;
+  // per-servo installation calibration can still override sign later.
   const float angle = 45.0f * kDegToRad;
   JointCommand left = map.angleToTick(0, 0, angle);
   JointCommand right = map.angleToTick(1, 0, angle);
   assertTickNear(kServoCenterTick + 512, left.tick);
-  assertTickNear(kServoCenterTick - 512, right.tick);
+  assertTickNear(kServoCenterTick + 512, right.tick);
   TEST_ASSERT_FALSE(left.clamped_high);
   TEST_ASSERT_FALSE(right.clamped_high);
 }
@@ -89,23 +90,23 @@ void test_trim_offsets_center() {
 void test_clamp_high_reported() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
-  // Left-rear coxa uses the Mark III +/-75 degree travel window.
+  // CAD default software travel is +/-90 degrees.
   ServoMap map(cfg);
   JointCommand c = map.angleToTick(0, 0, 120.0f * kDegToRad);
   TEST_ASSERT_TRUE(c.clamped_high);
   TEST_ASSERT_FALSE(c.clamped_low);
-  TEST_ASSERT_EQUAL_UINT16(2901, c.tick);
+  TEST_ASSERT_EQUAL_UINT16(3072, c.tick);
 }
 
 void test_clamp_low_reported() {
   RobotConfig cfg;
   defaultRobotConfig(cfg);
   ServoMap map(cfg);
-  // Left-rear coxa, -120 deg => below the -75 degree floor.
+  // Left-rear coxa, -120 deg => below the -90 degree floor.
   JointCommand c = map.angleToTick(0, 0, -120.0f * kDegToRad);
   TEST_ASSERT_TRUE(c.clamped_low);
   TEST_ASSERT_FALSE(c.clamped_high);
-  TEST_ASSERT_EQUAL_UINT16(1195, c.tick);
+  TEST_ASSERT_EQUAL_UINT16(1024, c.tick);
 }
 
 void test_unmapped_slot() {

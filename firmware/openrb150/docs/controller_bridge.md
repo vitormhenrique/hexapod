@@ -71,8 +71,9 @@ the current filtered output when switching modes. Raw diagnostic bypass is
 rejected unless the caller has established that the robot is disarmed. Gait and
 control-mode three-position switches require a stable 40 ms position before
 changing; physical E-stop remains immediate. Valid schema-v3/v4/v5 EEPROM
-payloads migrate in RAM to schema v6 with the Mark III motion profile; an
-explicit config commit persists the migration.
+payloads migrate to the Mark III motion profile; schema-v6 payloads retain
+their logical-slot calibration while schema v7 restores verified IDs 1..18.
+An explicit config commit persists the migration.
 
 ### Pots & encoders (live shape parameters, all modes)
 
@@ -87,7 +88,9 @@ These are read in **every** mode and continuously shape the gait, normalised to
 | ENC 2 | CH8 | relative trim | **Step height** / foot clearance (`step_height`) |
 
 Encoders integrate their relative delta into a 0..1 trim
-(`kEncoderCountsFullScale = 1024` counts = full sweep); pots are absolute.
+(`kEncoderCountsFullScale = 128` counts = full sweep); pots are absolute.
+ENC1 resets to 1.0 (`80 mm` full safe stride), while ENC2 resets to 0.5
+(`25 mm` lift from the `50 mm` range).
 POT 1 controls gait cadence and the torque-enable goal recovery slew. It no
 longer controls body-twist acceleration: the central body-command shaper owns
 that rate contract so an operator speed change cannot silently change braking

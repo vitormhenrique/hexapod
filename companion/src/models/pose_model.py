@@ -25,9 +25,9 @@ from hexapod_protocol import telemetry as tlm
 # persisted BodyGeometry block (firmware lmt.11). Mirror gait::kCoxaLiftMm and
 # gait::kHomeRadiusMm / kHomeFootZMm. All-zero joint angles -> the home foot in
 # the coxa frame.
-COXA_LIFT_MM = 0.0
-HOME_RADIUS_MM = 147.0
-HOME_FOOT_Z_MM = -25.0
+COXA_LIFT_MM = 21.0
+HOME_RADIUS_MM = 127.0
+HOME_FOOT_Z_MM = -44.55
 
 _HALF_PI = math.pi / 2.0
 
