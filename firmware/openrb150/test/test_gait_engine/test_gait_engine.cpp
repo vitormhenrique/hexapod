@@ -337,6 +337,44 @@ void test_rc_body_height_envelope_keeps_feet_reachable() {
   }
 }
 
+// Pot2 fully down is the measured full-crouch pose: belly near the ground with
+// the stance X/Y unchanged. Pin the joint commands it produces (the operator
+// reads these on the Joint Matrix page as 180 + deg) and prove every joint
+// still fits inside the configured servo travel, so lowering the envelope can
+// never silently start clamping a leg.
+void test_rc_body_height_minimum_is_the_measured_crouch() {
+  RobotConfig cfg;
+  defaultRobotConfig(cfg);
+  BodyKinematics bk(cfg);
+
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, kRcBodyHeightMinMm, rcBodyHeightMm(0.0f));
+
+  GaitEngine ge;
+  GaitDefaults d = defaultGait();
+  d.gait = static_cast<uint8_t>(GaitId::Stand);
+  d.body_height_mm = static_cast<uint16_t>(kRcBodyHeightMinMm + 0.5f);
+  ge.configure(d);
+  GaitOutput out;
+  ge.update(20, out);
+
+  constexpr float kRadToDeg = 57.2957795f;
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    bool reach_limited = false;
+    const IkResult r = bk.solveBodyLimited(leg, out.feet[leg].x_mm,
+                                           out.feet[leg].y_mm,
+                                           out.feet[leg].z_mm, reach_limited);
+    TEST_ASSERT_TRUE(r.reachable);
+    TEST_ASSERT_FALSE(reach_limited);
+    // Joint Matrix reads 180 + these: femur ~240 deg, tibia ~128 deg.
+    TEST_ASSERT_FLOAT_WITHIN(2.0f, 0.0f, r.coxa * kRadToDeg);
+    TEST_ASSERT_FLOAT_WITHIN(2.0f, 60.0f, r.femur * kRadToDeg);
+    TEST_ASSERT_FLOAT_WITHIN(2.0f, -52.0f, r.tibia * kRadToDeg);
+    // Configured travel is +/-90 deg about the 2048 centre; stay inside it.
+    TEST_ASSERT_TRUE(fabsf(r.femur * kRadToDeg) < 90.0f);
+    TEST_ASSERT_TRUE(fabsf(r.tibia * kRadToDeg) < 90.0f);
+  }
+}
+
 // Swing clearance is a gait parameter, not a function of stick deflection: a
 // barely-above-deadband command must still lift swing feet by the full
 // configured step height so slow walking never drags feet.
@@ -424,6 +462,7 @@ int main(int, char**) {
   RUN_TEST(test_centering_shaped_command_parks_phase);
   RUN_TEST(test_rc_body_height_pot_neutral_at_center);
   RUN_TEST(test_rc_body_height_envelope_keeps_feet_reachable);
+  RUN_TEST(test_rc_body_height_minimum_is_the_measured_crouch);
   RUN_TEST(test_low_command_keeps_full_swing_clearance);
   RUN_TEST(test_all_gait_targets_are_ik_reachable);
   RUN_TEST(test_phase_wraps_and_advances);

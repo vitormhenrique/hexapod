@@ -45,6 +45,7 @@
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
 #include "../safety/command_arbiter.h"
+#include "../safety/error_journal.h"
 #include "../safety/fault_capture.h"
 #include "../safety/state_machine.h"
 #include "../safety/system_state.h"
@@ -405,6 +406,13 @@ volatile bool g_dxlHardFault = false;
 // CRSF runs at 420000 baud on the OpenRB-150 D14 TX / D13 RX UART (Serial3).
 constexpr uint32_t kCrsfBaud = 420000;
 constexpr uint32_t kCrsfStatusPeriodMs = 200;    // 5 Hz
+// While the operator is editing gait parameters from the handset the status
+// frame is the feedback loop for the edit, so it is sent as fast as the RC
+// cycle allows. rcTask still emits at most one telemetry frame per 10 ms cycle
+// and still checks UART TX capacity first, so this can never starve RC parsing.
+constexpr uint32_t kCrsfStatusBoostPeriodMs = 50;  // 20 Hz
+// How long a boost lasts after the last gait-tune edit.
+constexpr uint32_t kCrsfStatusBoostHoldMs = 3000;
 constexpr uint32_t kCrsfAttitudePeriodMs = 100;  // 10 Hz
 constexpr uint32_t kCrsfBatteryPeriodMs = 500;   // 2 Hz
 constexpr uint32_t kImuFreshMs = 250;
@@ -412,6 +420,22 @@ constexpr uint32_t kImuFreshMs = 250;
 // controlTask publishes this complete operator-facing snapshot; rcTask copies
 // it atomically before adding i2cTask's IMU status and serializing a frame.
 crsf::telemetry::HexapodStatus g_radioStatus;
+// Set by controlTask while the handset gait-tune editor is engaged so rcTask
+// raises the status-frame rate for the duration of the edit session.
+volatile bool g_radioStatusBoost = false;
+
+// Deduplicated firmware error journal (hexapod_src error reporting). Producers
+// live in several tasks, so every access is wrapped in a short critical section
+// by noteError()/takeError(); note() is bounded to a 12-entry table scan.
+safety::ErrorJournal g_errorJournal;
+
+void noteError(safety::ErrorCode code, uint8_t detail,
+               safety::ErrorSeverity severity, uint32_t now_ms) {
+  taskENTER_CRITICAL();
+  g_errorJournal.note(code, detail, severity, now_ms);
+  taskEXIT_CRITICAL();
+}
+
 
 // Single owner of the root I2C bus (SERCOM0): TCA9548A mux, 24LC32 EEPROM, and the
 // muxed foot sensors. Only i2cTask touches this. Topology is the boot-scan
@@ -512,6 +536,17 @@ class TaskConfigPersistence : public config::ConfigPersistence {
 
 TaskConfigPersistence g_configPersist;
 config::ConfigApi g_configApi(g_configPersist);
+
+// Handset "save gait settings" hand-off. controlTask decides *whether* a save
+// is allowed and stages the values; apiTask (the sole ConfigApi owner) runs the
+// transaction. Guarded by short critical sections; the sequence comparison in
+// controlTask makes the hand-off exactly-once.
+config::GaitDefaults g_gaitSavePending;
+volatile bool g_gaitSaveRequested = false;
+uint32_t g_gaitSaveHandledSeq = 0;
+// Battery level that starts warning the operator on the downlink. Above the
+// safety FSM's cut-out, so it is advisory rather than a fault.
+constexpr uint16_t kBatteryWarnMv = 10200;
 
 // The portable controller owns algorithmic state. The snapshots below belong
 // to the FreeRTOS adapter and stay static so the 384-word control-task stack
@@ -1096,14 +1131,13 @@ void deriveRcStatus(const controller::ControllerCommand& cc,
     }
     rc.last_frame_ms = now_ms;
   }
-  rc.armed = cc.arm_request;       // SW_A (and not failsafe; bridge clears it)
-  // Kill requires an RC system to have existed: the bridge's failsafe hold
+  rc.armed = cc.arm_request;       // SW_A (and not failsafe; bridge clears it)  // Kill requires an RC system to have existed: the bridge's failsafe hold
   // synthesises estop when no receiver has ever been seen, which must not
   // assert a kill that locks the arbiter's maintenance lock and the FSM out
   // of Disarmed on an RC-less bench (AGENTS.md mode 4). ever_seen latches, so
   // a link that drops mid-operation still kills.
   rc.kill = cc.estop && cc.ever_seen;
-  rc.gait_index = cc.gait_index;   // SW_F 3-pos
+  rc.gait_index = cc.gait_index;   // SW_E 3-pos (wave / ripple / tripod)
   rc.autonomy = cc.host_authority; // SW_H grants host/Jetson authority
   rc.failsafe = cc.failsafe;
   rc.ever_seen = cc.ever_seen;
@@ -1116,9 +1150,9 @@ uint8_t fractionToByte(float value) {
 }
 
 uint8_t rcGaitForTelemetry(const controller::ControllerCommand& command) {
-  if (command.mode != controller::ControlMode::Walk) {
-    return static_cast<uint8_t>(config::GaitId::Stand);
-  }
+  // SW_E selects the walking gait in every right-gimbal mode, so translate and
+  // rotate no longer force a Stand pose: the operator can walk while moving
+  // the body.
   return static_cast<uint8_t>(
       controller::rcGaitFromIndex(command.gait_index));
 }
@@ -1397,18 +1431,15 @@ void publishControllerCommand(uint32_t now_ms) {
     const controller::ControllerCommand& rc = g_controllerIntent.rc.command;
     radio.gait = rcGaitForTelemetry(rc);
     radio.control_mode = static_cast<uint8_t>(rc.mode);
-    radio.body_height_mm = static_cast<uint16_t>(
-        gait::rcBodyHeightMm(rc.body_height) + 0.5f);
-    radio.stride_mm = static_cast<uint16_t>(
-        rc.stride * config::kMaxGaitStrideMm + 0.5f);
-    radio.step_height_mm = static_cast<uint16_t>(
-        rc.step_height * config::kMaxGaitStepMm + 0.5f);
-    radio.speed_x255 = fractionToByte(rc.speed);
-    radio.duty_x255 = g_controllerConfig.robot.gait.duty_x255;
+    radio.body_height_mm = command.diagnostics.applied_body_height_mm;
+    radio.stride_mm = command.diagnostics.applied_stride_mm;
+    radio.step_height_mm = command.diagnostics.applied_step_height_mm;
+    radio.speed_x255 = command.diagnostics.applied_speed_x255;
+    radio.duty_x255 = command.diagnostics.applied_duty_x255;
   } else if (command.command_source == safety::CommandSource::Jetson) {
     const protocol::MotionIntent& motion = g_controllerIntent.motion;
     radio.gait = motion.gait;
-    radio.control_mode = static_cast<uint8_t>(controller::ControlMode::Walk);
+    radio.control_mode = static_cast<uint8_t>(controller::ControlMode::Yaw);
     radio.body_height_mm = motion.body_height_mm;
     radio.stride_mm = motion.stride_len_mm;
     radio.step_height_mm = motion.step_height_mm;
@@ -1416,13 +1447,143 @@ void publishControllerCommand(uint32_t now_ms) {
     radio.duty_x255 = motion.duty_x255;
   } else {
     radio.gait = static_cast<uint8_t>(config::GaitId::Stand);
-    radio.control_mode = static_cast<uint8_t>(controller::ControlMode::Walk);
+    radio.control_mode = static_cast<uint8_t>(controller::ControlMode::Yaw);
     radio.body_height_mm = g_controllerConfig.robot.gait.body_height_mm;
     radio.stride_mm = g_controllerConfig.robot.gait.stride_len_mm;
     radio.step_height_mm = g_controllerConfig.robot.gait.step_height_mm;
     radio.speed_x255 = g_controllerConfig.robot.gait.speed_x255;
     radio.duty_x255 = g_controllerConfig.robot.gait.duty_x255;
   }
+
+  // --- Deduplicated error reporting -----------------------------------------
+  // Every producer here is level-triggered and runs at 100 Hz. The journal
+  // collapses repeats into one announcement plus a running count, so a stuck
+  // fault costs one downlink frame per kRepeatIntervalMs instead of 500.
+  if (command.fault_reason != safety::FaultReason::None) {
+    noteError(safety::ErrorCode::SafetyFault,
+              static_cast<uint8_t>(command.fault_reason),
+              command.safety_state >= safety::State::FaultHard
+                  ? safety::ErrorSeverity::Critical
+                  : safety::ErrorSeverity::Error,
+              now_ms);
+  }
+  if (g_controllerState.dxl.hard_fault) {
+    noteError(safety::ErrorCode::DxlHardwareError, 0,
+              safety::ErrorSeverity::Critical, now_ms);
+  }
+  if (g_controllerState.battery.valid &&
+      g_controllerState.battery.millivolts < kBatteryWarnMv) {
+    noteError(safety::ErrorCode::BatteryLow,
+              static_cast<uint8_t>(g_controllerState.battery.millivolts / 100u),
+              safety::ErrorSeverity::Warning, now_ms);
+  }
+  if (g_controllerIntent.rc.failsafe && g_controllerIntent.rc.ever_seen) {
+    noteError(safety::ErrorCode::RcFailsafe, 0,
+              safety::ErrorSeverity::Error, now_ms);
+  }
+  if (g_configVolatile) {
+    noteError(safety::ErrorCode::ConfigVolatile, 0,
+              safety::ErrorSeverity::Warning, now_ms);
+  }
+  if (command.diagnostics.any_goal_unreachable) {
+    noteError(safety::ErrorCode::GoalUnreachable, 0,
+              safety::ErrorSeverity::Warning, now_ms);
+  }
+  if (command.diagnostics.any_goal_clamped) {
+    noteError(safety::ErrorCode::GoalClamped, 0,
+              safety::ErrorSeverity::Info, now_ms);
+  }
+  if (g_controllerState.watchdog_fault) {
+    noteError(safety::ErrorCode::WatchdogStall, 0,
+              safety::ErrorSeverity::Critical, now_ms);
+  }
+
+  // --- Handset gait-tune editor --------------------------------------------
+  const controller::ControllerDiagnostics& diag = command.diagnostics;
+  uint8_t tune_flags = 0;
+  if (diag.gait_tune_active) {
+    tune_flags |= crsf::telemetry::tuneflag::kTuneActive;
+  }
+  if (diag.gait_tune_preview) {
+    tune_flags |= crsf::telemetry::tuneflag::kPreviewActive;
+  }
+  if (g_configVolatile) {
+    tune_flags |= crsf::telemetry::tuneflag::kConfigVolatile;
+  }
+  tune_flags |= static_cast<uint8_t>(
+      (diag.gait_tune_param & 0x03u)
+      << crsf::telemetry::tuneflag::kParamShift);
+
+  // A save press is handed to apiTask, the sole owner of ConfigApi. The
+  // sequence comparison makes this exactly-once even though the two tasks run
+  // at different rates.
+  if (diag.gait_save_seq != g_gaitSaveHandledSeq) {
+    if (diag.gait_save_requested) {
+      g_gaitSaveHandledSeq = diag.gait_save_seq;
+      config::GaitDefaults pending = g_controllerConfig.robot.gait;
+      pending.body_height_mm = diag.applied_body_height_mm;
+      pending.stride_len_mm = diag.applied_stride_mm;
+      pending.step_height_mm = diag.applied_step_height_mm;
+      pending.duty_x255 = diag.applied_duty_x255;
+      pending.speed_x255 = diag.applied_speed_x255;
+      taskENTER_CRITICAL();
+      g_gaitSavePending = pending;
+      g_gaitSaveRequested = true;
+      taskEXIT_CRITICAL();
+    }
+    // Not safe to persist right now (robot moving / RC not in authority):
+    // leave the sequence unhandled so the operator can simply stop and press
+    // again, and tell them why exactly once.
+    else if (diag.gait_tune_active) {
+      noteError(safety::ErrorCode::GaitSaveRejected,
+                static_cast<uint8_t>(safety::GaitSaveReject::Busy),
+                safety::ErrorSeverity::Warning, now_ms);
+    }
+  }
+  if (g_gaitSaveRequested) {
+    tune_flags |= crsf::telemetry::tuneflag::kSavePending;
+  }
+  radio.tune_flags = tune_flags;
+
+  safety::ErrorEntry latest;
+  bool has_error = false;
+  uint32_t suppressed = 0;
+  // Advance to the next announced incident at most once per downlink period.
+  // controlTask runs at 100 Hz; draining every cycle would burn through a burst
+  // of pending entries between two 5 Hz status frames and only the last one
+  // would ever reach the operator.
+  static uint32_t error_drain_ms = 0;
+  static bool error_drain_seen = false;
+  const bool drain_due = !error_drain_seen ||
+                         (now_ms - error_drain_ms) >= kCrsfStatusBoostPeriodMs;
+  taskENTER_CRITICAL();
+  if (drain_due) g_errorJournal.takePending(nullptr);
+  has_error = g_errorJournal.hasLatest();
+  if (has_error) latest = g_errorJournal.latest();
+  suppressed = g_errorJournal.suppressed();
+  taskEXIT_CRITICAL();
+  if (drain_due) {
+    error_drain_ms = now_ms;
+    error_drain_seen = true;
+  }
+  if (has_error) {
+    radio.error_code = static_cast<uint8_t>(latest.code);
+    radio.error_detail = latest.detail;
+    radio.error_sequence = latest.sequence;
+    radio.error_count = latest.count;
+    radio.tune_flags = static_cast<uint8_t>(
+        radio.tune_flags |
+        ((static_cast<uint8_t>(latest.severity) & 0x03u)
+         << crsf::telemetry::tuneflag::kSeverityShift));
+  }
+  radio.error_suppressed =
+      suppressed > 0xFFFFu ? 0xFFFFu : static_cast<uint16_t>(suppressed);
+
+  g_radioStatusBoost =
+      diag.gait_tune_active &&
+      (now_ms - g_controllerIntent.rc.command.gait_tune_last_edit_ms) <
+          kCrsfStatusBoostHoldMs;
+
   taskENTER_CRITICAL();
   g_radioStatus = radio;
   taskEXIT_CRITICAL();
@@ -2330,6 +2491,7 @@ void rcTask(void*) {
   TickType_t next = xTaskGetTickCount();
   constexpr uint16_t kMaxBytesPerCycle = 128;
   uint32_t applied_calibration_revision = 0xFFFFFFFFu;
+  uint32_t applied_gait_tune_revision = 0xFFFFFFFFu;
   uint32_t last_status_tx_ms = 0;
   uint32_t last_attitude_tx_ms = 0;
   uint32_t last_battery_tx_ms = 0;
@@ -2376,6 +2538,23 @@ void rcTask(void*) {
     if (g_ctrlPendingBindingsValid) {
       g_bridge.setBindings(g_ctrlPendingBindings);
       g_ctrlPendingBindingsValid = false;
+    }
+    // Seed the NAV1-edited gait shape from the persisted defaults whenever the
+    // known-good config changes (boot adopt, host commit, handset save), so the
+    // handset always starts from what is actually stored. The bridge ignores
+    // this while the operator has the editor open.
+    {
+      const uint32_t gait_rev = g_configApi.revision();
+      if (gait_rev != applied_gait_tune_revision) {
+        const config::GaitDefaults& d = g_configApi.config().gait;
+        g_bridge.setGaitTuneFractions(
+            static_cast<float>(d.step_height_mm) /
+                static_cast<float>(config::kMaxGaitStepMm),
+            static_cast<float>(d.stride_len_mm) /
+                static_cast<float>(config::kMaxGaitStrideMm),
+            static_cast<float>(d.duty_x255) / 255.0f);
+        applied_gait_tune_revision = gait_rev;
+      }
     }
     // Build one complete RC snapshot before publishing it. controlTask either
     // copies this whole frame or retains its prior coherent frame for a cycle.
@@ -2433,7 +2612,12 @@ void rcTask(void*) {
       radio.imu_calibration = imu.calibration;
 
       uint8_t payload[crsf::telemetry::kHexapodPayloadBytes];
-      if ((now_ms - last_status_tx_ms) >= kCrsfStatusPeriodMs) {
+      // While the operator edits gait parameters the status frame IS the UI
+      // feedback loop, so send it at 20 Hz instead of 5 Hz for the duration.
+      const uint32_t status_period_ms = g_radioStatusBoost
+                                            ? kCrsfStatusBoostPeriodMs
+                                            : kCrsfStatusPeriodMs;
+      if ((now_ms - last_status_tx_ms) >= status_period_ms) {
         crsf::telemetry::encodeHexapodStatus(radio, payload);
         if (sendCrsfTelemetry(crsf::telemetry::kFrameTypeHexapodStatus,
                               payload,
@@ -2506,6 +2690,32 @@ void apiTask(void*) {
     if (g_bootLoad.ready && !g_bootLoad.consumed) {
       g_configApi.adoptPayload(g_bootLoad.payload, g_bootLoad.len);
       g_bootLoad.consumed = true;
+    }
+
+    // Handset "save gait settings". controlTask already checked that RC holds
+    // authority and the robot is not moving; here we only run the transaction
+    // and report the outcome through the deduplicated error journal so the
+    // handset sees a rejection reason instead of a silent no-op.
+    if (g_gaitSaveRequested) {
+      config::GaitDefaults pending;
+      taskENTER_CRITICAL();
+      pending = g_gaitSavePending;
+      taskEXIT_CRITICAL();
+      const config::CfgResult result = g_configApi.saveGaitDefaults(pending);
+      if (result != config::CfgResult::Ok) {
+        safety::GaitSaveReject reason = safety::GaitSaveReject::StoreFailed;
+        if (result == config::CfgResult::Volatile) {
+          reason = safety::GaitSaveReject::NotPersistent;
+        } else if (result == config::CfgResult::ValidationFailed) {
+          reason = safety::GaitSaveReject::Invalid;
+        }
+        noteError(safety::ErrorCode::GaitSaveRejected,
+                  static_cast<uint8_t>(reason),
+                  safety::ErrorSeverity::Warning, api_loop_now_ms);
+      }
+      taskENTER_CRITICAL();
+      g_gaitSaveRequested = false;
+      taskEXIT_CRITICAL();
     }
 
     // Drain any received bytes, framing them into complete request bodies.

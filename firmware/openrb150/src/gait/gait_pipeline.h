@@ -56,6 +56,9 @@ constexpr float kPoseFilterTau = 0.12f;  // seconds
 // Pose snap-to-neutral thresholds (imperceptible residuals).
 constexpr float kPoseSnapMm = 0.5f;
 constexpr float kPoseSnapRad = 0.005f;
+// Gait-tune preview cycle time. Deliberately slower than a walking step so the
+// operator can watch one full swing after each parameter nudge.
+constexpr float kPreviewCycleSeconds = 2.0f;
 
 // One resolved joint goal: the DXL id + clamped goal tick, plus the leg/joint
 // slot and whether the tick was saturated against the configured servo travel.
@@ -117,6 +120,16 @@ class GaitPipeline {
   // Reset the gait cycle phase to 0 (e.g. when motion is (re)authorised).
   void resetPhase();
 
+  // Single-leg tuning preview: `leg` (0..kNumLegs-1) repeatedly traces the
+  // configured swing arc in place while the other five legs keep their normal
+  // stance, so an operator adjusting stride / step height from the handset can
+  // see the effect on the robot itself. Pass a negative value to disable.
+  // The preview target goes through the same reach-margin clamp and servo
+  // travel clamp as a walking target, so it can never command an unsafe pose.
+  // Callers must only enable it while the twist command is neutral.
+  void setPreviewLeg(int8_t leg);
+  int8_t previewLeg() const { return preview_leg_; }
+
   // Seed the goal slew limiter for one servo from its known present position
   // (raw ticks). Called on the motion-gate rising edge with fresh status reads
   // so the joint ramps smoothly from where it actually is onto the commanded
@@ -137,6 +150,8 @@ class GaitPipeline {
   BodyPose pose_target_;   // latest commanded body pose (raw, from RC/host)
   BodyPose pose_;          // filtered pose actually applied to the feet
   bool apply_pose_ = false;  // true while the filtered pose is non-neutral
+  int8_t preview_leg_ = -1;    // gait-tune preview leg, negative = disabled
+  float preview_phase_ = 0.0f;  // preview cycle position in [0, 1)
   // Per-slot arm-transition ramp state ((leg, joint) slot order). seedGoal()
   // arms a slot; it disengages permanently once the joint reaches the live
   // trajectory, so steady-state gait output is NEVER rate-clipped.

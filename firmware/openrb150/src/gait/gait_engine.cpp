@@ -173,6 +173,28 @@ void GaitEngine::motionEnvelopeFoot(uint8_t leg, float longitudinal,
   footAt(leg, longitudinal, lift_fraction, x, y, z);
 }
 
+void GaitEngine::previewFoot(uint8_t leg, float phase, float& x, float& y,
+                             float& z) const {
+  float home_x, home_y, home_z;
+  homeFoot(leg, home_x, home_y, home_z);
+  phase = phase - floorf(phase);
+  float longitudinal = 0.0f;
+  float lift = 0.0f;
+  if (phase < 0.5f) {
+    // Swing: forward through the full configured clearance.
+    const float u = phase * 2.0f;
+    longitudinal = -0.5f + u;
+    lift = sinf(3.14159265f * u);
+  } else {
+    // Stance: back along the ground, so the stroke length is equally visible.
+    const float u = (phase - 0.5f) * 2.0f;
+    longitudinal = 0.5f - u;
+  }
+  x = home_x;
+  y = home_y + stride_mm_ * longitudinal;  // body +Y is forward
+  z = clampf(home_z + step_mm_ * lift, kMinFootZMm, kMaxFootZMm);
+}
+
 float GaitEngine::stepPeriodMs() const {
   constexpr float kNeutralSpeed = 128.0f / 255.0f;
   if (speed_ <= kNeutralSpeed) {

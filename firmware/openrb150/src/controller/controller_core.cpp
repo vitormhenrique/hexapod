@@ -11,6 +11,9 @@ constexpr uint32_t kAllServoPosesKnown =
     (1u << config::kNumServos) - 1u;
 constexpr uint8_t kContactConfidenceMinimum = 128;
 constexpr uint8_t kMinimumConfidentFeet = 4;
+// Leg used to demonstrate a gait-parameter change from the handset. Index 0 is
+// "leg 1" in the config/servo numbering (DXL ids 1/7/13).
+constexpr int8_t kGaitTunePreviewLeg = 0;
 
 config::GaitId gaitFromWire(uint8_t gait) {
   if (gait > static_cast<uint8_t>(config::GaitId::Crawl)) {
@@ -225,6 +228,23 @@ void ControllerCore::step(const RobotState& state,
   command.diagnostics.motion_gate_falling =
       !command.motion_gate && previous_motion_gate_;
 
+  // RC gait-tune editor state is reported (and its save request evaluated)
+  // outside the motion branch: the safest moment to write EEPROM is while the
+  // robot is disarmed, and the handset must keep showing the live values then.
+  {
+    const ControllerCommand& rc_cmd = intent.rc.command;
+    const bool rc_authority = arbiter.source == safety::CommandSource::Rc;
+    command.diagnostics.gait_tune_active =
+        rc_authority && rc_cmd.gait_tune_active;
+    command.diagnostics.gait_tune_param =
+        static_cast<uint8_t>(rc_cmd.gait_tune_param);
+    // Never persist while the robot is moving (AGENTS.md 4.3: no EEPROM writes
+    // during active walking). The adapter applies the final store checks.
+    command.diagnostics.gait_save_seq = rc_cmd.gait_tune_save_seq;
+    command.diagnostics.gait_save_requested =
+        rc_authority && !rcCommandIsActive(rc_cmd) && !trick_engine_.active();
+  }
+
   if (intent.host_disarm ||
       safety_state >= safety::State::FaultSoft) {
     command.diagnostics.clear_maintenance_lock = true;
@@ -325,6 +345,7 @@ void ControllerCore::step(const RobotState& state,
         requested_step_height = static_cast<uint16_t>(
           rc.step_height * config::kMaxGaitStepMm);
         requested_speed = static_cast<uint8_t>(rc.speed * 255.0f);
+        requested_duty = static_cast<uint8_t>(rc.duty * 255.0f);
       applied_intent_sequence_ = 0xFFFFFFFFu;
     } else if (intent.motion.seq != applied_intent_sequence_) {
       trick_engine_.cancel();
@@ -353,6 +374,11 @@ void ControllerCore::step(const RobotState& state,
       pipeline_.setParams(shaped_height, requested_stride, requested_step_height,
                 requested_duty, requested_speed);
       pipeline_.setBodyPose(commandPoseToBody(body_pose));
+      command.diagnostics.applied_body_height_mm = shaped_height;
+      command.diagnostics.applied_stride_mm = requested_stride;
+      command.diagnostics.applied_step_height_mm = requested_step_height;
+      command.diagnostics.applied_duty_x255 = requested_duty;
+      command.diagnostics.applied_speed_x255 = requested_speed;
     const config::GaitId desired_gait = gaitFromWire(effective_gait);
     if (effective_gait != applied_gait_) {
       pipeline_.setGait(desired_gait);
@@ -364,6 +390,16 @@ void ControllerCore::step(const RobotState& state,
     float body_vy = 0.0f;
     commandPlanarToBody(effective_vx, effective_vy, body_vx, body_vy);
     pipeline_.setTwist(body_vx, body_vy, effective_wz);
+
+    // Gait-tune preview: leg 1 (index kGaitTunePreviewLeg) traces the live
+    // stride / step height so the operator can see a parameter change on the
+    // robot itself. Only while RC drives, no trick is running, and the walk
+    // command is neutral -- a real walking command always wins.
+    const bool preview =
+        rc_drives && intent.rc.command.gait_tune_active &&
+        !trick_engine_.active() && !sticksAreActive(intent.rc.command);
+    pipeline_.setPreviewLeg(preview ? kGaitTunePreviewLeg : -1);
+    command.diagnostics.gait_tune_preview = preview;
 
     if (!previous_motion_gate_) {
       pipeline_.resetPhase();
@@ -398,6 +434,31 @@ void ControllerCore::step(const RobotState& state,
     previous_rc_trick_ = TrickId::None;
     applied_intent_sequence_ = 0xFFFFFFFFu;
     applied_gait_ = 0xFF;
+    pipeline_.setPreviewLeg(-1);
+    // With motion gated the handset must still see what a save would store, so
+    // report the RC-selected shape (or the persisted defaults when RC is not
+    // the source) rather than leaving the fields at zero.
+    const ControllerCommand& rc_cmd = intent.rc.command;
+    const bool rc_shape =
+        arbiter.source == safety::CommandSource::Rc && rc_cmd.ever_seen;
+    command.diagnostics.applied_body_height_mm =
+        rc_shape ? static_cast<uint16_t>(
+                       gait::rcBodyHeightMm(rc_cmd.body_height) + 0.5f)
+                 : active_config.robot.gait.body_height_mm;
+    command.diagnostics.applied_stride_mm =
+        rc_shape ? static_cast<uint16_t>(rc_cmd.stride *
+                                         config::kMaxGaitStrideMm)
+                 : active_config.robot.gait.stride_len_mm;
+    command.diagnostics.applied_step_height_mm =
+        rc_shape ? static_cast<uint16_t>(rc_cmd.step_height *
+                                         config::kMaxGaitStepMm)
+                 : active_config.robot.gait.step_height_mm;
+    command.diagnostics.applied_duty_x255 =
+        rc_shape ? static_cast<uint8_t>(rc_cmd.duty * 255.0f)
+                 : active_config.robot.gait.duty_x255;
+    command.diagnostics.applied_speed_x255 =
+        rc_shape ? static_cast<uint8_t>(rc_cmd.speed * 255.0f)
+                 : active_config.robot.gait.speed_x255;
   }
 
   previous_motion_gate_ = command.motion_gate;

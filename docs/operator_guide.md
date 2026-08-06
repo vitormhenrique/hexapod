@@ -96,35 +96,34 @@ requests; firmware capability, authority, and safety checks remain final.
 
 | Physical control | Position / movement | Robot action |
 | --- | --- | --- |
-| Left gimbal X | Left / right | Strafe left / right in every mode |
-| Left gimbal Y | Forward / back | Walk forward / backward in every mode |
-| Right gimbal X | `SW_E` UP | Rotate robot left / right while walking |
-| Right gimbal Y | `SW_E` UP | Unassigned |
-| Right gimbal X/Y | `SW_E` CENTER | Shift body Y/X while left gimbal keeps walking |
-| Right gimbal X/Y | `SW_E` DOWN | Body roll/pitch while left gimbal keeps walking |
+| Left gimbal X | Left / right | Strafe left / right — always, in every `SW_F` position |
+| Left gimbal Y | Forward / back | Walk forward / backward — always, in every `SW_F` position |
+| Right gimbal X | `SW_F` UP | Turn the robot left / right while walking |
+| Right gimbal Y | `SW_F` UP | Unassigned |
+| Right gimbal X/Y | `SW_F` CENTER | Shift body Y/X while the left gimbal keeps walking |
+| Right gimbal X/Y | `SW_F` DOWN | Body roll/pitch while the left gimbal keeps walking |
 | Pot 1 | 0..100% | Gait cadence and torque-enable recovery speed |
-| Pot 2 | 0..100% | Body height, `25..120 mm`; center is `60 mm` |
-| Encoder 1 | Rotate | Stride `0..80 mm`; resets to full `80 mm`; 128 counts = full range |
-| Encoder 2 | Rotate | Step lift `0..50 mm`; resets to `25 mm`; 128 counts = full range |
+| Pot 2 | 0..100% | Body height, `65..150 mm`; center is `132 mm`. Fully down is the belly-near-ground crouch || Encoder 1 | Rotate | Unassigned (stride moved to the NAV1 gait-tune editor) |
+| Encoder 2 | Rotate | Unassigned (step lift moved to the NAV1 gait-tune editor) |
 | `SW_A` | ON | Request arm; ignored while kill/failsafe is active |
 | `SW_B` | ON | Immediate E-stop/kill and disarm request |
 | `SW_C` | ON | Request foot-contact detection |
 | `SW_D` | ON | Request terrain leveling |
-| `SW_E` | UP / CENTER / DOWN | Walk / translate body / rotate body mode |
-| `SW_F` | UP / CENTER / DOWN | Wave / ripple / tripod gait; latched in Walk mode |
+| `SW_E` | UP / CENTER / DOWN | **Left gimbal walk pattern**: wave / ripple / tripod |
+| `SW_F` | UP / CENTER / DOWN | **Right gimbal job**: turn / translate body / rotate body |
 | `SW_G` | ON | Request torque-off passive-pose streaming |
 | `SW_H` | ON | Hand motion authority to the USB host or Jetson |
 | `BTN_1` | Press | Stand-up choreography |
 | `BTN_2` | Press | Sit-down choreography |
 | `BTN_3` | Press | Standing body-rock wave choreography |
 | `BTN_4` | Press | Toggle crouched/tall stance |
-| `NAV1` Up / Down | Press | Add / subtract 1 degree pitch trim |
-| `NAV1` Left / Right | Press | Add left / right 1 degree roll trim |
-| `NAV1` Center | Press | Reset roll and pitch trim |
+| `NAV1` Up / Down | Press | Trim pitch ±1° / select gait parameter while tuning |
+| `NAV1` Left / Right | Press | Trim roll ±1° / decrease-increase the parameter while tuning |
+| `NAV1` Center | Press | Reset trim / save gait settings to EEPROM while tuning |
 | `NAV2` Up | Press | Twirl in place |
 | `NAV2` Down | Press | Stretch/push-up sequence |
 | `NAV2` Left | Press | Hold lean/look pose until cancelled |
-| `NAV2` Right | Press | Unassigned |
+| `NAV2` Right | Press | Engage / leave the gait-tune editor |
 | `NAV2` Center | Press | Loop dance until stick input cancels it |
 
 Buttons and nav actions fire once on the rising edge with a 150 ms refractory
@@ -132,6 +131,56 @@ window. Any active trick is cancelled when the operator moves a gait/body
 stick. Centered walking sticks park all feet at home without advancing phase.
 The detailed CRSF channel and TX16S-direct mappings are in the
 [controller bridge reference](controller_bridge.md).
+
+### Ride Height Range
+
+Pot 2 spans `65..150 mm` measured from the coxa-axis plane down to the feet,
+with the neutral `132 mm` centered-servo stance at mid-travel. The two halves
+are deliberately asymmetric: the lower half buys 67 mm of real crouch travel
+while the upper half is an 18 mm trim.
+
+At the bottom of the range the robot sits belly-near-the-ground with the femur
+about `+60°` and the tibia about `-50°` from their zero rest — what the Joint
+Matrix page shows as roughly `240 deg` and `128 deg`. Stance X/Y does not
+change, so the footprint stays the same as when standing.
+
+Swing clearance is still capped at 40 mm below the body plane, so while fully
+crouched the effective step lift tops out around 25 mm no matter what step
+height is configured. Raise the ride height before asking for a tall step.
+
+## Tuning The Gait From The Handset
+
+The gimbals have fixed jobs: the **left gimbal always walks** and the **right
+gimbal turns or moves the body**. `SW_E` changes how the left gimbal walks (the
+gait pattern) and `SW_F` changes what the right gimbal does. Because the two are
+independent, the robot walks normally while the body is shifted or tilted —
+body motion never needs a dedicated gait. Turning is available in `SW_F` UP
+only, since the body modes use both right-hand axes for the pose overlay.
+
+Stride, step height, and duty are edited from the NAV1 cluster:
+
+1. Press `NAV2 Right` to engage the gait-tune editor. NAV1 stops trimming pose
+   and starts editing gait parameters.
+2. `NAV1 Up` / `Down` cycles step height → stride → duty. The handset telemetry
+   page shows the selected parameter and its live value.
+3. `NAV1 Right` / `Left` changes it by 5% of the safe range per press.
+4. With the sticks centred and the robot armed, **leg 1 traces the swing arc**
+   once every 2 s using the live values, so the change is visible on the robot.
+   Moving a stick cancels the preview and returns to normal walking.
+5. `NAV1 Center` saves to the 24LC32 config. Saving is refused while the robot
+   is moving or when no EEPROM is present; the reason appears on the handset
+   `Error` row.
+6. Press `NAV2 Right` again to leave the editor and restore pose trim.
+
+While the editor is engaged the robot raises its status downlink from 5 Hz to
+20 Hz so the readout keeps up with the knob. On boot the editor is seeded from
+the stored `GaitDefaults`, so what you see is what is persisted.
+
+Alternatives to the leg-1 preview, if it turns out to be inconvenient on your
+bench: read the numbers only from the handset `Tuning` row (works disarmed), or
+replay a recorded session in the companion Plot Workbench / URDF viewer. The
+preview is deliberately gated on "armed, sticks centred" so it can be avoided
+simply by tuning while disarmed.
 
 ## OpenRB User LED Status
 

@@ -96,7 +96,7 @@ inline void clearRawInputs(ChannelPackInputs_t* out) {
 
 BindingConfig defaultBindings() {
   BindingConfig c;
-  // Left gimbal owns planar walking; right X rotates the robot in Walk mode.
+  // Left gimbal owns planar walking; right X turns the robot in Yaw mode.
   c.walk_forward = {AxisSource::GimbalLY, false, 0.0f};
   c.walk_strafe = {AxisSource::GimbalLX, false, 0.0f};
   c.walk_yaw = {AxisSource::GimbalRX, false, 0.0f};
@@ -106,18 +106,22 @@ BindingConfig defaultBindings() {
   c.body_y = {AxisSource::GimbalRX, false, 0.0f};
   c.body_z = {AxisSource::None, false, 0.0f};
   // Rotate-body overlay: right gimbal = roll/pitch while the left gimbal keeps
-  // planar walking. Robot yaw is intentionally disabled in this pose mode.
+  // planar walking. Robot yaw is intentionally disabled in this pose mode: the
+  // right gimbal only has two axes and both carry the attitude overlay.
   c.body_roll = {AxisSource::GimbalRX, false, 0.0f};
   c.body_pitch = {AxisSource::GimbalRY, false, 0.0f};
   c.body_yaw = {AxisSource::None, false, 0.0f};
-  // Shape params: pots are absolute, encoders trim stride / step clearance.
+  // Shape params: pots are absolute; stride / step height / duty are owned by
+  // the NAV1 gait-tune editor, so no axis is bound to them by default (this
+  // frees ENC1/ENC2). A host may still bind an axis to override the editor.
   c.speed = {AxisSource::Pot1, false, 0.0f};
   c.body_height = {AxisSource::Pot2, false, 0.0f};
-  c.stride = {AxisSource::Enc1, false, 0.0f};
-  c.step_height = {AxisSource::Enc2, false, 0.0f};
-  // Selectors.
-  c.mode_select = TriSource::SwE;
-  c.gait_select = TriSource::SwF;
+  c.stride = {AxisSource::None, false, 0.0f};
+  c.step_height = {AxisSource::None, false, 0.0f};
+  c.duty = {AxisSource::None, false, 0.0f};
+  // Selectors: SW_E picks the walking gait, SW_F picks the right-gimbal mode.
+  c.gait_select = TriSource::SwE;
+  c.mode_select = TriSource::SwF;
   // Safety + features.
   c.arm = BoolSource::SwA;
   c.estop = BoolSource::SwB;
@@ -125,12 +129,19 @@ BindingConfig defaultBindings() {
   c.feat_terrain_leveling = BoolSource::SwD;
   c.feat_passive_pose = BoolSource::SwG;
   c.host_authority = BoolSource::SwH;
-  // Operator pose trim on NAV1.
+  // Operator pose trim on NAV1 (gait-tune mode borrows the same cluster).
   c.trim_pitch_up = BoolSource::Nav1Up;
   c.trim_pitch_down = BoolSource::Nav1Down;
   c.trim_roll_left = BoolSource::Nav1Left;
   c.trim_roll_right = BoolSource::Nav1Right;
   c.trim_reset = BoolSource::Nav1Center;
+  // Gait-tune editor: NAV2 Right engages it, then NAV1 edits and saves.
+  c.gait_tune_toggle = BoolSource::Nav2Right;
+  c.gait_tune_next = BoolSource::Nav1Up;
+  c.gait_tune_prev = BoolSource::Nav1Down;
+  c.gait_tune_increase = BoolSource::Nav1Right;
+  c.gait_tune_decrease = BoolSource::Nav1Left;
+  c.gait_tune_save = BoolSource::Nav1Center;
   // Tricks: 4 buttons + NAV2 cluster.
   c.tricks[0] = {BoolSource::Btn1, TrickId::StandUp};
   c.tricks[1] = {BoolSource::Btn2, TrickId::SitDown};
@@ -163,6 +174,16 @@ bool ControllerBridge::setInputFilterMode(
   return conditioner_.setMode(mode, diagnostic_mode_allowed);
 }
 
+void ControllerBridge::setGaitTuneFractions(float step_height, float stride,
+                                            float duty) {
+  // An active edit session owns the values; a config revision landing mid-edit
+  // must not yank the number the operator is watching on the handset.
+  if (cmd_.gait_tune_active) return;
+  gait_tune_frac_[0] = clampf(step_height, 0.0f, 1.0f);
+  gait_tune_frac_[1] = clampf(stride, 0.0f, 1.0f);
+  gait_tune_frac_[2] = clampf(duty, 0.0f, 1.0f);
+}
+
 void ControllerBridge::reset() {
   cmd_ = ControllerCommand();
   raw_ = ChannelPackInputs_t();
@@ -184,8 +205,8 @@ void ControllerBridge::reset() {
     conditioned_encoder_[index] = 0.5f;
     conditioned_toggles_[index] = 1;
   }
-  mode_switch_.reset();
-  gait_switch_.reset();
+  sw_e_debounce_.reset();
+  sw_f_debounce_.reset();
   last_condition_ms_ = 0;
   condition_time_seen_ = false;
   for (uint8_t i = 0; i < 2; ++i) {
@@ -193,6 +214,12 @@ void ControllerBridge::reset() {
     enc_seen_[i] = false;
     enc_accum_[i] = i == 0 ? 1.0f : 0.5f;  // full stride, medium lift
   }
+  // Compiled fallbacks for the NAV1-edited gait shape; rcTask overwrites these
+  // with the persisted GaitDefaults through setGaitTuneFractions() as soon as
+  // a config revision is adopted.
+  gait_tune_frac_[0] = 0.6f;    // 30 mm of the 50 mm step-height range
+  gait_tune_frac_[1] = 0.75f;   // 60 mm of the 80 mm stride range
+  gait_tune_frac_[2] = 0.625f;  // duty 159/255
   for (uint8_t i = 0; i < kNumEdgeSlots; ++i) {
     edge_prev_[i] = false;
     // Seed one refractory window in the past (unsigned wrap) so the very first
@@ -309,7 +336,7 @@ void ControllerBridge::unpackTx16sMk3DirectChannels(
   out->pot[0] = crsfToPotSafe(ch[4]);
   out->pot[1] = crsfToPotSafe(ch[5]);
 
-  // CH9..CH10: SE/SD -> SwE mode select, SwF gait select (3-position).
+  // CH9..CH10: SE/SD -> SwE gait select, SwF right-gimbal mode (3-position).
   out->toggles[0] = crsfToTri(ch[8]);
   out->toggles[1] = crsfToTri(ch[9]);
 
@@ -357,8 +384,7 @@ void ControllerBridge::updateTx16sDirectVirtualEncoders(
     const uint16_t ch[CPACK_NUM_CHANNELS]) {
   // CH7/CH8 (LS/RS sliders) are ABSOLUTE controls on the TX16S -- there is no
   // physical relative encoder, so drive enc_accum_[] straight from the value
-  // instead of integrating a wrap-delta. readAxisUnipolar(Enc1/Enc2) then keeps
-  // returning enc_accum_[0/1] so stride/step_height work with defaultBindings().
+  // instead of integrating a wrap-delta.
   const float enc0 = crsfUnit01(ch[6]);
   const float enc1 = crsfUnit01(ch[7]);
 
@@ -372,6 +398,15 @@ void ControllerBridge::updateTx16sDirectVirtualEncoders(
   enc_seen_[1] = true;
   enc_last_[0] = raw_.encoder[0];
   enc_last_[1] = raw_.encoder[1];
+
+  // The TX16S has no NAV cluster, so its sliders remain the stride / step
+  // height control: feed them into the same gait-tune values the custom
+  // controller edits, so telemetry and the save path behave identically. An
+  // active editor (reachable over USB) still takes precedence.
+  if (!cmd_.gait_tune_active) {
+    gait_tune_frac_[1] = enc_accum_[0];  // LS -> stride
+    gait_tune_frac_[0] = enc_accum_[1];  // RS -> step height
+  }
 }
 
 float ControllerBridge::readAxisBipolar(const AxisBinding& b) const {
@@ -447,9 +482,9 @@ void ControllerBridge::updateConditionedInputs(uint32_t now_ms) {
 
 void ControllerBridge::updateConditionedToggles(uint32_t now_ms) {
   conditioned_toggles_[0] =
-      mode_switch_.update(raw_.toggles[0], now_ms, kModeSwitchDebounceMs);
+      sw_e_debounce_.update(raw_.toggles[0], now_ms, kModeSwitchDebounceMs);
   conditioned_toggles_[1] =
-      gait_switch_.update(raw_.toggles[1], now_ms, kModeSwitchDebounceMs);
+      sw_f_debounce_.update(raw_.toggles[1], now_ms, kModeSwitchDebounceMs);
 }
 
 float ControllerBridge::conditionedBipolar(AxisSource source) const {
@@ -575,6 +610,98 @@ bool ControllerBridge::risingEdge(uint8_t slot, bool level, uint32_t now_ms) {
   return fired;
 }
 
+void ControllerBridge::updatePoseTrim(uint32_t now_ms) {
+  // Operator pose trim (edge-nudged). Reset zeroes it.
+  if (risingEdge(kTrimEdgeBase + 4, readBool(cfg_.trim_reset), now_ms)) {
+    cmd_.trim_roll = 0.0f;
+    cmd_.trim_pitch = 0.0f;
+  }
+  if (risingEdge(kTrimEdgeBase + 0, readBool(cfg_.trim_pitch_up), now_ms)) {
+    cmd_.trim_pitch = clampf(cmd_.trim_pitch + kTrimStepRad, -kTrimMaxRad,
+                             kTrimMaxRad);
+  }
+  if (risingEdge(kTrimEdgeBase + 1, readBool(cfg_.trim_pitch_down), now_ms)) {
+    cmd_.trim_pitch = clampf(cmd_.trim_pitch - kTrimStepRad, -kTrimMaxRad,
+                             kTrimMaxRad);
+  }
+  if (risingEdge(kTrimEdgeBase + 2, readBool(cfg_.trim_roll_left), now_ms)) {
+    cmd_.trim_roll = clampf(cmd_.trim_roll - kTrimStepRad, -kTrimMaxRad,
+                            kTrimMaxRad);
+  }
+  if (risingEdge(kTrimEdgeBase + 3, readBool(cfg_.trim_roll_right), now_ms)) {
+    cmd_.trim_roll = clampf(cmd_.trim_roll + kTrimStepRad, -kTrimMaxRad,
+                            kTrimMaxRad);
+  }
+}
+
+void ControllerBridge::updateGaitTune(uint32_t now_ms) {
+  // The toggle is always live so the operator can leave the editor without
+  // first having to find a neutral parameter.
+  if (risingEdge(kGaitTuneEdgeBase + 0, readBool(cfg_.gait_tune_toggle),
+                 now_ms)) {
+    cmd_.gait_tune_active = !cmd_.gait_tune_active;
+    cmd_.gait_tune_param = GaitTuneParam::StepHeight;
+    ++cmd_.gait_tune_edit_seq;
+    cmd_.gait_tune_last_edit_ms = now_ms;
+  }
+  if (!cmd_.gait_tune_active) {
+    // Keep the borrowed NAV1 edge slots coherent so re-entering the editor does
+    // not replay a press that happened while it was disengaged.
+    edge_prev_[kGaitTuneEdgeBase + 1] = readBool(cfg_.gait_tune_next);
+    edge_prev_[kGaitTuneEdgeBase + 2] = readBool(cfg_.gait_tune_prev);
+    edge_prev_[kGaitTuneEdgeBase + 3] = readBool(cfg_.gait_tune_increase);
+    edge_prev_[kGaitTuneEdgeBase + 4] = readBool(cfg_.gait_tune_decrease);
+    edge_prev_[kGaitTuneEdgeBase + 5] = readBool(cfg_.gait_tune_save);
+    return;
+  }
+
+  // While the editor owns NAV1 the trim edge slots must also stay coherent.
+  edge_prev_[kTrimEdgeBase + 0] = readBool(cfg_.trim_pitch_up);
+  edge_prev_[kTrimEdgeBase + 1] = readBool(cfg_.trim_pitch_down);
+  edge_prev_[kTrimEdgeBase + 2] = readBool(cfg_.trim_roll_left);
+  edge_prev_[kTrimEdgeBase + 3] = readBool(cfg_.trim_roll_right);
+  edge_prev_[kTrimEdgeBase + 4] = readBool(cfg_.trim_reset);
+
+  uint8_t index = static_cast<uint8_t>(cmd_.gait_tune_param);
+  bool edited = false;
+  if (risingEdge(kGaitTuneEdgeBase + 1, readBool(cfg_.gait_tune_next),
+                 now_ms)) {
+    index = static_cast<uint8_t>((index + 1u) % kNumGaitTuneParams);
+    edited = true;
+  }
+  if (risingEdge(kGaitTuneEdgeBase + 2, readBool(cfg_.gait_tune_prev),
+                 now_ms)) {
+    index = static_cast<uint8_t>((index + kNumGaitTuneParams - 1u) %
+                                 kNumGaitTuneParams);
+    edited = true;
+  }
+  cmd_.gait_tune_param = static_cast<GaitTuneParam>(index);
+
+  if (risingEdge(kGaitTuneEdgeBase + 3, readBool(cfg_.gait_tune_increase),
+                 now_ms)) {
+    gait_tune_frac_[index] =
+        clampf(gait_tune_frac_[index] + kGaitTuneStepFrac, 0.0f, 1.0f);
+    edited = true;
+  }
+  if (risingEdge(kGaitTuneEdgeBase + 4, readBool(cfg_.gait_tune_decrease),
+                 now_ms)) {
+    gait_tune_frac_[index] =
+        clampf(gait_tune_frac_[index] - kGaitTuneStepFrac, 0.0f, 1.0f);
+    edited = true;
+  }
+  if (risingEdge(kGaitTuneEdgeBase + 5, readBool(cfg_.gait_tune_save),
+                 now_ms)) {
+    // Monotonic so the request survives a control-cycle boundary; the firmware
+    // still decides whether it is safe to persist.
+    ++cmd_.gait_tune_save_seq;
+    edited = true;
+  }
+  if (edited) {
+    ++cmd_.gait_tune_edit_seq;
+    cmd_.gait_tune_last_edit_ms = now_ms;
+  }
+}
+
 void ControllerBridge::enterFailsafe(uint32_t now_ms) {
   (void)now_ms;
   // Preserve ever_seen, trim, and the last selected mode/gait, but force a safe
@@ -634,12 +761,13 @@ const ControllerCommand& ControllerBridge::update(
   cmd_.ever_seen = true;
   cmd_.frame_ms = now_ms;
 
-  // Mode + gait selectors.
+  // Gait family (SW_E) and right-gimbal mode (SW_F). The gait selection is live
+  // in every mode, so the operator can keep walking while the right gimbal
+  // translates or rotates the body -- body motion needs no dedicated gait.
+  const uint8_t gait_v = readTri(cfg_.gait_select);
+  cmd_.gait_index = gait_v < 3 ? gait_v : 0;
   const uint8_t mode_v = readTri(cfg_.mode_select);
   cmd_.mode = static_cast<ControlMode>(mode_v < kNumControlModes ? mode_v : 0);
-  if (cmd_.mode == ControlMode::Walk) {
-    cmd_.gait_index = readTri(cfg_.gait_select);
-  }
 
   // Safety levels.
   const bool kill = readBool(cfg_.estop);
@@ -669,15 +797,25 @@ const ControllerCommand& ControllerBridge::update(
   cmd_.feat_terrain_leveling = readBool(cfg_.feat_terrain_leveling);
   cmd_.feat_passive_pose = readBool(cfg_.feat_passive_pose);
 
-  // Shape params (read in every mode).
+  // Shape params (read in every mode). Speed and body height stay on the pots.
+  // Stride / step height / duty come from the NAV1 gait-tune editor unless a
+  // host has explicitly bound an axis to them.
   cmd_.speed = readAxisUnipolar(cfg_.speed);
   cmd_.body_height = readAxisUnipolar(cfg_.body_height);
-  cmd_.stride = readAxisUnipolar(cfg_.stride);
-  cmd_.step_height = readAxisUnipolar(cfg_.step_height);
+  updateGaitTune(now_ms);
+  cmd_.step_height = cfg_.step_height.source != AxisSource::None
+                         ? readAxisUnipolar(cfg_.step_height)
+                         : gait_tune_frac_[0];
+  cmd_.stride = cfg_.stride.source != AxisSource::None
+                    ? readAxisUnipolar(cfg_.stride)
+                    : gait_tune_frac_[1];
+  cmd_.duty = cfg_.duty.source != AxisSource::None
+                  ? readAxisUnipolar(cfg_.duty)
+                  : gait_tune_frac_[2];
 
   // Motion: the left gimbal always walks in the plane (forward + strafe), so
-  // the operator never loses locomotion while adjusting the body. Right X is
-  // yaw in Walk mode; the other modes reuse the right gimbal for body pose.
+  // the operator never loses locomotion while adjusting the body. Right X
+  // steers in Yaw mode; the other modes reuse the right gimbal for body pose.
   // Unused pose axes stay zero and operator trim survives mode changes.
   cmd_.twist_vx = cmd_.twist_vy = cmd_.twist_wz = 0.0f;
   cmd_.pose_x_mm = cmd_.pose_y_mm = cmd_.pose_z_mm = 0.0f;
@@ -685,7 +823,7 @@ const ControllerCommand& ControllerBridge::update(
   cmd_.twist_vx = readAxisBipolar(cfg_.walk_forward);
   cmd_.twist_vy = readAxisBipolar(cfg_.walk_strafe);
   switch (cmd_.mode) {
-    case ControlMode::Walk:
+    case ControlMode::Yaw:
       cmd_.twist_wz = readAxisBipolar(cfg_.walk_yaw);
       break;
     case ControlMode::TranslateBody:
@@ -700,27 +838,9 @@ const ControllerCommand& ControllerBridge::update(
       break;
   }
 
-  // Operator pose trim (edge-nudged). Reset zeroes it.
-  if (risingEdge(kTrimEdgeBase + 4, readBool(cfg_.trim_reset), now_ms)) {
-    cmd_.trim_roll = 0.0f;
-    cmd_.trim_pitch = 0.0f;
-  }
-  if (risingEdge(kTrimEdgeBase + 0, readBool(cfg_.trim_pitch_up), now_ms)) {
-    cmd_.trim_pitch = clampf(cmd_.trim_pitch + kTrimStepRad, -kTrimMaxRad,
-                             kTrimMaxRad);
-  }
-  if (risingEdge(kTrimEdgeBase + 1, readBool(cfg_.trim_pitch_down), now_ms)) {
-    cmd_.trim_pitch = clampf(cmd_.trim_pitch - kTrimStepRad, -kTrimMaxRad,
-                             kTrimMaxRad);
-  }
-  if (risingEdge(kTrimEdgeBase + 2, readBool(cfg_.trim_roll_left), now_ms)) {
-    cmd_.trim_roll = clampf(cmd_.trim_roll - kTrimStepRad, -kTrimMaxRad,
-                            kTrimMaxRad);
-  }
-  if (risingEdge(kTrimEdgeBase + 3, readBool(cfg_.trim_roll_right), now_ms)) {
-    cmd_.trim_roll = clampf(cmd_.trim_roll + kTrimStepRad, -kTrimMaxRad,
-                            kTrimMaxRad);
-  }
+  // NAV1 is dual-purpose: pose trim normally, gait-parameter editing while the
+  // gait-tune mode is engaged (updateGaitTune ran above and owns the mode).
+  if (!cmd_.gait_tune_active) updatePoseTrim(now_ms);
 
   // Tricks: first binding whose source rises this frame wins (one per frame).
   cmd_.trick = TrickId::None;

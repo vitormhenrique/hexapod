@@ -106,6 +106,16 @@ class ConfigApi {
               uint8_t* out, uint16_t out_cap, uint16_t* out_len,
               uint8_t* out_flags);
 
+  // Persist ONLY the gait defaults, keeping every other block of the current
+  // known-good config untouched. This is the handset "save gait settings"
+  // path: the operator has no maintenance lock and no torque-off requirement,
+  // and the gait block carries no servo geometry or travel limits, so it is
+  // deliberately not gated on the host mutation policy. It is still a full
+  // transactional EEPROM commit -- validated first, rejected on a volatile
+  // store, and only adopted (with a revision bump) once the store confirms.
+  // Callers must ensure the robot is not walking (AGENTS.md 4.3).
+  CfgResult saveGaitDefaults(const GaitDefaults& gait);
+
   // Publish the current safety policy before handling host commands. Staging
   // requires a live maintenance lock; applying a config also requires every
   // servo torque confirmed off because it replaces active geometry/limits.

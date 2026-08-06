@@ -7,6 +7,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView
 
 from hexapod_protocol import telemetry as tlm
@@ -33,12 +34,20 @@ def _make_ready_page(qtbot):
     return service, page
 
 
+def _type(cell, text: str) -> None:
+    """Simulate real typing: clear, then send each character to the validator."""
+    cell.value.clear()
+    for character in text:
+        QTest.keyClicks(cell.value, character)
+
+
 def test_matrix_defaults_to_centered_servo_angles(qtbot) -> None:
     _service, page = _make_page(qtbot)
     assert page.matrix.rowCount() == 6
     assert page.matrix.columnCount() == 4
     assert page.matrix.item(0, 0).text() == "Leg 1"
-    assert all(cell.value.value() == 180 for cell in page._cells.values())
+    assert all(cell.value_int() == 180 for cell in page._cells.values())
+    assert all(cell.value.text() == "180" for cell in page._cells.values())
     assert all(cell.value.isEnabled() for cell in page._cells.values())
     assert all(not cell.apply.isEnabled() for cell in page._cells.values())
     assert page.matrix.selectionMode() == QAbstractItemView.SelectionMode.NoSelection
@@ -58,7 +67,7 @@ def test_tick_mode_enables_servo_then_sends_calibrated_relative_angle(
     )
     page.tick_radio.setChecked(True)
     cell = page._cells[(0, 0)]
-    cell.value.setValue(2048)
+    cell.value.setText("2048")
     cell.apply.click()
     assert sent == [(1, 0, 0, 0)]
 
@@ -110,15 +119,53 @@ def test_passive_joint_state_updates_the_matching_matrix_value(qtbot) -> None:
         int(tlm.StreamId.JOINT_STATE),
         tlm.JointStateTelemetry([tlm.JointAngle(leg=2, joint=1, angle_centideg=1234)]),
     )
-    assert page._cells[(2, 1)].value.value() == 192
+    assert page._cells[(2, 1)].value_int() == 192
 
 
 def test_live_update_does_not_overwrite_a_staged_input(qtbot) -> None:
     service, page = _make_page(qtbot)
     cell = page._cells[(2, 1)]
-    cell.value.setValue(200)
+    _type(cell, "200")
     service.telemetry.emit(
         int(tlm.StreamId.JOINT_STATE),
         tlm.JointStateTelemetry([tlm.JointAngle(leg=2, joint=1, angle_centideg=1234)]),
     )
-    assert cell.value.value() == 200
+    assert cell.value_int() == 200
+    assert cell.value.text() == "200"
+
+
+# Regression: a range-bound validator (the old QSpinBox) rejected the first
+# keystroke whenever the joint travel did not start at 0 -- typing "5" toward
+# "50" in a 90..270 range is Invalid, not Intermediate -- so the field silently
+# refused input. Any digit sequence must be typeable in either unit.
+@pytest.mark.parametrize("ticks", [False, True])
+def test_any_digit_sequence_can_be_typed(qtbot, ticks: bool) -> None:
+    _service, page = _make_page(qtbot)
+    if ticks:
+        page.tick_radio.setChecked(True)
+    cell = page._cells[(0, 1)]
+    for text in ("5", "50", "7", "1234"):
+        _type(cell, text)
+        assert cell.value.text() == text
+
+
+def test_out_of_range_entry_is_clamped_to_servo_travel(qtbot, monkeypatch) -> None:
+    service, page = _make_ready_page(qtbot)
+    sent = []
+    monkeypatch.setattr(
+        service,
+        "set_joint_target_with_torque",
+        lambda servo_id, leg, joint, angle: sent.append(angle),
+    )
+    cell = page._cells[(0, 1)]
+    _type(cell, "999")
+    cell.apply.click()
+    # Default travel is +/-90 deg about the 180 deg centre.
+    assert sent == [(270 - 180) * 100]
+
+
+def test_unparseable_text_falls_back_to_the_last_display(qtbot) -> None:
+    _service, page = _make_page(qtbot)
+    cell = page._cells[(0, 0)]
+    cell.value.clear()
+    assert cell.value_int() == 180

@@ -60,7 +60,14 @@ constexpr float kMotionDeadband = 0.03f;
 // Reach-safe ride-height envelope around the measured 131.73 mm centered-servo
 // stance (dimensions.md). At the home radius the leg keeps a comfortable
 // workspace margin across this whole range.
-constexpr float kRcBodyHeightMinMm = 100.0f;
+//
+// The bottom of the range is the measured full-crouch pose: with the stance
+// X/Y held at home, 65 mm puts the femur at about +60 deg and the tibia at
+// about -50 deg from their URDF-zero rest (Joint Matrix "240 deg" / "128 deg"),
+// which is the belly-near-the-ground pose. That is deliberately much further
+// from neutral than the 18 mm of lift above it, so Pot2's lower half buys real
+// crouch travel while its upper half stays a fine trim.
+constexpr float kRcBodyHeightMinMm = 65.0f;
 constexpr float kRcBodyHeightNeutralMm = 132.0f;
 constexpr float kRcBodyHeightMaxMm = 150.0f;
 
@@ -123,6 +130,16 @@ class GaitEngine {
   void motionEnvelopeFoot(uint8_t leg, float longitudinal,
                           float lift_fraction, float& x, float& y,
                           float& z) const;
+
+  // Single-leg tuning preview (RC gait-tune editor). Traces the configured
+  // swing arc for `leg` at cycle `phase` in [0, 1): the first half swings the
+  // foot forward through the full step height, the second half returns it along
+  // the ground. Uses only the filtered stride / step-height / body-height
+  // parameters and ignores the twist command, so it demonstrates exactly what a
+  // parameter change does while the robot stands still. Const and phase-free:
+  // it never touches the gait cycle.
+  void previewFoot(uint8_t leg, float phase, float& x, float& y,
+                   float& z) const;
 
  private:
   void baseHomeFoot(uint8_t leg, float& x, float& y, float& z) const;

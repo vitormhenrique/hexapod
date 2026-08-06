@@ -60,6 +60,16 @@ void GaitPipeline::setBodyPose(const BodyPose& pose) {
 
 void GaitPipeline::resetPhase() { engine_.reset(); }
 
+void GaitPipeline::setPreviewLeg(int8_t leg) {
+  if (leg < 0 || leg >= static_cast<int8_t>(config::kNumLegs)) {
+    preview_leg_ = -1;
+    preview_phase_ = 0.0f;
+    return;
+  }
+  if (preview_leg_ != leg) preview_phase_ = 0.0f;
+  preview_leg_ = leg;
+}
+
 void GaitPipeline::seedGoal(uint8_t id, uint16_t present_tick) {
   const config::ServoConfig* sc = map_.servoForId(id);
   if (sc == nullptr) return;
@@ -151,6 +161,31 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
         target.y_mm = anchor_y + (target.y_mm - anchor_y) * path_scale;
       }
     }
+  }
+
+  // Gait-tune preview overrides one leg AFTER the walking reach limiter so the
+  // demonstration stroke is independent of the (neutral) twist command. It gets
+  // its own reach-margin clamp, and every joint still passes through the servo
+  // travel clamp below.
+  if (preview_leg_ >= 0 &&
+      preview_leg_ < static_cast<int8_t>(config::kNumLegs)) {
+    const uint8_t leg = static_cast<uint8_t>(preview_leg_);
+    preview_phase_ += (static_cast<float>(dt_ms) / 1000.0f) /
+                      kPreviewCycleSeconds;
+    preview_phase_ -= floorf(preview_phase_);
+    float preview_x, preview_y, preview_z;
+    engine_.previewFoot(leg, preview_phase_, preview_x, preview_y, preview_z);
+    float anchor_x, anchor_y, anchor_z;
+    engine_.nominalFoot(leg, anchor_x, anchor_y, anchor_z);
+    float scale = body_.bodyTargetPathScale(leg, anchor_x, anchor_y, preview_z,
+                                            preview_x, preview_y, preview_z);
+    if (scale > 1.0f) scale = 1.0f;
+    if (scale < 1.0f) out.any_reach_limited = true;
+    FootTarget& target = feet.feet[leg];
+    target.x_mm = anchor_x + (preview_x - anchor_x) * scale;
+    target.y_mm = anchor_y + (preview_y - anchor_y) * scale;
+    target.z_mm = preview_z;
+    target.swing = preview_z > anchor_z + 0.5f;
   }
 
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {

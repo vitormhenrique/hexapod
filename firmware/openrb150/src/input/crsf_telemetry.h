@@ -11,8 +11,8 @@ constexpr uint8_t kFrameTypeAttitude = 0x1E;
 constexpr uint8_t kFrameTypeHexapodStatus = 0x80;
 constexpr uint8_t kHexapodMagic0 = 0x48;  // H
 constexpr uint8_t kHexapodMagic1 = 0x58;  // X
-constexpr uint8_t kHexapodVersion = 1;
-constexpr uint8_t kHexapodPayloadBytes = 20;
+constexpr uint8_t kHexapodVersion = 2;
+constexpr uint8_t kHexapodPayloadBytes = 28;
 constexpr uint8_t kBatteryPayloadBytes = 8;
 constexpr uint8_t kAttitudePayloadBytes = 6;
 
@@ -26,6 +26,19 @@ constexpr uint8_t kImuFresh = 1u << 5;
 constexpr uint8_t kFault = 1u << 6;
 constexpr uint8_t kBatteryValid = 1u << 7;
 }  // namespace flag
+
+// Second flag byte (v2), carrying the gait-tune editor state and the severity
+// of the reported error. Bits 4-5 hold the selected GaitTuneParam.
+namespace tuneflag {
+constexpr uint8_t kTuneActive = 1u << 0;
+constexpr uint8_t kPreviewActive = 1u << 1;
+constexpr uint8_t kSavePending = 1u << 2;
+constexpr uint8_t kConfigVolatile = 1u << 3;
+constexpr uint8_t kParamShift = 4;
+constexpr uint8_t kParamMask = 0x03u << kParamShift;
+constexpr uint8_t kSeverityShift = 6;
+constexpr uint8_t kSeverityMask = 0x03u << kSeverityShift;
+}  // namespace tuneflag
 
 struct HexapodStatus {
   uint8_t flags = 0;
@@ -41,6 +54,13 @@ struct HexapodStatus {
   uint16_t body_height_mm = 0;
   uint16_t stride_mm = 0;
   uint16_t step_height_mm = 0;
+  // --- v2 ---
+  uint8_t tune_flags = 0;      // see namespace tuneflag
+  uint8_t error_code = 0;      // safety::ErrorCode of the latest incident
+  uint8_t error_detail = 0;    // code-specific detail (servo id, foot, ...)
+  uint8_t error_sequence = 0;  // bumped per announced incident; 0 = none
+  uint16_t error_count = 0;    // occurrences within the current incident
+  uint16_t error_suppressed = 0;  // duplicates the journal did not send
 };
 
 // Encode fixed-size payloads. Multi-byte CRSF sensor values are big-endian.

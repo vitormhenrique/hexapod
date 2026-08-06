@@ -114,15 +114,19 @@ COMMAND_SOURCE_NAMES = {int(source): source.name for source in CommandSource}
 
 
 class ControllerMode(IntEnum):
-    """Controller bridge modes mirrored from firmware ``ControlMode``."""
+    """Right-gimbal modes mirrored from firmware ``ControlMode``.
 
-    WALK = 0
+    The left gimbal always walks and ``SW_E`` owns the gait family, so this
+    enum only says what the RIGHT gimbal does on top of walking.
+    """
+
+    YAW = 0
     TRANSLATE_BODY = 1
     ROTATE_BODY = 2
 
 
 CONTROLLER_MODE_NAMES = {
-    ControllerMode.WALK: "Walk",
+    ControllerMode.YAW: "Yaw",
     ControllerMode.TRANSLATE_BODY: "Translate body",
     ControllerMode.ROTATE_BODY: "Rotate body",
 }

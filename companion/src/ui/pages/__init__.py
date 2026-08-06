@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -3568,8 +3569,8 @@ class RcTroubleshootingPage(BasePage):
         ("sw_d", "2-position", "SW_D / terrain leveling"),
         ("sw_g", "2-position", "SW_G / passive pose"),
         ("sw_h", "2-position", "SW_H / host authority"),
-        ("sw_e", "3-position", "SW_E / control mode"),
-        ("sw_f", "3-position", "SW_F / gait"),
+        ("sw_e", "3-position", "SW_E / gait select"),
+        ("sw_f", "3-position", "SW_F / right-gimbal mode"),
         ("btn1", "Button", "BTN_1 / stand up"),
         ("btn2", "Button", "BTN_2 / sit down"),
         ("btn3", "Button", "BTN_3 / wave"),
@@ -3625,8 +3626,8 @@ class RcTroubleshootingPage(BasePage):
                 ("arm", "SW_A arm request"),
                 ("estop", "SW_B estop"),
                 ("host", "SW_H host authority"),
-                ("mode", "SW_E control mode"),
-                ("gait", "Gait index"),
+                ("mode", "SW_F right-gimbal mode"),
+                ("gait", "SW_E gait index"),
                 ("trick", "Trick trigger"),
                 ("contact", "SW_C foot contact"),
                 ("leveling", "SW_D leveling"),
@@ -4879,21 +4880,46 @@ class UrdfViewerPage(BasePage):
 
 
 class JointMatrixCell(QWidget):
-    """One calibrated joint command with a per-servo torque-release action."""
+    """One calibrated joint command with a per-servo torque-release action.
+
+    The value is a plain text box rather than a spin box: this cell is also a
+    live readout (joint_state / servo_status arrive at 20-50 Hz), and a spin
+    box rewrote and re-validated the field on every incoming frame, which stole
+    the caret and dropped keystrokes mid-edit. A QLineEdit lets the user type
+    freely; incoming telemetry is simply ignored while the field is focused or
+    has unsent edits.
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(8, 6, 8, 6)
         lay.setSpacing(6)
-        self.value = QSpinBox()
+        self._minimum = 0
+        self._maximum = 360
+        self._unit = "deg"
+        self._last_display = 180
         self._staged = False
-        self.value.setRange(0, 360)
-        self.value.setValue(180)
-        self.value.setSuffix(" deg")
-        self.value.setAccelerated(True)
-        self.value.valueChanged.connect(self._stage_value)
+        self.value = QLineEdit()
+        self.value.setAlignment(Qt.AlignRight)
+        # Deliberately permissive: a range-bound validator rejects the very
+        # first keystroke whenever the joint's travel does not start at 0 (e.g.
+        # typing "5" toward "50" in a 90..270 range is Invalid, not
+        # Intermediate), which is what made the cell feel like it would not
+        # accept input. Digits are always accepted here and the value is
+        # clamped to the joint's real travel when it is read or committed.
+        self.value.setValidator(QIntValidator(-9999, 9999, self))
+        self._update_hint()
+        # Only a real keystroke stages the cell; setText() from telemetry emits
+        # textChanged but never textEdited, so live updates stay invisible here.
+        self.value.textEdited.connect(self._stage_value)
+        self.value.editingFinished.connect(self._clamp_text)
+        self.set_display_value(180, force=True)
         self.apply = QPushButton("Set")
+        self.apply.setDefault(False)
+        self.apply.setAutoDefault(False)
+        # Enter in the text box is the same as pressing Set.
+        self.value.returnPressed.connect(self.apply.click)
         self.release = QPushButton("Release")
         self._released = False
         self.release.setToolTip("Disable torque only for this mapped servo.")
@@ -4904,20 +4930,42 @@ class JointMatrixCell(QWidget):
         lay.addWidget(self.value)
         lay.addLayout(actions)
 
+    # --- range / units -----------------------------------------------------
+
+    def _update_hint(self) -> None:
+        self.value.setPlaceholderText(
+            f"{self._minimum}..{self._maximum} {self._unit}"
+        )
+
+    def _set_range(self, minimum: int, maximum: int, unit: str) -> None:
+        self._minimum = minimum
+        self._maximum = maximum
+        self._unit = unit
+        self._update_hint()
+
     def set_angle_mode(self, minimum: int, maximum: int) -> None:
-        self.value.setRange(minimum, maximum)
-        self.value.setSuffix(" deg")
+        self._set_range(minimum, maximum, "deg")
 
     def set_tick_mode(self, minimum: int, maximum: int) -> None:
-        self.value.setRange(minimum, maximum)
-        self.value.setSuffix(" ticks")
+        self._set_range(minimum, maximum, "ticks")
+
+    # --- value -------------------------------------------------------------
+
+    def value_int(self) -> int:
+        """Current value, clamped to range. Falls back to the last display."""
+        text = self.value.text().strip()
+        try:
+            parsed = int(text)
+        except ValueError:
+            return self._last_display
+        return max(self._minimum, min(self._maximum, parsed))
 
     def set_display_value(self, value: int, force: bool = False) -> None:
-        if self._staged and not force:
+        # Never fight the operator: skip while the field is being edited.
+        if not force and (self._staged or self.value.hasFocus()):
             return
-        self.value.blockSignals(True)
-        self.value.setValue(value)
-        self.value.blockSignals(False)
+        self._last_display = max(self._minimum, min(self._maximum, int(value)))
+        self.value.setText(str(self._last_display))
 
     def clear_staged_value(self) -> None:
         self._staged = False
@@ -4933,8 +4981,13 @@ class JointMatrixCell(QWidget):
         )
         self.release.setText("Passive" if released else "Release")
 
-    def _stage_value(self, _value: int) -> None:
+    def _stage_value(self, _text: str) -> None:
         self._staged = True
+
+    def _clamp_text(self) -> None:
+        # Snap a partial/out-of-range entry to something sendable on focus-out,
+        # without discarding the staged flag (the value still needs a Set).
+        self.value.setText(str(self.value_int()))
 
 
 class JointMatrixPage(BasePage):
@@ -4964,6 +5017,11 @@ class JointMatrixPage(BasePage):
         self.content.addWidget(self._maintenance_controls())
         self.content.addWidget(self._matrix())
         self.content.addWidget(self._status_panel())
+        # Seed every cell with the compiled default travel so the range hint is
+        # right before the robot's config arrives (and so a bench session with
+        # no connection still clamps to something sane).
+        for (leg, joint), cell in self._cells.items():
+            self._apply_cell_range(cell, leg, joint)
 
         self.banner = self.add_telemetry_banner(
             [
@@ -5117,6 +5175,22 @@ class JointMatrixPage(BasePage):
             self.service.passive_exit()
         self._apply_gates()
 
+    def _apply_cell_range(self, cell: JointMatrixCell, leg: int, joint: int) -> None:
+        """Point one cell at the mapped servo's travel in the active unit."""
+        servo = self._servo_map.servo_for(leg, joint)
+        if servo is None:
+            return
+        if self._ticks_mode:
+            cell.set_tick_mode(servo.min_tick, servo.max_tick)
+            return
+        low = round(
+            180 + self._cfg.RAD_TO_DEG * self._cfg.tick_to_angle(servo, servo.min_tick)
+        )
+        high = round(
+            180 + self._cfg.RAD_TO_DEG * self._cfg.tick_to_angle(servo, servo.max_tick)
+        )
+        cell.set_angle_mode(max(0, min(low, high)), min(360, max(low, high)))
+
     def _set_value_mode(self, ticks_mode: bool) -> None:
         if ticks_mode == self._ticks_mode:
             return
@@ -5126,17 +5200,15 @@ class JointMatrixPage(BasePage):
             if servo is None:
                 continue
             if ticks_mode:
-                relative_rad = self._cfg.DEG_TO_RAD * (cell.value.value() - 180)
-                cell.set_tick_mode(servo.min_tick, servo.max_tick)
+                relative_rad = self._cfg.DEG_TO_RAD * (cell.value_int() - 180)
+                self._apply_cell_range(cell, leg, joint)
                 cell.set_display_value(
                     self._servo_map.angle_to_tick(leg, joint, relative_rad).tick,
                     force=True,
                 )
             else:
-                relative_rad = self._servo_map.tick_to_angle(leg, joint, cell.value.value())
-                low = round(180 + self._cfg.RAD_TO_DEG * self._cfg.tick_to_angle(servo, servo.min_tick))
-                high = round(180 + self._cfg.RAD_TO_DEG * self._cfg.tick_to_angle(servo, servo.max_tick))
-                cell.set_angle_mode(max(0, min(low, high)), min(360, max(low, high)))
+                relative_rad = self._servo_map.tick_to_angle(leg, joint, cell.value_int())
+                self._apply_cell_range(cell, leg, joint)
                 cell.set_display_value(
                     round(180 + self._cfg.RAD_TO_DEG * relative_rad), force=True
                 )
@@ -5150,10 +5222,10 @@ class JointMatrixPage(BasePage):
             )
             return
         if self._ticks_mode:
-            relative_rad = self._servo_map.tick_to_angle(leg, joint, cell.value.value())
+            relative_rad = self._servo_map.tick_to_angle(leg, joint, cell.value_int())
             angle_cdeg = round(self._cfg.RAD_TO_DEG * relative_rad * 100)
         else:
-            angle_cdeg = (cell.value.value() - 180) * 100
+            angle_cdeg = (cell.value_int() - 180) * 100
         self.command_result.setText(
             f"enabling servo {servo.id} and sending leg {leg + 1} "
             f"{self.JOINTS[joint][0].lower()}..."
@@ -5227,9 +5299,7 @@ class JointMatrixPage(BasePage):
         self._robot_config = config
         self._servo_map = self._cfg.ServoMap(config)
         for (leg, joint), cell in self._cells.items():
-            servo = self._servo_map.servo_for(leg, joint)
-            if servo is not None and self._ticks_mode:
-                cell.set_tick_mode(servo.min_tick, servo.max_tick)
+            self._apply_cell_range(cell, leg, joint)
 
     def _on_dxl_result(self, kind: str, res) -> None:
         if kind == "scan":
@@ -5336,8 +5406,11 @@ class JointMatrixPage(BasePage):
         for cell in self._cells.values():
             cell.value.setEnabled(not passive)
             cell.value.setToolTip(
-                "Stage a target value. Set becomes available after entering "
-                "Maintenance and scanning the servos."
+                "Type a target value and press Enter (or Set). Out-of-range "
+                "entries are clamped to the servo's configured travel. Live "
+                "telemetry does not overwrite the box while you are editing. "
+                "Set becomes available after entering Maintenance and scanning "
+                "the servos."
             )
             cell.apply.setEnabled(bench_ready)
             cell.release.setEnabled(bench_ready)

@@ -5,12 +5,27 @@
 
   <!-- Massless kinematic root: KDL rejects inertia on the tree root, and the
        SIL odometry TF (odom -> base_footprint) needs a dedicated root frame
-       that robot_state_publisher does not also parent. -->
+       that robot_state_publisher does not also parent.
+
+       HAND-MAINTAINED (the Fusion exporter does not emit this joint). The
+       exported base_link frame sits at a corner of the body plate, but the
+       firmware kinematic model (config_schema.cpp kLegSeeds, dimensions.md)
+       is body-CENTRED: coxa mounts at (+-65.577, +-115.577) and (+-69.78, 0)
+       mm about the centre. base_footprint is therefore placed at the body
+       centre projected onto the ground so the SIL odometry frame and the
+       firmware body frame B agree:
+         x/y  = -CoM of the body plate = -(0.076463, 0.126463) m
+         z    = neutral standing height. The firmware measures body height
+                from the coxa-axis plane (frame B z = 0) to the feet, default
+                132 mm; base_link sits 4.5 mm below that plane (coxa_mount
+                -16.5 mm + coxa_joint +21 mm), so base_link stands 127.5 mm
+                above the ground at the default ride height.
+       Re-apply this block after any Fusion re-export. -->
   <link name="${prefix}base_footprint"/>
   <joint name="${prefix}base_footprint_joint" type="fixed">
     <parent link="${prefix}base_footprint"/>
     <child link="${prefix}base_link"/>
-    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <origin xyz="-0.076463 -0.126463 0.127500" rpy="0 0 0"/>
   </joint>
 
   <link name="${prefix}base_link">
@@ -885,44 +900,44 @@
       <origin xyz="0.006683 0.126463 -0.016500" rpy="-0.000000 0.000000 1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_1_coxa_joint" type="continuous">
+    <joint name="${prefix}leg_1_coxa_joint" type="revolute">
       <parent link="${prefix}leg_1_mx28_coxa"/>
       <child link="${prefix}leg_1_coxa"/>
       <origin xyz="0.000000 -0.000000 0.021000" rpy="-0.000000 -0.000000 1.570796"/>
       <axis xyz="0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_2_coxa_joint" type="continuous">
+    <joint name="${prefix}leg_2_coxa_joint" type="revolute">
       <parent link="${prefix}leg_2_mx28_coxa"/>
       <child link="${prefix}leg_2_coxa"/>
       <origin xyz="-0.000000 0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_3_coxa_joint" type="continuous">
+    <joint name="${prefix}leg_3_coxa_joint" type="revolute">
       <parent link="${prefix}leg_3_mx28_coxa"/>
       <child link="${prefix}leg_3_coxa"/>
       <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_4_coxa_joint" type="continuous">
+    <joint name="${prefix}leg_4_coxa_joint" type="revolute">
       <parent link="${prefix}leg_4_mx28_coxa"/>
       <child link="${prefix}leg_4_coxa"/>
       <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_5_coxa_joint" type="continuous">
+    <joint name="${prefix}leg_5_coxa_joint" type="revolute">
       <parent link="${prefix}leg_5_mx28_coxa"/>
       <child link="${prefix}leg_5_coxa"/>
       <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
     <joint name="${prefix}bot_mount" type="fixed">
@@ -931,60 +946,60 @@
       <origin xyz="-0.070711 -0.271586 -0.015000" rpy="3.141593 -0.000000 2.356194"/>
     </joint>
 
-    <joint name="${prefix}leg_6_coxa_joint" type="continuous">
+    <joint name="${prefix}leg_6_coxa_joint" type="revolute">
       <parent link="${prefix}leg_6_mx28_coxa"/>
       <child link="${prefix}leg_6_coxa"/>
       <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_1_femur_joint" type="continuous">
+    <joint name="${prefix}leg_1_femur_joint" type="revolute">
       <parent link="${prefix}leg_1_coxa"/>
       <child link="${prefix}leg_1_mx28_femur"/>
       <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_2_femur_joint" type="continuous">
+    <joint name="${prefix}leg_2_femur_joint" type="revolute">
       <parent link="${prefix}leg_2_coxa"/>
       <child link="${prefix}leg_2_mx28_femur"/>
       <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_3_femur_joint" type="continuous">
+    <joint name="${prefix}leg_3_femur_joint" type="revolute">
       <parent link="${prefix}leg_3_coxa"/>
       <child link="${prefix}leg_3_mx28_femur"/>
       <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_4_femur_joint" type="continuous">
+    <joint name="${prefix}leg_4_femur_joint" type="revolute">
       <parent link="${prefix}leg_4_coxa"/>
       <child link="${prefix}leg_4_mx28_femur"/>
       <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_5_femur_joint" type="continuous">
+    <joint name="${prefix}leg_5_femur_joint" type="revolute">
       <parent link="${prefix}leg_5_coxa"/>
       <child link="${prefix}leg_5_mx28_femur"/>
       <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
       <axis xyz="-0.000000 0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_6_femur_joint" type="continuous">
+    <joint name="${prefix}leg_6_femur_joint" type="revolute">
       <parent link="${prefix}leg_6_coxa"/>
       <child link="${prefix}leg_6_mx28_femur"/>
       <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
     <joint name="${prefix}leg_1_femur_mount" type="fixed">
@@ -1023,52 +1038,52 @@
       <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
     </joint>
 
-    <joint name="${prefix}leg_1_tibia_joint" type="continuous">
+    <joint name="${prefix}leg_1_tibia_joint" type="revolute">
       <parent link="${prefix}leg_1_femur"/>
       <child link="${prefix}leg_1_mx28_tibia"/>
       <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_2_tibia_joint" type="continuous">
+    <joint name="${prefix}leg_2_tibia_joint" type="revolute">
       <parent link="${prefix}leg_2_femur"/>
       <child link="${prefix}leg_2_mx28_tibia"/>
       <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_3_tibia_joint" type="continuous">
+    <joint name="${prefix}leg_3_tibia_joint" type="revolute">
       <parent link="${prefix}leg_3_femur"/>
       <child link="${prefix}leg_3_mx28_tibia"/>
       <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_4_tibia_joint" type="continuous">
+    <joint name="${prefix}leg_4_tibia_joint" type="revolute">
       <parent link="${prefix}leg_4_femur"/>
       <child link="${prefix}leg_4_mx28_tibia"/>
       <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_5_tibia_joint" type="continuous">
+    <joint name="${prefix}leg_5_tibia_joint" type="revolute">
       <parent link="${prefix}leg_5_femur"/>
       <child link="${prefix}leg_5_mx28_tibia"/>
       <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
-    <joint name="${prefix}leg_6_tibia_joint" type="continuous">
+    <joint name="${prefix}leg_6_tibia_joint" type="revolute">
       <parent link="${prefix}leg_6_femur"/>
       <child link="${prefix}leg_6_mx28_tibia"/>
       <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
       <axis xyz="-0.000000 -0.000000 1.000000"/>
-      <limit effort="100.0" velocity="1.00"/>
+      <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
     </joint>
 
     <joint name="${prefix}leg_1_tibia_mount" type="fixed">

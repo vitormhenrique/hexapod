@@ -164,6 +164,24 @@ struct ControllerDiagnostics {
   uint32_t config_revision = 0;
   uint32_t intent_sequence = 0;
   uint8_t confident_contact_feet = 0;
+  // Gait shape actually commanded this step, after clamping. Adapters publish
+  // this on the CRSF downlink and persist it when `gait_save_requested` is set,
+  // so the handset, the log, and EEPROM can never disagree about what ran.
+  uint16_t applied_body_height_mm = 0;
+  uint16_t applied_stride_mm = 0;
+  uint16_t applied_step_height_mm = 0;
+  uint8_t applied_duty_x255 = 0;
+  uint8_t applied_speed_x255 = 0;
+  // RC gait-tune editor state (controller::GaitTuneParam value).
+  uint8_t gait_tune_param = 0;
+  bool gait_tune_active = false;
+  // The single-leg preview is running (operator is watching a parameter).
+  bool gait_tune_preview = false;
+  // The operator asked to persist the applied gait shape. The adapter owns the
+  // EEPROM transaction and applies `gait_save_seq` de-duplication: it acts only
+  // when the sequence differs from the last one it persisted.
+  bool gait_save_requested = false;
+  uint32_t gait_save_seq = 0;
   bool motion_gate_rising = false;
   bool motion_gate_falling = false;
   bool config_reapplied = false;

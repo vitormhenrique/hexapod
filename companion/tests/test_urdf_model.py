@@ -34,7 +34,7 @@ def test_description_package_found() -> None:
 
 def test_urdf_loads_with_expected_link_and_joint_counts(hexnav: UrdfModel) -> None:
     # Matches the xacro-generated URDF display.launch.py builds: 38 links,
-    # 37 kinematic joints (fixed mounts + 18 continuous), 18 actuated.
+    # 37 kinematic joints (fixed mounts + 18 revolute), 18 actuated.
     assert hexnav.name == "HexNav"
     assert len(hexnav.links) == 38
     assert len(hexnav.joints) == 37
@@ -52,7 +52,10 @@ def test_six_legs(hexnav: UrdfModel) -> None:
 def test_eighteen_actuated_joints(hexnav: UrdfModel) -> None:
     actuated = hexnav.actuated_joints()
     assert len(actuated) == 18
-    assert all(j.type == "continuous" for j in actuated)
+    # Revolute (not continuous) so the model carries the same travel bounds the
+    # firmware clamps to: ServoConfig min_tick 1024 .. max_tick 3072 about the
+    # 2048 centre of a 4096-tick MX-28 revolution = +/- 90 deg.
+    assert all(j.type == "revolute" for j in actuated)
     # 3 actuated joints per leg: coxa, femur, tibia.
     for leg in range(1, 7):
         roles = sorted(j.leg_role for j in hexnav.leg_joints(leg))

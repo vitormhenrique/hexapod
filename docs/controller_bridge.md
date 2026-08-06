@@ -52,24 +52,43 @@ Serial3 (D14 TX / D13 RX) bytes ──► crsf::Parser ──► raw 11-bit tick
 
 ---
 
-## 2. Control modes ("move the core without moving the legs")
+## 2. What each gimbal does
 
-`SW_E` (3-pos toggle) selects the control mode. The left gimbal always controls
-planar walking. In the two body modes the right gimbal overlays body movement
-while the gait continues, with all targets clamped to the IK envelope.
+The two gimbals have **fixed jobs**:
 
-| `SW_E` | `ControlMode` | Left gimbal | Right gimbal |
+- **Left gimbal = walking.** LY walks forward/back, LX strafes. This is true in
+  every switch position — nothing can take walking away from the left stick.
+- **Right gimbal = turning and body motion.** `SW_F` picks which of the two it
+  does, because the right gimbal only has two axes.
+
+The two toggles are therefore fully independent:
+
+| Toggle | What it changes | Positions |
+| --- | --- | --- |
+| `SW_E` | How the **left** gimbal walks — the gait pattern | Wave (0) / Ripple (1) / Tripod (2) |
+| `SW_F` | What the **right** gimbal does | Yaw (0) / TranslateBody (1) / RotateBody (2) |
+
+| `SW_F` | `ControlMode` | Left gimbal (always walking) | Right gimbal |
 | --- | --- | --- | --- |
-| UP | `Walk` | LY = forward/back, LX = strafe | RX = robot yaw |
+| UP | `Yaw` | LY = forward/back, LX = strafe | RX = turn the robot left/right |
 | CENTER | `TranslateBody` | LY = forward/back, LX = strafe | RY = body X, RX = body Y |
 | DOWN | `RotateBody` | LY = forward/back, LX = strafe | RX = body roll, RY = body pitch |
 
+Key points:
+
+- **Body translation and rotation do not need a special gait.** The gait chosen
+  by `SW_E` keeps running in all three `SW_F` positions, so the robot walks
+  normally while the body is shifted or tilted.
+- `SW_F` never decides *whether* the robot walks — that is why position 0 is
+  named `Yaw`, not `Walk`.
+- Turning is only available in `SW_F` = `Yaw`: in the body modes both right-hand
+  axes are taken by the pose overlay. Flick `SW_F` back to UP to steer.
 - Translate limits: ±`poselim::kMaxTransMm` = **±50 mm** on each axis.
 - Rotate limits: ±`poselim::kMaxRotRad` = **±0.4363 rad (±25°)** on each axis.
 - These mirror `protocol::motionlim`, so a controller body pose can never exceed
   what `SET_BODY_POSE` allows over USB.
-- In `Walk` mode no body pose is emitted. Body modes retain left-stick walking
-  but disable right-stick yaw while those axes control the pose overlay.
+- With the left stick centred the gait holds the planted home stance, so the
+  body modes still "move the core without moving the legs".
 
 ---
 
@@ -77,17 +96,45 @@ while the gait continues, with all targets clamped to the IK envelope.
 
 | Input | Action | Range |
 | --- | --- | --- |
-| `SW_F` (3-pos) | `gait_index` 0/1/2 — selects gait family (e.g. tripod / ripple / wave) | 0..2 |
+| `SW_E` (3-pos) | `gait_index` — Wave (0) / Ripple (1) / Tripod (2). Live in **every** `SW_F` position | 0..2 |
 | `POT1` | `speed` scalar | 0..1 |
-| `POT2` | `body_height` scalar | 0..1 |
-| `ENC1` | `stride` length scalar (relative; integrated from encoder delta) | 0..1 |
-| `ENC2` | `step_height` scalar (relative; integrated from encoder delta) | 0..1 |
+| `POT2` | `body_height` scalar — maps to `65..150 mm` ride height, neutral `132 mm` at centre | 0..1 |
+| `NAV1` (gait-tune mode) | `step_height`, `stride`, `duty` | 0..1 each |
 
-Encoders are **continuous** and have no absolute zero, so the bridge integrates
-their wrapped delta (shortest path across the 0↔2047 boundary) into a value
-clamped to 0..1. On reset, ENC1 starts at 1.0 (the full safe `80 mm` stride)
-and ENC2 starts at 0.5 (`25 mm` of the `50 mm` lift range). A 128-count change
-covers the full 0..1 adjustment range.
+`ENC1` and `ENC2` are **no longer bound** in `defaultBindings()`: stride and step
+height moved to the NAV1 gait-tune editor, so both encoders are free for future
+use. A host may still bind an axis to `stride` / `step_height` / `duty` through
+`SET_BINDINGS`; when a binding is present it overrides the editor value.
+
+### 3b. Gait-tune editor (NAV1)
+
+`NAV2 Right` toggles the editor. While it is engaged, NAV1 edits gait parameters
+instead of pose trim; while it is disengaged NAV1 keeps its normal trim role.
+
+| Input | Action |
+| --- | --- |
+| `NAV2 Right` | Engage / leave the gait-tune editor |
+| `NAV1 Up` / `Down` | Next / previous parameter (step height → stride → duty) |
+| `NAV1 Right` / `Left` | Increase / decrease by `kGaitTuneStepFrac` (5% of range, 20 presses end to end) |
+| `NAV1 Center` | Save the live gait shape to the 24LC32 config |
+
+While the editor is engaged and the sticks are centred, **leg 1 traces the swing
+arc** at a slow 2 s cycle using the live stride and step height, so the operator
+can see the effect on the robot itself. The other five legs hold their stance.
+The preview target passes through the same reach-margin clamp and servo travel
+clamp as a walking target, and any stick input immediately cancels it.
+
+The handset also shows the live values: the CRSF status frame carries the
+selected parameter and the applied stride / step height / duty, and its rate is
+raised from 5 Hz to 20 Hz for 3 s after every edit so the readout tracks the
+knob without perceptible lag.
+
+Saving is refused while the robot is moving (`AGENTS.md` 4.3 forbids EEPROM
+writes during walking) and when the config store is volatile; the reason is
+reported on the downlink through the deduplicated error journal.
+
+On boot — and after any config commit — `rcTask` seeds the editor from the
+persisted `GaitDefaults`, so the handset always starts from what is stored.
 
 ---
 
@@ -106,8 +153,8 @@ still the final authority and may reject any request (see safety rules in
 | `SW_G` | `feat_passive_pose` | Request passive-pose streaming |
 | `SW_H` | `host_authority` | Hand high-level authority to a host/Jetson |
 
-`NAV1` is the **body-pose trim** cluster (persistent offset applied on top of
-the live pose):
+`NAV1` is the **body-pose trim** cluster while the gait-tune editor is closed
+(persistent offset applied on top of the live pose):
 
 | NAV1 | Action |
 | --- | --- |
@@ -116,7 +163,8 @@ the live pose):
 | Center | reset all trim to 0 |
 
 Trim accumulates on **rising edges only** (one step per press), clamped to
-±`kTrimMaxRad`.
+±`kTrimMaxRad`. See §3b for what the same cluster does while the gait-tune
+editor is engaged.
 
 ---
 
@@ -137,6 +185,8 @@ implemented by the control-task trick engine in `oha.5`.
 | `NAV2 Down` | `Stretch` | Full-body stretch sequence |
 | `NAV2 Left` | `LeanLook` | Lean/look around |
 | `NAV2 Center` | `DanceLoop` | Looping dance until cancelled |
+
+`NAV2 Right` is not a trick: it toggles the gait-tune editor (§3b).
 
 All seven+ tricks from the request are covered. Bindings are remappable (any
 boolean source → any `TrickId`, up to `kMaxTrickBindings` = 8).
@@ -189,14 +239,19 @@ Saved from EdgeTX model `ROBOT_TX16S_DIRECT` (see
 | CH6 | S2 | body height | `pot[1]` |
 | CH7 | LS | stride | `encoder[0]` + `enc_accum_[0]` (absolute) |
 | CH8 | RS | step height | `encoder[1]` + `enc_accum_[1]` (absolute) |
-| CH9 | SE | mode select | `toggles[0]` / SwE (0/1/2) |
-| CH10 | SD | gait select | `toggles[1]` / SwF (0/1/2) |
+| CH9 | SE | gait select | `toggles[0]` / SwE (0/1/2) |
+| CH10 | SD | mode select | `toggles[1]` / SwF (0/1/2) |
 | CH11 | SA/SF mix | safety mask (2 bits) | bit0→SwA arm, bit1→SwB estop |
 | CH12 | SB/SC/SG mix | feature mask (4 bits) | SwC/SwD/SwG/SwH |
 | CH13 | GV1 ACT | action selector (13 pos) | picks one button/nav |
 | CH14 | SH | action fire (momentary) | gates the CH13 selection |
 | CH15 | MAX 0 | reserved centre | (none) |
 | CH16 | MAX 0 | reserved centre | (none) |
+
+The TX16S has no NAV cluster, so the gait-tune editor is unreachable from it.
+Instead the LS/RS sliders feed the same stride / step-height values the editor
+edits (absolute, not integrated), so tuning, telemetry, and the save path behave
+identically on both profiles. Duty stays at the persisted default on the TX16S.
 
 Notes on the direct profile:
 

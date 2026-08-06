@@ -21,13 +21,25 @@ void test_hexapod_status_matches_controller_wire_layout() {
   status.body_height_mm = 40;
   status.stride_mm = 60;
   status.step_height_mm = 30;
+  // v2: gait-tune editor open on Stride (param 1) with a preview running, and
+  // a Warning-severity (2) deduplicated error.
+  status.tune_flags = telemetry::tuneflag::kTuneActive |
+                      telemetry::tuneflag::kPreviewActive |
+                      (1u << telemetry::tuneflag::kParamShift) |
+                      (1u << telemetry::tuneflag::kSeverityShift);
+  status.error_code = 16;  // BatteryLow
+  status.error_detail = 102;
+  status.error_sequence = 7;
+  status.error_count = 300;
+  status.error_suppressed = 4096;
 
   uint8_t payload[telemetry::kHexapodPayloadBytes];
   TEST_ASSERT_EQUAL_UINT8(telemetry::kHexapodPayloadBytes,
                           telemetry::encodeHexapodStatus(status, payload));
   const uint8_t expected[telemetry::kHexapodPayloadBytes] = {
-      0x48, 0x58, 0x01, 0x33, 0x05, 0x01, 0x02, 0x00, 0x00, 0xBF,
+      0x48, 0x58, 0x02, 0x33, 0x05, 0x01, 0x02, 0x00, 0x00, 0xBF,
       0x99, 0xDB, 0x2E, 0xE0, 0x00, 0x28, 0x00, 0x3C, 0x00, 0x1E,
+      0x53, 0x10, 0x66, 0x07, 0x01, 0x2C, 0x10, 0x00,
   };
   TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, payload, sizeof(expected));
 }

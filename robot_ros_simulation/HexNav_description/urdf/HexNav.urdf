@@ -881,44 +881,44 @@
     <origin xyz="0.006683 0.126463 -0.016500" rpy="-0.000000 0.000000 1.570796"/>
   </joint>
 
-  <joint name="leg_1_coxa_joint" type="continuous">
+  <joint name="leg_1_coxa_joint" type="revolute">
     <parent link="leg_1_mx28_coxa"/>
     <child link="leg_1_coxa"/>
     <origin xyz="0.000000 -0.000000 0.021000" rpy="-0.000000 -0.000000 1.570796"/>
     <axis xyz="0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_2_coxa_joint" type="continuous">
+  <joint name="leg_2_coxa_joint" type="revolute">
     <parent link="leg_2_mx28_coxa"/>
     <child link="leg_2_coxa"/>
     <origin xyz="-0.000000 0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_3_coxa_joint" type="continuous">
+  <joint name="leg_3_coxa_joint" type="revolute">
     <parent link="leg_3_mx28_coxa"/>
     <child link="leg_3_coxa"/>
     <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_4_coxa_joint" type="continuous">
+  <joint name="leg_4_coxa_joint" type="revolute">
     <parent link="leg_4_mx28_coxa"/>
     <child link="leg_4_coxa"/>
     <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_5_coxa_joint" type="continuous">
+  <joint name="leg_5_coxa_joint" type="revolute">
     <parent link="leg_5_mx28_coxa"/>
     <child link="leg_5_coxa"/>
     <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
   <joint name="bot_mount" type="fixed">
@@ -927,60 +927,60 @@
     <origin xyz="-0.070711 -0.271586 -0.015000" rpy="3.141593 -0.000000 2.356194"/>
   </joint>
 
-  <joint name="leg_6_coxa_joint" type="continuous">
+  <joint name="leg_6_coxa_joint" type="revolute">
     <parent link="leg_6_mx28_coxa"/>
     <child link="leg_6_coxa"/>
     <origin xyz="-0.000000 -0.000000 0.021000" rpy="0.000000 0.000000 1.570796"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_1_femur_joint" type="continuous">
+  <joint name="leg_1_femur_joint" type="revolute">
     <parent link="leg_1_coxa"/>
     <child link="leg_1_mx28_femur"/>
     <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_2_femur_joint" type="continuous">
+  <joint name="leg_2_femur_joint" type="revolute">
     <parent link="leg_2_coxa"/>
     <child link="leg_2_mx28_femur"/>
     <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_3_femur_joint" type="continuous">
+  <joint name="leg_3_femur_joint" type="revolute">
     <parent link="leg_3_coxa"/>
     <child link="leg_3_mx28_femur"/>
     <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_4_femur_joint" type="continuous">
+  <joint name="leg_4_femur_joint" type="revolute">
     <parent link="leg_4_coxa"/>
     <child link="leg_4_mx28_femur"/>
     <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_5_femur_joint" type="continuous">
+  <joint name="leg_5_femur_joint" type="revolute">
     <parent link="leg_5_coxa"/>
     <child link="leg_5_mx28_femur"/>
     <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
     <axis xyz="-0.000000 0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_6_femur_joint" type="continuous">
+  <joint name="leg_6_femur_joint" type="revolute">
     <parent link="leg_6_coxa"/>
     <child link="leg_6_mx28_femur"/>
     <origin xyz="0.052000 -0.021000 -0.021000" rpy="1.570796 -1.570796 0.000000"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
   <joint name="leg_1_femur_mount" type="fixed">
@@ -1019,52 +1019,52 @@
     <origin xyz="-0.000000 -0.035800 -0.021000" rpy="-0.000000 -0.000000 -3.141593"/>
   </joint>
 
-  <joint name="leg_1_tibia_joint" type="continuous">
+  <joint name="leg_1_tibia_joint" type="revolute">
     <parent link="leg_1_femur"/>
     <child link="leg_1_mx28_tibia"/>
     <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_2_tibia_joint" type="continuous">
+  <joint name="leg_2_tibia_joint" type="revolute">
     <parent link="leg_2_femur"/>
     <child link="leg_2_mx28_tibia"/>
     <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_3_tibia_joint" type="continuous">
+  <joint name="leg_3_tibia_joint" type="revolute">
     <parent link="leg_3_femur"/>
     <child link="leg_3_mx28_tibia"/>
     <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_4_tibia_joint" type="continuous">
+  <joint name="leg_4_tibia_joint" type="revolute">
     <parent link="leg_4_femur"/>
     <child link="leg_4_mx28_tibia"/>
     <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_5_tibia_joint" type="continuous">
+  <joint name="leg_5_tibia_joint" type="revolute">
     <parent link="leg_5_femur"/>
     <child link="leg_5_mx28_tibia"/>
     <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
-  <joint name="leg_6_tibia_joint" type="continuous">
+  <joint name="leg_6_tibia_joint" type="revolute">
     <parent link="leg_6_femur"/>
     <child link="leg_6_mx28_tibia"/>
     <origin xyz="0.015000 0.029000 0.021000" rpy="-0.000000 0.000000 2.443461"/>
     <axis xyz="-0.000000 -0.000000 1.000000"/>
-    <limit effort="100.0" velocity="1.00"/>
+    <limit effort="100.0" velocity="1.00" lower="-1.570796" upper="1.570796"/>
   </joint>
 
   <joint name="leg_1_tibia_mount" type="fixed">

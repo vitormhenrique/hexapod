@@ -88,13 +88,13 @@ void makeTxNeutral(uint16_t ch[CPACK_NUM_CHANNELS]) {
 void test_walk_mode_twist_from_default_bindings() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.toggles[0] = 0;       // SwE UP -> Walk
+  in.toggles[1] = 0;       // SwF UP -> Yaw (right X steers)
   in.gimbal[1] = 1000;     // LY full forward -> walk_forward
   in.gimbal[0] = -1000;    // LX full left    -> walk_strafe
   in.gimbal[2] = 500;      // RX half         -> walk_yaw
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_TRUE(c.valid);
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Yaw),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_vx);
   TEST_ASSERT_FLOAT_WITHIN(0.02f, -1.0f, c.twist_vy);
@@ -107,7 +107,7 @@ void test_walk_mode_twist_from_default_bindings() {
 void test_translate_body_mode_pose_overlay_keeps_walking() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.toggles[0] = 1;     // SwE CENTER -> TranslateBody
+  in.toggles[1] = 1;     // SwF CENTER -> TranslateBody
   in.gimbal[3] = 1000;   // RY -> body_x
   in.gimbal[2] = -1000;  // RX -> body_y
   in.gimbal[1] = 500;    // LY -> walk_forward (left stick keeps walking)
@@ -128,7 +128,7 @@ void test_translate_body_mode_pose_overlay_keeps_walking() {
 void test_rotate_body_mode_clamped_to_envelope() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.toggles[0] = 2;    // SwE DOWN -> RotateBody
+  in.toggles[1] = 2;    // SwF DOWN -> RotateBody
   in.gimbal[2] = 1000;  // RX -> roll
   in.gimbal[3] = 1000;  // RY -> pitch
   in.gimbal[0] = 1000;  // LX -> walk_strafe
@@ -146,41 +146,43 @@ void test_rotate_body_mode_clamped_to_envelope() {
 void test_gait_index_from_select_toggle() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.toggles[1] = 0;
+  in.toggles[0] = 0;  // SwE UP -> Wave
   TEST_ASSERT_EQUAL_UINT(0, feed(b, in, 10).gait_index);
-  in.toggles[1] = 1;
+  in.toggles[0] = 1;  // SwE CENTER -> Ripple (after debounce)
   TEST_ASSERT_EQUAL_UINT(0, feed(b, in, 20).gait_index);
   TEST_ASSERT_EQUAL_UINT(1, feed(b, in, 60).gait_index);
-  in.toggles[1] = 2;
+  in.toggles[0] = 2;  // SwE DOWN -> Tripod
   TEST_ASSERT_EQUAL_UINT(1, feed(b, in, 70).gait_index);
   TEST_ASSERT_EQUAL_UINT(2, feed(b, in, 110).gait_index);
 }
 
-void test_gait_selection_is_latched_outside_walk_mode() {
+// The gait family is live in EVERY right-gimbal mode, so the operator can walk
+// with a chosen gait while translating or rotating the body.
+void test_gait_selection_is_live_in_every_mode() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.toggles[0] = 0;  // Walk
-  in.toggles[1] = 2;  // Tripod
+  in.toggles[1] = 0;  // SwF UP -> Yaw
+  in.toggles[0] = 2;  // SwE DOWN -> Tripod
   feed(b, in, 10);
   const ControllerCommand& walking = feed(b, in, 60);
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Yaw),
                          static_cast<uint8_t>(walking.mode));
   TEST_ASSERT_EQUAL_UINT(2, walking.gait_index);
 
-  in.toggles[0] = 1;  // TranslateBody
-  in.toggles[1] = 0;  // changing gait switch must not alter the latch
+  in.toggles[1] = 1;  // TranslateBody
+  in.toggles[0] = 0;  // Wave: applies immediately, no latch
   feed(b, in, 70);
   const ControllerCommand& translating = feed(b, in, 120);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::TranslateBody),
                          static_cast<uint8_t>(translating.mode));
-  TEST_ASSERT_EQUAL_UINT(2, translating.gait_index);
+  TEST_ASSERT_EQUAL_UINT(0, translating.gait_index);
 
-  in.toggles[0] = 0;  // Return to Walk: current Wave selection now applies.
+  in.toggles[0] = 1;  // Ripple while still translating
   feed(b, in, 130);
-  const ControllerCommand& resumed = feed(b, in, 180);
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
-                         static_cast<uint8_t>(resumed.mode));
-  TEST_ASSERT_EQUAL_UINT(0, resumed.gait_index);
+  const ControllerCommand& retuned = feed(b, in, 180);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::TranslateBody),
+                         static_cast<uint8_t>(retuned.mode));
+  TEST_ASSERT_EQUAL_UINT(1, retuned.gait_index);
 }
 
 // --- safety ----------------------------------------------------------------
@@ -282,28 +284,137 @@ void test_shape_params_from_pots() {
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.25f, c.body_height);
 }
 
-void test_encoder_integrates_stride_trim() {
+// The NAV1 cluster now owns stride / step height / duty, so the encoders are
+// free: turning one must not move a gait parameter with the default bindings.
+void test_encoders_no_longer_drive_gait_shape() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
   in.encoder[0] = 600;
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, feed(b, in, 10).stride);
-  in.encoder[0] = 568;  // -32 counts = -0.25 of 128 full-scale
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.75f, feed(b, in, 20).stride);
-  in.encoder[0] = 600;  // +32 counts -> full stride again
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f, feed(b, in, 30).stride);
+  in.encoder[1] = 600;
+  const ControllerCommand& seed = feed(b, in, 10);
+  const float stride = seed.stride;
+  const float step = seed.step_height;
+  in.encoder[0] = 664;  // +64 counts: would previously be +0.5 of full scale
+  in.encoder[1] = 536;  // -64 counts
+  const ControllerCommand& c = feed(b, in, 20);
+  TEST_ASSERT_EQUAL_FLOAT(stride, c.stride);
+  TEST_ASSERT_EQUAL_FLOAT(step, c.step_height);
 }
 
-void test_encoder_wrap_is_shortest_delta() {
+// --- gait-tune editor (NAV2 Right engages, NAV1 edits) ----------------------
+
+// Press a boolean input for one frame and release it on the next, advancing
+// past the edge refractory window each time.
+void pulse(ControllerBridge& b, ChannelPackInputs_t& in, bool& input,
+           uint32_t& t) {
+  input = true;
+  t += kEdgeRefractoryMs + 10;
+  feed(b, in, t);
+  input = false;
+  t += 10;
+  feed(b, in, t);
+}
+
+void test_gait_tune_toggle_switches_nav1_from_trim_to_parameters() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.encoder[0] = 10;
-  feed(b, in, 10);
-  // Wrap 10 -> 2046 is a -12 step, not +2036.
-  in.encoder[0] = 2046;
-  const ControllerCommand& c = feed(b, in, 20);
-  // Full stride plus a -12/128 adjustment.
-  TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.0f - 12.0f / 128.0f, c.stride);
+  uint32_t t = 100;
+  feed(b, in, t);
+  TEST_ASSERT_FALSE(b.command().gait_tune_active);
+
+  // NAV1 Up trims pitch while the editor is closed.
+  pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, kTrimStepRad, b.command().trim_pitch);
+
+  // NAV2 Right engages the editor.
+  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);
+  TEST_ASSERT_TRUE(b.command().gait_tune_active);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(GaitTuneParam::StepHeight),
+                         static_cast<uint8_t>(b.command().gait_tune_param));
+
+  // The same NAV1 Up now selects the next parameter and leaves trim alone.
+  const float trim_before = b.command().trim_pitch;
+  pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
+  TEST_ASSERT_EQUAL_FLOAT(trim_before, b.command().trim_pitch);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(GaitTuneParam::Stride),
+                         static_cast<uint8_t>(b.command().gait_tune_param));
+
+  // Leaving the editor restores trim control.
+  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);
+  TEST_ASSERT_FALSE(b.command().gait_tune_active);
+  pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.0f * kTrimStepRad, b.command().trim_pitch);
 }
+
+void test_gait_tune_adjusts_selected_parameter_and_clamps() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  b.setGaitTuneFractions(0.5f, 0.5f, 0.5f);
+  feed(b, in, t);
+  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);  // engage, on StepHeight
+
+  pulse(b, in, in.nav[0][CPACK_NAV_RIGHT], t);  // increase
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.5f + kGaitTuneStepFrac,
+                           b.command().step_height);
+  TEST_ASSERT_EQUAL_FLOAT(0.5f, b.command().stride);
+
+  pulse(b, in, in.nav[0][CPACK_NAV_LEFT], t);  // decrease back
+  pulse(b, in, in.nav[0][CPACK_NAV_LEFT], t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.5f - kGaitTuneStepFrac,
+                           b.command().step_height);
+
+  // Select stride and drive it to the top clamp.
+  pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(GaitTuneParam::Stride),
+                         static_cast<uint8_t>(b.command().gait_tune_param));
+  for (int i = 0; i < 30; ++i) pulse(b, in, in.nav[0][CPACK_NAV_RIGHT], t);
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, b.command().stride);
+  for (int i = 0; i < 40; ++i) pulse(b, in, in.nav[0][CPACK_NAV_LEFT], t);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, b.command().stride);
+}
+
+void test_gait_tune_save_bumps_sequence_once_per_press() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  feed(b, in, t);
+  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);
+  const uint32_t before = b.command().gait_tune_save_seq;
+
+  // Held across many frames: still exactly one save request.
+  in.nav[0][CPACK_NAV_CENTER] = true;
+  for (int i = 0; i < 5; ++i) {
+    t += 10;
+    feed(b, in, t);
+  }
+  TEST_ASSERT_EQUAL_UINT32(before + 1, b.command().gait_tune_save_seq);
+
+  in.nav[0][CPACK_NAV_CENTER] = false;
+  t += 10;
+  feed(b, in, t);
+  pulse(b, in, in.nav[0][CPACK_NAV_CENTER], t);
+  TEST_ASSERT_EQUAL_UINT32(before + 2, b.command().gait_tune_save_seq);
+}
+
+void test_gait_tune_defaults_track_config_until_editor_opens() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  b.setGaitTuneFractions(0.2f, 0.4f, 0.6f);
+  const ControllerCommand& seeded = feed(b, in, t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.2f, seeded.step_height);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.4f, seeded.stride);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.6f, seeded.duty);
+
+  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);  // editor engaged
+  b.setGaitTuneFractions(0.9f, 0.9f, 0.9f);     // config revision lands
+  t += 10;
+  const ControllerCommand& held = feed(b, in, t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.2f, held.step_height);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.4f, held.stride);
+}
+
 
 // --- features --------------------------------------------------------------
 
@@ -614,14 +725,14 @@ void test_tx16s_encoders_are_absolute() {
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c2.stride);
 }
 
-void test_tx16s_toggles_mode_and_gait() {
+void test_tx16s_toggles_gait_and_mode() {
   ControllerBridge b;
   uint16_t ch[CPACK_NUM_CHANNELS];
   makeTxNeutral(ch);
-  ch[8] = CPACK_CRSF_MIN;  // SE UP -> Walk
-  ch[9] = CPACK_CRSF_MAX;  // SD DOWN -> gait 2
+  ch[8] = CPACK_CRSF_MAX;  // SE DOWN -> gait 2 (tripod)
+  ch[9] = CPACK_CRSF_MIN;  // SD UP -> Yaw
   const ControllerCommand& c = feedCh(b, ch, 10);
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Walk),
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Yaw),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_EQUAL_UINT(2, c.gait_index);
 }
@@ -875,7 +986,7 @@ int main(int, char**) {
   RUN_TEST(test_translate_body_mode_pose_overlay_keeps_walking);
   RUN_TEST(test_rotate_body_mode_clamped_to_envelope);
   RUN_TEST(test_gait_index_from_select_toggle);
-  RUN_TEST(test_gait_selection_is_latched_outside_walk_mode);
+  RUN_TEST(test_gait_selection_is_live_in_every_mode);
   RUN_TEST(test_arm_switch_requires_no_kill);
   RUN_TEST(test_arm_switch_uses_guarded_pot_channel_band);
   RUN_TEST(test_kill_switch_forces_estop_and_disarm);
@@ -883,8 +994,11 @@ int main(int, char**) {
   RUN_TEST(test_failsafe_on_link_down);
   RUN_TEST(test_failsafe_on_stale_timeout);
   RUN_TEST(test_shape_params_from_pots);
-  RUN_TEST(test_encoder_integrates_stride_trim);
-  RUN_TEST(test_encoder_wrap_is_shortest_delta);
+  RUN_TEST(test_encoders_no_longer_drive_gait_shape);
+  RUN_TEST(test_gait_tune_toggle_switches_nav1_from_trim_to_parameters);
+  RUN_TEST(test_gait_tune_adjusts_selected_parameter_and_clamps);
+  RUN_TEST(test_gait_tune_save_bumps_sequence_once_per_press);
+  RUN_TEST(test_gait_tune_defaults_track_config_until_editor_opens);
   RUN_TEST(test_feature_toggle_levels);
   RUN_TEST(test_host_authority_switch);
   RUN_TEST(test_trick_fires_once_per_press);
@@ -907,7 +1021,7 @@ int main(int, char**) {
   // TX16S direct decode.
   RUN_TEST(test_tx16s_gimbals_and_pots);
   RUN_TEST(test_tx16s_encoders_are_absolute);
-  RUN_TEST(test_tx16s_toggles_mode_and_gait);
+  RUN_TEST(test_tx16s_toggles_gait_and_mode);
   RUN_TEST(test_tx16s_safety_mask);
   RUN_TEST(test_tx16s_feature_mask);
   RUN_TEST(test_tx16s_action_selector_and_fire);

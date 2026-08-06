@@ -53,6 +53,23 @@ bool ConfigApi::stagedValid(RobotConfig& out) const {
   return validateRobotConfig(out);
 }
 
+CfgResult ConfigApi::saveGaitDefaults(const GaitDefaults& gait) {
+  RobotConfig candidate = shadow_;
+  candidate.gait = gait;
+  if (!validateRobotConfig(candidate)) return CfgResult::ValidationFailed;
+  uint8_t payload[kConfigPayloadSize];
+  const uint16_t len = serializeRobotConfig(candidate, payload, sizeof(payload));
+  if (len != kConfigPayloadSize) return CfgResult::ValidationFailed;
+  if (!persist_.persistent()) return CfgResult::Volatile;
+  if (!persist_.commitPayload(payload, len)) return CfgResult::CommitFailed;
+  shadow_ = candidate;
+  // Keep the host staging buffer consistent with the new known-good config so a
+  // later CFG_GET_BLOCK / CFG_COMMIT cannot silently roll the gait block back.
+  staging_len_ = serializeRobotConfig(shadow_, staging_, sizeof(staging_));
+  ++shadow_rev_;
+  return CfgResult::Ok;
+}
+
 bool ConfigApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len,
                        uint8_t* out, uint16_t out_cap, uint16_t* out_len,
                        uint8_t* out_flags) {
