@@ -111,7 +111,7 @@ requests; firmware capability, authority, and safety checks remain final.
 | `SW_D` | ON | Request terrain leveling |
 | `SW_E` | UP / CENTER / DOWN | **Left gimbal walk pattern**: wave / ripple / tripod |
 | `SW_F` | UP / CENTER / DOWN | **Right gimbal job**: turn / translate body / rotate body |
-| `SW_G` | ON | Request torque-off passive-pose streaming |
+| `SW_G` | ON / OFF | Enter gait tuning / restore NAV1 pose trim |
 | `SW_H` | ON | Hand motion authority to the USB host or Jetson |
 | `BTN_1` | Press | Stand-up choreography |
 | `BTN_2` | Press | Sit-down choreography |
@@ -123,7 +123,7 @@ requests; firmware capability, authority, and safety checks remain final.
 | `NAV2` Up | Press | Twirl in place |
 | `NAV2` Down | Press | Stretch/push-up sequence |
 | `NAV2` Left | Press | Hold lean/look pose until cancelled |
-| `NAV2` Right | Press | Engage / leave the gait-tune editor |
+| `NAV2` Right | Press | Unassigned |
 | `NAV2` Center | Press | Loop dance until stick input cancels it |
 
 Buttons and nav actions fire once on the rising edge with a 150 ms refractory
@@ -144,9 +144,9 @@ about `+60°` and the tibia about `-50°` from their zero rest — what the Join
 Matrix page shows as roughly `240 deg` and `128 deg`. Stance X/Y does not
 change, so the footprint stays the same as when standing.
 
-Swing clearance is still capped at 40 mm below the body plane, so while fully
-crouched the effective step lift tops out around 25 mm no matter what step
-height is configured. Raise the ride height before asking for a tall step.
+Swing clearance remains the configured step height through the full ride-height
+range, including the 65 mm crouch limit. The toe target cap leaves room for the
+maximum 50 mm configured lift at that lowest height.
 
 ## Tuning The Gait From The Handset
 
@@ -159,8 +159,8 @@ only, since the body modes use both right-hand axes for the pose overlay.
 
 Stride, step height, and duty are edited from the NAV1 cluster:
 
-1. Press `NAV2 Right` to engage the gait-tune editor. NAV1 stops trimming pose
-   and starts editing gait parameters.
+1. Turn `SW_G` ON to engage the gait-tune editor. NAV1 stops trimming pose and
+   starts editing gait parameters.
 2. `NAV1 Up` / `Down` cycles step height → stride → duty. The handset telemetry
    page shows the selected parameter and its live value.
 3. `NAV1 Right` / `Left` changes it by 5% of the safe range per press.
@@ -170,7 +170,7 @@ Stride, step height, and duty are edited from the NAV1 cluster:
 5. `NAV1 Center` saves to the 24LC32 config. Saving is refused while the robot
    is moving or when no EEPROM is present; the reason appears on the handset
    `Error` row.
-6. Press `NAV2 Right` again to leave the editor and restore pose trim.
+6. Turn `SW_G` OFF to leave the editor and restore pose trim.
 
 While the editor is engaged the robot raises its status downlink from 5 Hz to
 20 Hz so the readout keeps up with the knob. On boot the editor is seeded from

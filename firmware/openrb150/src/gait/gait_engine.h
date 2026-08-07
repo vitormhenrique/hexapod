@@ -32,7 +32,10 @@ namespace gait {
 constexpr float kMaxStrideMm = 80.0f;   // max per-axis foot stroke
 constexpr float kMaxStepMm = 50.0f;     // max swing lift
 constexpr float kMinFootZMm = -158.0f;  // lowest commanded foot Z in B
-constexpr float kMaxFootZMm = -40.0f;   // highest commanded foot Z in B
+// The full 50 mm swing must remain available at the 65 mm crouch limit:
+// -65 + 50 = -15 mm. The previous -40 mm cap silently shortened a 30 mm
+// configured lift to 25 mm (and worse for larger lifts) as the body lowered.
+constexpr float kMaxFootZMm = -15.0f;   // highest commanded foot Z in B
 constexpr float kSitFootZMm = -60.0f;   // body-down sit pose
 
 constexpr float kStrokeEnvelopeFrac = 0.5f;

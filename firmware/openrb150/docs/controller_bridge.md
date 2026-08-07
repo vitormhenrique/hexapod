@@ -151,7 +151,7 @@ this custom profile with `HEXAPOD_FORCE_CUSTOM_CHANNELPACK`.
 | SW_B | **E-STOP** / kill (also forced by failsafe) |
 | SW_C | Enable **foot-contact** detection feature |
 | SW_D | Enable **terrain-leveling** feature |
-| SW_G | Enable **passive-pose** streaming feature |
+| SW_G | ON: **gait-tune editor**; OFF: normal NAV1 pose trim |
 | SW_H | Hand **motion authority to the USB host** (Mac/Jetson) |
 
 ### 3-position toggles — CH10 compact state (selectors)
@@ -196,7 +196,7 @@ biasing the robot's attitude on top of the gimbal pose:
 | Right | Trim **roll right** |
 | Center | **Reset** all pose trim to zero |
 
-With the editor engaged (`NAV2 Right`) the same cluster edits gait shape:
+With the editor engaged (`SW_G` ON) the same cluster edits gait shape:
 
 | NAV1 direction | Hexapod action |
 |----------------|----------------|
@@ -216,8 +216,7 @@ moving; `apiTask` runs the transaction and reports a rejection through the
 deduplicated error journal. The save request is carried as a monotonic
 sequence, so a press is never lost to a task boundary nor applied twice.
 
-**NAV2 → additional trick triggers** (rising edge, same debounce as buttons),
-plus the gait-tune toggle.
+**NAV2 → additional trick triggers** (rising edge, same debounce as buttons).
 
 | NAV2 direction | Trick |
 |----------------|-------|
@@ -225,7 +224,7 @@ plus the gait-tune toggle.
 | Down | **Stretch** |
 | Left | **Lean / look** |
 | Center | **Dance loop** |
-| Right | *(not a trick)* toggle the gait-tune editor |
+| Right | Unassigned |
 
 ---
 

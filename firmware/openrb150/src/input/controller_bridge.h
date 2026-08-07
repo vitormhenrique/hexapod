@@ -208,7 +208,7 @@ struct BindingConfig {
   BoolSource estop = BoolSource::SwB;
   BoolSource feat_foot_contact = BoolSource::SwC;
   BoolSource feat_terrain_leveling = BoolSource::SwD;
-  BoolSource feat_passive_pose = BoolSource::SwG;
+  BoolSource feat_passive_pose = BoolSource::None;
   BoolSource host_authority = BoolSource::SwH;
   // Persistent operator pose trim (edge-nudged, fixed step per press). These
   // are NAV1 and are active only while the gait-tune mode is disengaged.
@@ -217,9 +217,9 @@ struct BindingConfig {
   BoolSource trim_roll_left = BoolSource::Nav1Left;
   BoolSource trim_roll_right = BoolSource::Nav1Right;
   BoolSource trim_reset = BoolSource::Nav1Center;
-  // Gait-tune editor. `gait_tune_toggle` engages/disengages the mode; while it
+  // Gait-tune editor. The default SW_G binding is level-controlled; while it
   // is engaged the SAME NAV1 cluster edits gait parameters instead of trim.
-  BoolSource gait_tune_toggle = BoolSource::Nav2Right;
+  BoolSource gait_tune_toggle = BoolSource::SwG;
   BoolSource gait_tune_next = BoolSource::Nav1Up;
   BoolSource gait_tune_prev = BoolSource::Nav1Down;
   BoolSource gait_tune_increase = BoolSource::Nav1Right;

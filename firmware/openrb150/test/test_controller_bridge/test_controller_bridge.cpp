@@ -90,15 +90,15 @@ void test_walk_mode_twist_from_default_bindings() {
   ChannelPackInputs_t in = makeNeutral();
   in.toggles[1] = 0;       // SwF UP -> Yaw (right X steers)
   in.gimbal[1] = 1000;     // LY full forward -> walk_forward
-  in.gimbal[0] = -1000;    // LX full left    -> walk_strafe
-  in.gimbal[2] = 500;      // RX half         -> walk_yaw
+  in.gimbal[0] = -1000;    // LX full left    -> walk_strafe (inverted)
+  in.gimbal[2] = 500;      // RX half right   -> walk_yaw (inverted -> CW)
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_TRUE(c.valid);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::Yaw),
                          static_cast<uint8_t>(c.mode));
   TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_vx);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, -1.0f, c.twist_vy);
-  TEST_ASSERT_FLOAT_WITHIN(0.03f, 0.5f, c.twist_wz);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_vy);
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, -0.5f, c.twist_wz);
   // No body pose in walk mode.
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_x_mm);
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_roll);
@@ -131,7 +131,7 @@ void test_rotate_body_mode_clamped_to_envelope() {
   in.toggles[1] = 2;    // SwF DOWN -> RotateBody
   in.gimbal[2] = 1000;  // RX -> roll
   in.gimbal[3] = 1000;  // RY -> pitch
-  in.gimbal[0] = 1000;  // LX -> walk_strafe
+  in.gimbal[0] = 1000;  // LX full right -> walk_strafe (inverted -> right)
   const ControllerCommand& c = feed(b, in, 100);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(ControlMode::RotateBody),
                          static_cast<uint8_t>(c.mode));
@@ -139,7 +139,7 @@ void test_rotate_body_mode_clamped_to_envelope() {
   TEST_ASSERT_FLOAT_WITHIN(0.01f, poselim::kMaxRotRad, c.pose_pitch);
   // body_yaw is unbound by default; left X remains planar walking.
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.pose_yaw);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 1.0f, c.twist_vy);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, -1.0f, c.twist_vy);
   TEST_ASSERT_EQUAL_FLOAT(0.0f, c.twist_wz);
 }
 
@@ -301,7 +301,7 @@ void test_encoders_no_longer_drive_gait_shape() {
   TEST_ASSERT_EQUAL_FLOAT(step, c.step_height);
 }
 
-// --- gait-tune editor (NAV2 Right engages, NAV1 edits) ----------------------
+// --- gait-tune editor (SW_G enters, NAV1 edits) -----------------------------
 
 // Press a boolean input for one frame and release it on the next, advancing
 // past the edge refractory window each time.
@@ -326,8 +326,10 @@ void test_gait_tune_toggle_switches_nav1_from_trim_to_parameters() {
   pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
   TEST_ASSERT_FLOAT_WITHIN(1e-6f, kTrimStepRad, b.command().trim_pitch);
 
-  // NAV2 Right engages the editor.
-  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);
+  // SW_G ON engages the editor.
+  in.switches[4] = true;
+  t += 10;
+  feed(b, in, t);
   TEST_ASSERT_TRUE(b.command().gait_tune_active);
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(GaitTuneParam::StepHeight),
                          static_cast<uint8_t>(b.command().gait_tune_param));
@@ -339,8 +341,10 @@ void test_gait_tune_toggle_switches_nav1_from_trim_to_parameters() {
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(GaitTuneParam::Stride),
                          static_cast<uint8_t>(b.command().gait_tune_param));
 
-  // Leaving the editor restores trim control.
-  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);
+  // SW_G OFF leaves the editor and restores trim control.
+  in.switches[4] = false;
+  t += 10;
+  feed(b, in, t);
   TEST_ASSERT_FALSE(b.command().gait_tune_active);
   pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 2.0f * kTrimStepRad, b.command().trim_pitch);
@@ -352,7 +356,9 @@ void test_gait_tune_adjusts_selected_parameter_and_clamps() {
   uint32_t t = 100;
   b.setGaitTuneFractions(0.5f, 0.5f, 0.5f);
   feed(b, in, t);
-  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);  // engage, on StepHeight
+  in.switches[4] = true;  // engage, on StepHeight
+  t += 10;
+  feed(b, in, t);
 
   pulse(b, in, in.nav[0][CPACK_NAV_RIGHT], t);  // increase
   TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.5f + kGaitTuneStepFrac,
@@ -379,7 +385,9 @@ void test_gait_tune_save_bumps_sequence_once_per_press() {
   ChannelPackInputs_t in = makeNeutral();
   uint32_t t = 100;
   feed(b, in, t);
-  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);
+  in.switches[4] = true;
+  t += 10;
+  feed(b, in, t);
   const uint32_t before = b.command().gait_tune_save_seq;
 
   // Held across many frames: still exactly one save request.
@@ -407,7 +415,9 @@ void test_gait_tune_defaults_track_config_until_editor_opens() {
   TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.4f, seeded.stride);
   TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.6f, seeded.duty);
 
-  pulse(b, in, in.nav[1][CPACK_NAV_RIGHT], t);  // editor engaged
+  in.switches[4] = true;  // editor engaged
+  t += 10;
+  feed(b, in, t);
   b.setGaitTuneFractions(0.9f, 0.9f, 0.9f);     // config revision lands
   t += 10;
   const ControllerCommand& held = feed(b, in, t);
@@ -422,11 +432,10 @@ void test_feature_toggle_levels() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
   in.switches[2] = true;  // SwC foot contact
-  in.switches[4] = true;  // SwG passive pose
   const ControllerCommand& c = feed(b, in, 10);
   TEST_ASSERT_TRUE(c.feat_foot_contact);
   TEST_ASSERT_FALSE(c.feat_terrain_leveling);
-  TEST_ASSERT_TRUE(c.feat_passive_pose);
+  TEST_ASSERT_FALSE(c.feat_passive_pose);
 }
 
 void test_host_authority_switch() {
@@ -771,7 +780,8 @@ void test_tx16s_safety_mask() {
 }
 
 void test_tx16s_feature_mask() {
-  // All four feature bits set (MAX endpoint -> bin 15).
+  // All four feature bits set (MAX endpoint -> bin 15): bit 2 is SW_G,
+  // which now enters gait tuning rather than requesting passive pose.
   {
     ControllerBridge b;
     uint16_t ch[CPACK_NUM_CHANNELS];
@@ -780,10 +790,11 @@ void test_tx16s_feature_mask() {
     const ControllerCommand& c = feedCh(b, ch, 10);
     TEST_ASSERT_TRUE(c.feat_foot_contact);
     TEST_ASSERT_TRUE(c.feat_terrain_leveling);
-    TEST_ASSERT_TRUE(c.feat_passive_pose);
+    TEST_ASSERT_TRUE(c.gait_tune_active);
+    TEST_ASSERT_FALSE(c.feat_passive_pose);
     TEST_ASSERT_TRUE(c.host_authority);
   }
-  // Bits 0 and 2 only (foot contact + passive pose).
+  // Bits 0 and 2 only (foot contact + gait tune).
   {
     ControllerBridge b;
     uint16_t ch[CPACK_NUM_CHANNELS];
@@ -792,7 +803,8 @@ void test_tx16s_feature_mask() {
     const ControllerCommand& c = feedCh(b, ch, 10);
     TEST_ASSERT_TRUE(c.feat_foot_contact);
     TEST_ASSERT_FALSE(c.feat_terrain_leveling);
-    TEST_ASSERT_TRUE(c.feat_passive_pose);
+    TEST_ASSERT_TRUE(c.gait_tune_active);
+    TEST_ASSERT_FALSE(c.feat_passive_pose);
     TEST_ASSERT_FALSE(c.host_authority);
   }
 }

@@ -91,10 +91,14 @@ before reaching this frame. The journal keys a fixed 12-entry table on
 - the first occurrence after the key has been quiet for 15 s.
 
 Everything else is counted in `error_suppressed`. A stuck fault therefore costs
-one downlink update every 5 s instead of 500, and the handset shows severity
-through the running count rather than a scrolling log. Draining is
-highest-severity-first, and a full table never evicts an unsent, at-least-as
-severe entry, so a chatty warning cannot hide a critical fault.
+one downlink update every 5 s instead of 500. The remote uses
+`error_sequence` to log a new incident once, then suppresses status-frame
+duplicates and the 5 s still-failing heartbeat. It logs the same key again only
+after the firmware has observed a quiet interval and restarts its occurrence
+count, or when its severity escalates. The status page continues to show the
+latest code, severity, and count live. Draining is highest-severity-first, and
+a full table never evicts an unsent, at-least-as-severe entry, so a chatty
+warning cannot hide a critical fault.
 
 The controller accepts only exact-length, magic-matching version 2 payloads.
 It keeps the last decoded values normally colored for two seconds, then retains

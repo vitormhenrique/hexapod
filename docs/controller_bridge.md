@@ -106,14 +106,15 @@ height moved to the NAV1 gait-tune editor, so both encoders are free for future
 use. A host may still bind an axis to `stride` / `step_height` / `duty` through
 `SET_BINDINGS`; when a binding is present it overrides the editor value.
 
-### 3b. Gait-tune editor (NAV1)
+### 3b. Gait-tune editor (SW_G + NAV1)
 
-`NAV2 Right` toggles the editor. While it is engaged, NAV1 edits gait parameters
-instead of pose trim; while it is disengaged NAV1 keeps its normal trim role.
+`SW_G` is a maintained tuning-mode switch: ON enters the editor and OFF leaves
+it. While it is engaged, NAV1 edits gait parameters instead of pose trim; while
+it is disengaged NAV1 keeps its normal trim role.
 
 | Input | Action |
 | --- | --- |
-| `NAV2 Right` | Engage / leave the gait-tune editor |
+| `SW_G` | ON: engage gait tuning; OFF: leave gait tuning |
 | `NAV1 Up` / `Down` | Next / previous parameter (step height → stride → duty) |
 | `NAV1 Right` / `Left` | Increase / decrease by `kGaitTuneStepFrac` (5% of range, 20 presses end to end) |
 | `NAV1 Center` | Save the live gait shape to the 24LC32 config |
@@ -150,7 +151,7 @@ still the final authority and may reject any request (see safety rules in
 | `SW_B` | `estop` | **Kill / emergency stop** — also forces `arm_request=false` |
 | `SW_C` | `feat_foot_contact` | Request foot-contact detection |
 | `SW_D` | `feat_terrain_leveling` | Request terrain leveling |
-| `SW_G` | `feat_passive_pose` | Request passive-pose streaming |
+| `SW_G` | `gait_tune_active` | ON: gait-tune editor; OFF: normal NAV1 trim controls |
 | `SW_H` | `host_authority` | Hand high-level authority to a host/Jetson |
 
 `NAV1` is the **body-pose trim** cluster while the gait-tune editor is closed
@@ -186,7 +187,7 @@ implemented by the control-task trick engine in `oha.5`.
 | `NAV2 Left` | `LeanLook` | Lean/look around |
 | `NAV2 Center` | `DanceLoop` | Looping dance until cancelled |
 
-`NAV2 Right` is not a trick: it toggles the gait-tune editor (§3b).
+`NAV2 Right` is unassigned by the default profile.
 
 All seven+ tricks from the request are covered. Bindings are remappable (any
 boolean source → any `TrickId`, up to `kMaxTrickBindings` = 8).

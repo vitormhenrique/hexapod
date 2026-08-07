@@ -97,9 +97,11 @@ inline void clearRawInputs(ChannelPackInputs_t* out) {
 BindingConfig defaultBindings() {
   BindingConfig c;
   // Left gimbal owns planar walking; right X turns the robot in Yaw mode.
+  // Hardware gimbals report stick-left as negative raw; invert strafe/yaw so
+  // operator left maps to command-frame left(+) and yaw CCW(+).
   c.walk_forward = {AxisSource::GimbalLY, false, 0.0f};
-  c.walk_strafe = {AxisSource::GimbalLX, false, 0.0f};
-  c.walk_yaw = {AxisSource::GimbalRX, false, 0.0f};
+  c.walk_strafe = {AxisSource::GimbalLX, true, 0.0f};
+  c.walk_yaw = {AxisSource::GimbalRX, true, 0.0f};
   // Translate-body overlay: right gimbal shifts the body fore/aft + lateral
   // while the left gimbal keeps walking. Z stays on the height pot.
   c.body_x = {AxisSource::GimbalRY, false, 0.0f};
@@ -127,7 +129,7 @@ BindingConfig defaultBindings() {
   c.estop = BoolSource::SwB;
   c.feat_foot_contact = BoolSource::SwC;
   c.feat_terrain_leveling = BoolSource::SwD;
-  c.feat_passive_pose = BoolSource::SwG;
+  c.feat_passive_pose = BoolSource::None;
   c.host_authority = BoolSource::SwH;
   // Operator pose trim on NAV1 (gait-tune mode borrows the same cluster).
   c.trim_pitch_up = BoolSource::Nav1Up;
@@ -135,8 +137,8 @@ BindingConfig defaultBindings() {
   c.trim_roll_left = BoolSource::Nav1Left;
   c.trim_roll_right = BoolSource::Nav1Right;
   c.trim_reset = BoolSource::Nav1Center;
-  // Gait-tune editor: NAV2 Right engages it, then NAV1 edits and saves.
-  c.gait_tune_toggle = BoolSource::Nav2Right;
+  // Gait-tune editor: SW_G owns the mode; NAV1 edits and saves.
+  c.gait_tune_toggle = BoolSource::SwG;
   c.gait_tune_next = BoolSource::Nav1Up;
   c.gait_tune_prev = BoolSource::Nav1Down;
   c.gait_tune_increase = BoolSource::Nav1Right;
@@ -635,11 +637,20 @@ void ControllerBridge::updatePoseTrim(uint32_t now_ms) {
 }
 
 void ControllerBridge::updateGaitTune(uint32_t now_ms) {
-  // The toggle is always live so the operator can leave the editor without
-  // first having to find a neutral parameter.
-  if (risingEdge(kGaitTuneEdgeBase + 0, readBool(cfg_.gait_tune_toggle),
-                 now_ms)) {
-    cmd_.gait_tune_active = !cmd_.gait_tune_active;
+  const bool tune_switch = readBool(cfg_.gait_tune_toggle);
+  // SW_G is a maintained two-position switch: its physical level is the
+  // editor state, so turning it off always leaves tuning. Other bindings keep
+  // the historical press-to-toggle behavior for compatibility.
+  const bool tune_state_changed =
+      cfg_.gait_tune_toggle == BoolSource::SwG
+          ? tune_switch != cmd_.gait_tune_active
+          : risingEdge(kGaitTuneEdgeBase + 0, tune_switch, now_ms);
+  if (tune_state_changed) {
+    if (cfg_.gait_tune_toggle == BoolSource::SwG) {
+      cmd_.gait_tune_active = tune_switch;
+    } else {
+      cmd_.gait_tune_active = !cmd_.gait_tune_active;
+    }
     cmd_.gait_tune_param = GaitTuneParam::StepHeight;
     ++cmd_.gait_tune_edit_seq;
     cmd_.gait_tune_last_edit_ms = now_ms;

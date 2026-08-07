@@ -161,6 +161,35 @@ void test_swing_lift_reaches_step_height() {
   TEST_ASSERT_FLOAT_WITHIN(2.0f, static_cast<float>(d.step_height_mm), max_lift);
 }
 
+void test_crouched_walk_keeps_configured_swing_clearance() {
+  GaitEngine ge;
+  GaitDefaults d = defaultGait();
+  d.gait = static_cast<uint8_t>(GaitId::Wave);
+  d.body_height_mm = static_cast<uint16_t>(kRcBodyHeightMinMm);
+  d.speed_x255 = 255;
+  ge.configure(d);
+
+  BodyTwist t;
+  t.vx = 1.0f;
+  ge.setTwist(t);
+  ge.reset();
+
+  float max_lift = 0.0f;
+  for (int i = 0; i < 400; ++i) {
+    GaitOutput out;
+    ge.update(10, out);
+    for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+      if (out.feet[leg].swing) {
+        max_lift = fmaxf(max_lift,
+                          out.feet[leg].z_mm + d.body_height_mm);
+      }
+    }
+  }
+
+  TEST_ASSERT_FLOAT_WITHIN(2.0f, static_cast<float>(d.step_height_mm),
+                           max_lift);
+}
+
 // The swing profile's endpoint slopes match the stance sweep rate, so the
 // foot's body-frame velocity is continuous through touchdown (zero scuff in
 // the world frame). Sample x-velocity across leg 0's swing->stance flip and
@@ -455,6 +484,7 @@ int main(int, char**) {
   RUN_TEST(test_requested_duty_does_not_change_mark_iii_pattern);
   RUN_TEST(test_targets_bounded_over_full_cycle);
   RUN_TEST(test_swing_lift_reaches_step_height);
+  RUN_TEST(test_crouched_walk_keeps_configured_swing_clearance);
   RUN_TEST(test_touchdown_velocity_is_continuous);
   RUN_TEST(test_forward_twist_moves_stance_foot_backward);
   RUN_TEST(test_centered_twist_holds_planted_home_stance);

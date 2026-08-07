@@ -9,6 +9,7 @@ firmware_dir := root / "firmware/openrb150"
 protocol_dir := root / "protocol"
 ros_simulation_dir := root / "robot_ros_simulation"
 pio := env_var_or_default("PIO", env_var("HOME") + "/.platformio/penv/bin/pio")
+openrb_port_finder := root / "tools/find_openrb_port.py"
 
 # List all available recipes.
 default: list
@@ -90,6 +91,9 @@ companion-hil *args:
 firmware-build:
     cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150
 
+# Alias for firmware-build.
+build: firmware-build
+
 # Compile both OpenRB-150 and MKR Zero target environments.
 firmware-check:
     cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -e mkrzero
@@ -100,18 +104,33 @@ firmware-test:
 
 # Upload firmware to the connected OpenRB-150.
 firmware-upload:
-    cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -t upload
+    #!/usr/bin/env zsh
+    port="$(python3 "{{openrb_port_finder}}" "{{pio}}")"
+    echo "Uploading OpenRB-150 on $port"
+    cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -t upload --upload-port "$port"
 
 # Alias matching the project command convention.
 firmware-flash: firmware-upload
 
+# Alias for firmware-upload.
+upload: firmware-upload
+
 # Open the OpenRB-150 USB serial monitor (default 115200 baud).
 firmware-monitor baud="115200":
-    cd "{{firmware_dir}}" && "{{pio}}" device monitor -b {{baud}}
+    #!/usr/bin/env zsh
+    port="$(python3 "{{openrb_port_finder}}" "{{pio}}")"
+    cd "{{firmware_dir}}" && "{{pio}}" device monitor --port "$port" -b {{baud}}
 
 # Remove PlatformIO firmware build artifacts.
 firmware-clean:
     cd "{{firmware_dir}}" && "{{pio}}" run -t clean
+
+# Alias for firmware-clean.
+clean: firmware-clean
+
+# Print the unique USB CDC port belonging to the connected OpenRB-150.
+firmware-port:
+    @python3 "{{openrb_port_finder}}" "{{pio}}"
 
 # Run shared protocol tests and golden-vector checks.
 protocol-test:
