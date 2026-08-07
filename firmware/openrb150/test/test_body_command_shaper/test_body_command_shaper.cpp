@@ -91,6 +91,18 @@ void test_height_and_pose_are_rate_limited() {
   TEST_ASSERT_FLOAT_WITHIN(1e-6f, 0.005f, output.pose.roll);
 }
 
+void test_height_override_is_hard_capped() {
+  controller::BodyCommandShaper shaper;
+  shaper.configure(limits());
+  shaper.reset(40.0f);
+  controller::BodyCommand target = desired(0.0f, 0.0f, 0.0f);
+  target.body_height_mm = 100.0f;
+  target.height_rate_override_mm_per_s = 1000.0f;
+  const controller::BodyCommand& output = shaper.update(target, 10);
+  TEST_ASSERT_FLOAT_WITHIN(
+      1e-6f, 42.0f, output.body_height_mm);  // 200 mm/s hard ceiling
+}
+
 void test_large_dt_cannot_integrate_a_giant_command_step() {
   controller::BodyCommandShaper shaper;
   shaper.configure(limits());
@@ -122,6 +134,7 @@ int main(int, char**) {
   RUN_TEST(test_return_and_reversal_use_deceleration_before_acceleration);
   RUN_TEST(test_axis_maxima_clamp_the_desired_command);
   RUN_TEST(test_height_and_pose_are_rate_limited);
+  RUN_TEST(test_height_override_is_hard_capped);
   RUN_TEST(test_large_dt_cannot_integrate_a_giant_command_step);
   RUN_TEST(test_direct_diagnostic_is_gated_and_bumpless);
   return UNITY_END();

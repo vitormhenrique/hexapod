@@ -46,9 +46,10 @@ enum class ControllerResult : uint8_t {
 
 // Exact serialized sizes (asserted by the native test + Python mirror).
 //   state:    31 decoded + 26 raw  = 57 bytes
-//   bindings: 13*4 axis + 2 tri + 11 bool + 8*2 trick = 81 bytes
+//   bindings: 13*4 axis + 2 tri + 11 bool + 9*2 trick = 83 bytes
 constexpr uint16_t kControllerStateLen = 57;
-constexpr uint16_t kControllerBindingsLen = 81;
+constexpr uint16_t kControllerBindingsLen = 83;
+constexpr uint16_t kLegacyControllerBindingsLen = 81;
 
 class ControllerApi {
  public:
@@ -77,11 +78,11 @@ class ControllerApi {
   // payload. Returns bytes written (kControllerStateLen).
   static uint16_t encodeState(const controller::ControllerCommand& cmd,
                               const ChannelPackInputs_t& raw, uint8_t* out);
-  // Serialize a BindingConfig into the 81-byte payload. Returns bytes written.
+  // Serialize a BindingConfig into the 83-byte payload. Returns bytes written.
   static uint16_t encodeBindings(const controller::BindingConfig& cfg,
                                  uint8_t* out);
-  // Parse + range-validate an 81-byte BindingConfig payload. Returns false if
-  // the length is wrong or any enum source/trick is out of range.
+  // Parse + range-validate a current 83-byte or legacy 81-byte BindingConfig
+  // payload. A legacy table keeps the default NAV2-right trick binding.
   static bool decodeBindings(const uint8_t* in, uint16_t len,
                              controller::BindingConfig* out);
 

@@ -66,9 +66,16 @@ const BodyCommand& BodyCommandShaper::update(const BodyCommand& desired,
   const float height_rate = target.body_height_mm >= current_.body_height_mm
       ? static_cast<float>(limits_.height_rise_mm_per_s)
       : static_cast<float>(limits_.height_lower_mm_per_s);
+  float bounded_height_rate = height_rate;
+  if (target.height_rate_override_mm_per_s > 0.0f) {
+    bounded_height_rate = target.height_rate_override_mm_per_s;
+    if (bounded_height_rate > config::kBodyHeightRateMaxMmPerS) {
+      bounded_height_rate = config::kBodyHeightRateMaxMmPerS;
+    }
+  }
   current_.body_height_mm = moveToward(current_.body_height_mm,
                                        target.body_height_mm,
-                                       height_rate * dt_s);
+                                       bounded_height_rate * dt_s);
 
   const float translation_delta =
       static_cast<float>(limits_.pose_translation_rate_mm_per_s) * dt_s;

@@ -81,6 +81,26 @@ constexpr TrickKeyframe kDanceFrames[] = {
     {350, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.60f},
 };
 
+  // Low, forward body stance held until stick input cancels it. The pose remains
+  // deliberately inside the normal body-pose envelope; the usual planted-foot
+  // IK reach limiter remains authoritative.
+  constexpr TrickKeyframe kSpiderAttackFrames[] = {
+    {650, GaitId::Stand, 0, 0, 0, 18, 0, 0, 0, 0.18f, 0, 0.18f},
+  };
+
+  // This is intentionally not a ballistic jump: the robot first crouches to
+  // create leg travel, then extends at 120 mm/s (below the firmware's 200 mm/s
+  // hard height-rate cap) while a short tripod step supplies the visible flick.
+  // It still uses the normal gait -> IK -> servo-map path; no raw servo targets
+  // or direct diagnostic mode are involved.
+  constexpr TrickKeyframe kJumpKickFrames[] = {
+    {900, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10f, 80.0f,
+     35, 40, 255},
+    {700, GaitId::Tripod, 0, 0.65f, 0, 0, 0, 0, 0, 0, 0, 0.90f, 120.0f,
+     35, 40, 255},
+    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.60f, 80.0f},
+  };
+
 constexpr TrickProgram kStandUpProg{kStandUpFrames, 1, false, false};
 constexpr TrickProgram kSitDownProg{kSitDownFrames, 1, false, false};
 constexpr TrickProgram kWaveProg{kWaveFrames, 4, false, false};
@@ -90,6 +110,8 @@ constexpr TrickProgram kTwirlProg{kTwirlFrames, 3, false, false};
 constexpr TrickProgram kStretchProg{kStretchFrames, 4, false, false};
 constexpr TrickProgram kLeanLookProg{kLeanLookFrames, 1, false, true};
 constexpr TrickProgram kDanceProg{kDanceFrames, 4, true, false};
+constexpr TrickProgram kSpiderAttackProg{kSpiderAttackFrames, 1, false, true};
+constexpr TrickProgram kJumpKickProg{kJumpKickFrames, 3, false, false};
 
 }  // namespace
 
@@ -127,6 +149,10 @@ const TrickProgram* TrickEngine::selectProgram(TrickId trick) {
       return &kLeanLookProg;
     case TrickId::DanceLoop:
       return &kDanceProg;
+    case TrickId::SpiderAttack:
+      return &kSpiderAttackProg;
+    case TrickId::JumpKick:
+      return &kJumpKickProg;
     default:
       return nullptr;
   }
@@ -200,6 +226,13 @@ void TrickEngine::writeOutputs(const TrickKeyframe& kf, float t) {
   } else {
     out_.override_height = false;
   }
+  out_.height_rate_mm_per_s =
+      kf.height_rate_mm_per_s > 0.0f ? kf.height_rate_mm_per_s : 0.0f;
+  out_.override_gait_shape =
+      kf.stride_mm > 0 || kf.step_height_mm > 0 || kf.speed_x255 > 0;
+  out_.stride_mm = kf.stride_mm;
+  out_.step_height_mm = kf.step_height_mm;
+  out_.speed_x255 = kf.speed_x255;
 }
 
 const TrickOutput& TrickEngine::update(uint32_t dt_ms, bool sticks_active) {

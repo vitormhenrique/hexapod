@@ -478,11 +478,24 @@ void test_trick_refractory_debounce() {
 }
 
 void test_nav_cluster_trick_binding() {
-  ControllerBridge b;
-  ChannelPackInputs_t in = makeNeutral();
-  in.nav[1][CPACK_NAV_UP] = true;  // NAV2 up -> Twirl
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::Twirl),
-                         static_cast<uint8_t>(feed(b, in, 100).trick));
+  struct Nav2Case {
+    uint8_t direction;
+    TrickId trick;
+  };
+  const Nav2Case cases[] = {
+      {CPACK_NAV_UP, TrickId::Twirl},
+      {CPACK_NAV_DOWN, TrickId::Stretch},
+      {CPACK_NAV_LEFT, TrickId::JumpKick},
+      {CPACK_NAV_RIGHT, TrickId::SpiderAttack},
+      {CPACK_NAV_CENTER, TrickId::DanceLoop},
+  };
+  for (const Nav2Case& test_case : cases) {
+    ControllerBridge b;
+    ChannelPackInputs_t in = makeNeutral();
+    in.nav[1][test_case.direction] = true;
+    TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(test_case.trick),
+                           static_cast<uint8_t>(feed(b, in, 100).trick));
+  }
 }
 
 // --- pose trim -------------------------------------------------------------

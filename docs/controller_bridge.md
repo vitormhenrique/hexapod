@@ -184,13 +184,18 @@ implemented by the control-task trick engine in `oha.5`.
 | `BTN_4` | `CrouchToggle` | Toggle crouch height |
 | `NAV2 Up` | `Twirl` | Rotate body 360° in place |
 | `NAV2 Down` | `Stretch` | Full-body stretch sequence |
-| `NAV2 Left` | `LeanLook` | Lean/look around |
+| `NAV2 Left` | `JumpKick` | Crouch, bounded fast extension, then a short tripod flick |
+| `NAV2 Right` | `SpiderAttack` | Hold a low forward attack stance |
 | `NAV2 Center` | `DanceLoop` | Looping dance until cancelled |
 
-`NAV2 Right` is unassigned by the default profile.
+`JumpKick` is not a raw-servo or ballistic jump. It uses the normal gait, IK,
+reach-limit, servo-map, and safety-state path with a 120 mm/s internal
+height-rate request below the firmware’s 200 mm/s hard cap. Start with the
+robot supported and a clear level surface. `LeanLook` remains available to a
+host through a remapped trick binding.
 
-All seven+ tricks from the request are covered. Bindings are remappable (any
-boolean source → any `TrickId`, up to `kMaxTrickBindings` = 8).
+Bindings are remappable (any boolean source → any `TrickId`, up to
+`kMaxTrickBindings` = 9).
 
 ---
 
@@ -270,7 +275,9 @@ Notes on the direct profile:
 - **Action selector/fire (CH13/CH14):** CH13 selects *which* logical
   button/nav boolean to arm; CH14 (SH) fires it. When SH is inactive **none**
   fire. This reuses the existing rising-edge/debounce logic for trims and
-  tricks. `Nav2Right` is deliberately unmapped and always stays false.
+  tricks. This direct profile has no action-selector position for `Nav2Right`,
+  so it cannot trigger the custom-controller spider-attack binding without a
+  host remap or an EdgeTX profile extension.
 
 ### Saved EdgeTX model profile
 

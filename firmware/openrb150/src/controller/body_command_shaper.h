@@ -32,6 +32,9 @@ struct BodyCommand {
   float vy = 0.0f;
   float wz = 0.0f;
   float body_height_mm = 132.0f;
+  // Internal choreography-only request. Zero retains the persisted normal
+  // rate; BodyCommandShaper clamps every positive request to the hard ceiling.
+  float height_rate_override_mm_per_s = 0.0f;
   gait::BodyPose pose{};
 };
 

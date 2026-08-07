@@ -1265,7 +1265,7 @@ def test_controller_request_golden(case):
 
 
 def test_controller_bindings_round_trip():
-    # serialize -> parse must reproduce the binding table exactly (81 bytes).
+    # serialize -> parse must reproduce the current 83-byte binding table.
     b = api.ControllerBindings()
     wire = api.serialize_controller_bindings(b)
     assert len(wire) == api.CONTROLLER_BINDINGS_LEN
@@ -1280,6 +1280,29 @@ def test_controller_bindings_round_trip():
     assert back2.walk_forward.deadband == pytest.approx(0.123, abs=1e-3)
     assert back2.tricks[0].source == api.BOOL_NAV2_RIGHT
     assert back2.tricks[0].trick == api.TRICK_DANCE_LOOP
+
+
+def test_legacy_controller_bindings_insert_spider_attack_binding():
+    current = api.serialize_controller_bindings(api.ControllerBindings())
+    legacy = bytearray(current[:api.CONTROLLER_LEGACY_BINDINGS_LEN])
+    trick_offset = 13 * 4 + 2 + 11
+    legacy[trick_offset + 6 * 2 : trick_offset + 6 * 2 + 2] = bytes(
+        [api.BOOL_NAV2_LEFT, api.TRICK_LEAN_LOOK]
+    )
+    legacy[trick_offset + 7 * 2 : trick_offset + 7 * 2 + 2] = bytes(
+        [api.BOOL_NAV2_CENTER, api.TRICK_DANCE_LOOP]
+    )
+
+    parsed = api.parse_controller_bindings(bytes(legacy))
+    assert parsed.tricks[6] == api.ControllerTrickBinding(
+        api.BOOL_NAV2_LEFT, api.TRICK_LEAN_LOOK
+    )
+    assert parsed.tricks[7] == api.ControllerTrickBinding(
+        api.BOOL_NAV2_RIGHT, api.TRICK_SPIDER_ATTACK
+    )
+    assert parsed.tricks[8] == api.ControllerTrickBinding(
+        api.BOOL_NAV2_CENTER, api.TRICK_DANCE_LOOP
+    )
 
 
 def test_controller_default_bindings_match_set_payload():

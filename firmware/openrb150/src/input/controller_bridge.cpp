@@ -144,15 +144,16 @@ BindingConfig defaultBindings() {
   c.gait_tune_increase = BoolSource::Nav1Right;
   c.gait_tune_decrease = BoolSource::Nav1Left;
   c.gait_tune_save = BoolSource::Nav1Center;
-  // Tricks: 4 buttons + NAV2 cluster.
+  // Tricks: 4 buttons + every NAV2 direction.
   c.tricks[0] = {BoolSource::Btn1, TrickId::StandUp};
   c.tricks[1] = {BoolSource::Btn2, TrickId::SitDown};
   c.tricks[2] = {BoolSource::Btn3, TrickId::Wave};
   c.tricks[3] = {BoolSource::Btn4, TrickId::CrouchToggle};
   c.tricks[4] = {BoolSource::Nav2Up, TrickId::Twirl};
   c.tricks[5] = {BoolSource::Nav2Down, TrickId::Stretch};
-  c.tricks[6] = {BoolSource::Nav2Left, TrickId::LeanLook};
-  c.tricks[7] = {BoolSource::Nav2Center, TrickId::DanceLoop};
+  c.tricks[6] = {BoolSource::Nav2Left, TrickId::JumpKick};
+  c.tricks[7] = {BoolSource::Nav2Right, TrickId::SpiderAttack};
+  c.tricks[8] = {BoolSource::Nav2Center, TrickId::DanceLoop};
   return c;
 }
 

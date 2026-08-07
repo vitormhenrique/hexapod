@@ -207,7 +207,7 @@ void test_bindings_default_round_trips() {
   uint8_t buf[128];
   const uint16_t n = ControllerApi::encodeBindings(def, buf);
   TEST_ASSERT_EQUAL_UINT16(kControllerBindingsLen, n);
-  TEST_ASSERT_EQUAL_UINT16(81, n);
+  TEST_ASSERT_EQUAL_UINT16(83, n);
 
   controller::BindingConfig out;
   TEST_ASSERT_TRUE(ControllerApi::decodeBindings(buf, n, &out));
@@ -279,6 +279,40 @@ void test_set_bindings_rejects_bad_length() {
   TEST_ASSERT_FALSE(ctl.takePending(&taken));
 }
 
+void test_legacy_bindings_keep_nav2_right_spider_attack() {
+  const controller::BindingConfig def = controller::defaultBindings();
+  uint8_t current[kControllerBindingsLen];
+  TEST_ASSERT_EQUAL_UINT16(kControllerBindingsLen,
+               ControllerApi::encodeBindings(def, current));
+
+  // Recreate the former final binding: NAV2-center -> DanceLoop.
+  constexpr uint16_t kTrickOffset = 13u * 4u + 2u + 11u;
+  current[kTrickOffset + 6u * 2u] =
+    static_cast<uint8_t>(controller::BoolSource::Nav2Left);
+  current[kTrickOffset + 6u * 2u + 1u] =
+    static_cast<uint8_t>(controller::TrickId::LeanLook);
+  current[kTrickOffset + 7u * 2u] =
+    static_cast<uint8_t>(controller::BoolSource::Nav2Center);
+  current[kTrickOffset + 7u * 2u + 1u] =
+    static_cast<uint8_t>(controller::TrickId::DanceLoop);
+
+  controller::BindingConfig parsed;
+  TEST_ASSERT_TRUE(ControllerApi::decodeBindings(
+    current, kLegacyControllerBindingsLen, &parsed));
+  const controller::TrickBinding& nav2_right =
+    parsed.tricks[controller::kMaxTrickBindings - 2];
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(controller::BoolSource::Nav2Right),
+              static_cast<uint8_t>(nav2_right.source));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(controller::TrickId::SpiderAttack),
+              static_cast<uint8_t>(nav2_right.trick));
+  const controller::TrickBinding& nav2_center =
+      parsed.tricks[controller::kMaxTrickBindings - 1];
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(controller::BoolSource::Nav2Center),
+                          static_cast<uint8_t>(nav2_center.source));
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(controller::TrickId::DanceLoop),
+                          static_cast<uint8_t>(nav2_center.trick));
+}
+
 void test_set_bindings_rejects_out_of_range_source() {
   ControllerApi ctl;
   uint8_t payload[128];
@@ -312,6 +346,7 @@ int main(int, char**) {
   RUN_TEST(test_get_bindings_matches_encode);
   RUN_TEST(test_set_bindings_applies_and_stages_pending);
   RUN_TEST(test_set_bindings_rejects_bad_length);
+  RUN_TEST(test_legacy_bindings_keep_nav2_right_spider_attack);
   RUN_TEST(test_set_bindings_rejects_out_of_range_source);
   RUN_TEST(test_decode_bindings_rejects_bad_trick);
   return UNITY_END();

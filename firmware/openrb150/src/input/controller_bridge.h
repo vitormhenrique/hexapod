@@ -148,6 +148,8 @@ enum class TrickId : uint8_t {
   Stretch,
   LeanLook,
   DanceLoop,
+  SpiderAttack,
+  JumpKick,
 };
 
 // --- Binding configuration (remappable) ------------------------------------
@@ -171,7 +173,8 @@ struct TrickBinding {
   TrickBinding() = default;
   TrickBinding(BoolSource s, TrickId t) : source(s), trick(t) {}
 };
-constexpr uint8_t kMaxTrickBindings = 8;
+// Four front-panel buttons plus all five NAV2 directions.
+constexpr uint8_t kMaxTrickBindings = 9;
 
 // Full controller->action map. Every field is overridable (defaultBindings()
 // fills the documented layout). Kept POD/trivially-copyable so a USB handler can

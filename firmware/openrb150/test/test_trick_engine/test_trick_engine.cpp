@@ -149,6 +149,40 @@ void test_dance_loop_stays_active() {
   TEST_ASSERT_TRUE(d.override_height);
 }
 
+void test_spider_attack_holds_low_forward_pose() {
+  TrickEngine e;
+  e.trigger(TrickId::SpiderAttack, 0.50f, 0);
+  const TrickOutput& attack = step(e, 1000);
+  TEST_ASSERT_TRUE(attack.active);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
+                          static_cast<uint8_t>(attack.gait));
+  TEST_ASSERT_TRUE(attack.override_height);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.18f, attack.body_height_frac);
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, 18.0f, attack.pose.x_mm);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.18f, attack.pose.pitch);
+}
+
+void test_jump_kick_uses_bounded_fast_height_and_gait_shape() {
+  TrickEngine e;
+  e.trigger(TrickId::JumpKick, 0.50f, 0);
+  const TrickOutput& crouch = step(e, 450);
+  TEST_ASSERT_TRUE(crouch.active);
+  TEST_ASSERT_TRUE(crouch.override_height);
+  TEST_ASSERT_TRUE(crouch.body_height_frac < 0.50f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 80.0f, crouch.height_rate_mm_per_s);
+  TEST_ASSERT_TRUE(crouch.override_gait_shape);
+  TEST_ASSERT_EQUAL_UINT16(35, crouch.stride_mm);
+  TEST_ASSERT_EQUAL_UINT16(40, crouch.step_height_mm);
+  TEST_ASSERT_EQUAL_UINT8(255, crouch.speed_x255);
+
+  const TrickOutput& kick = step(e, 1000);
+  TEST_ASSERT_TRUE(kick.active);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Tripod),
+                          static_cast<uint8_t>(kick.gait));
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 120.0f, kick.height_rate_mm_per_s);
+  TEST_ASSERT_TRUE(kick.twist_vy > 0.45f);
+}
+
 // --- cancellation ----------------------------------------------------------
 
 void test_sticks_active_cancels_trick() {
@@ -192,6 +226,8 @@ int main(int, char**) {
   RUN_TEST(test_lean_look_holds_until_cancelled);
   RUN_TEST(test_crouch_toggle_latches_low_then_tall);
   RUN_TEST(test_dance_loop_stays_active);
+  RUN_TEST(test_spider_attack_holds_low_forward_pose);
+  RUN_TEST(test_jump_kick_uses_bounded_fast_height_and_gait_shape);
   RUN_TEST(test_sticks_active_cancels_trick);
   RUN_TEST(test_none_trigger_cancels_active);
   RUN_TEST(test_retrigger_restarts_program);

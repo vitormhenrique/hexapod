@@ -254,8 +254,9 @@ CONTROLLER_BAD_REQUEST = 2
 
 # Serialized payload sizes (mirror controller_api.h kController*Len).
 CONTROLLER_STATE_LEN = 57
-CONTROLLER_BINDINGS_LEN = 81
-CONTROLLER_NUM_TRICKS = 8
+CONTROLLER_BINDINGS_LEN = 83
+CONTROLLER_LEGACY_BINDINGS_LEN = 81
+CONTROLLER_NUM_TRICKS = 9
 
 # Sensor response result byte (mirrors protocol::SensorResult).
 SENSOR_OK = 0
@@ -2218,6 +2219,8 @@ TRICK_TWIRL = 5
 TRICK_STRETCH = 6
 TRICK_LEAN_LOOK = 7
 TRICK_DANCE_LOOP = 8
+TRICK_SPIDER_ATTACK = 9
+TRICK_JUMP_KICK = 10
 
 
 @dataclass
@@ -2247,10 +2250,10 @@ class ControllerBindings:
         default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.0)
     )
     walk_strafe: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.0)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, True, 0.0)
     )
     walk_yaw: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.0)
+        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, True, 0.0)
     )
     body_x: ControllerAxisBinding = field(
         default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.0)
@@ -2259,7 +2262,7 @@ class ControllerBindings:
         default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.0)
     )
     body_z: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LY, False, 0.0)
+        default_factory=lambda: ControllerAxisBinding(AXIS_NONE, False, 0.0)
     )
     body_roll: ControllerAxisBinding = field(
         default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RX, False, 0.0)
@@ -2268,7 +2271,7 @@ class ControllerBindings:
         default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_RY, False, 0.0)
     )
     body_yaw: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_GIMBAL_LX, False, 0.0)
+        default_factory=lambda: ControllerAxisBinding(AXIS_NONE, False, 0.0)
     )
     speed: ControllerAxisBinding = field(
         default_factory=lambda: ControllerAxisBinding(AXIS_POT1, False, 0.0)
@@ -2277,18 +2280,18 @@ class ControllerBindings:
         default_factory=lambda: ControllerAxisBinding(AXIS_POT2, False, 0.0)
     )
     stride: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_ENC1, False, 0.0)
+        default_factory=lambda: ControllerAxisBinding(AXIS_NONE, False, 0.0)
     )
     step_height: ControllerAxisBinding = field(
-        default_factory=lambda: ControllerAxisBinding(AXIS_ENC2, False, 0.0)
+        default_factory=lambda: ControllerAxisBinding(AXIS_NONE, False, 0.0)
     )
-    mode_select: int = TRI_SW_E
-    gait_select: int = TRI_SW_F
+    mode_select: int = TRI_SW_F
+    gait_select: int = TRI_SW_E
     arm: int = BOOL_SW_A
     estop: int = BOOL_SW_B
     feat_foot_contact: int = BOOL_SW_C
     feat_terrain_leveling: int = BOOL_SW_D
-    feat_passive_pose: int = BOOL_SW_G
+    feat_passive_pose: int = BOOL_NONE
     host_authority: int = BOOL_SW_H
     trim_pitch_up: int = BOOL_NAV1_UP
     trim_pitch_down: int = BOOL_NAV1_DOWN
@@ -2303,7 +2306,8 @@ class ControllerBindings:
             ControllerTrickBinding(BOOL_BTN4, TRICK_CROUCH_TOGGLE),
             ControllerTrickBinding(BOOL_NAV2_UP, TRICK_TWIRL),
             ControllerTrickBinding(BOOL_NAV2_DOWN, TRICK_STRETCH),
-            ControllerTrickBinding(BOOL_NAV2_LEFT, TRICK_LEAN_LOOK),
+            ControllerTrickBinding(BOOL_NAV2_LEFT, TRICK_JUMP_KICK),
+            ControllerTrickBinding(BOOL_NAV2_RIGHT, TRICK_SPIDER_ATTACK),
             ControllerTrickBinding(BOOL_NAV2_CENTER, TRICK_DANCE_LOOP),
         ]
     )
@@ -2315,7 +2319,7 @@ def _pack_axis(a: ControllerAxisBinding) -> bytes:
 
 
 def serialize_controller_bindings(b: ControllerBindings) -> bytes:
-    """Serialize a ControllerBindings into the 81-byte wire payload."""
+    """Serialize a ControllerBindings into the current 83-byte wire payload."""
     out = bytearray()
     for axis in (
         b.walk_forward,
@@ -2355,9 +2359,9 @@ def serialize_controller_bindings(b: ControllerBindings) -> bytes:
 
 
 def parse_controller_bindings(payload: bytes) -> ControllerBindings:
-    """Parse an 81-byte CONTROLLER_GET_BINDINGS response into ControllerBindings."""
-    if len(payload) < CONTROLLER_BINDINGS_LEN:
-        raise ValueError("controller bindings payload too short")
+    """Parse a current 83-byte or legacy 81-byte bindings response."""
+    if len(payload) not in (CONTROLLER_BINDINGS_LEN, CONTROLLER_LEGACY_BINDINGS_LEN):
+        raise ValueError("invalid controller bindings payload length")
     off = 0
 
     def axis() -> ControllerAxisBinding:
@@ -2399,10 +2403,18 @@ def parse_controller_bindings(payload: bytes) -> ControllerBindings:
     ) = struct.unpack_from("<11B", payload, off)
     off += 11
     tricks: List[ControllerTrickBinding] = []
-    for _ in range(CONTROLLER_NUM_TRICKS):
+    trick_count = (CONTROLLER_NUM_TRICKS if len(payload) == CONTROLLER_BINDINGS_LEN
+                   else CONTROLLER_NUM_TRICKS - 1)
+    for _ in range(trick_count):
         src, trick = struct.unpack_from("<BB", payload, off)
         off += 2
         tricks.append(ControllerTrickBinding(src, trick))
+    if len(payload) == CONTROLLER_LEGACY_BINDINGS_LEN:
+        # Legacy slot 7 held the NAV2-center action. Preserve it in the new
+        # ninth slot and insert the NAV2-right spider-attack default at slot 7.
+        legacy_last = tricks[-1]
+        tricks[-1] = ControllerTrickBinding(BOOL_NAV2_RIGHT, TRICK_SPIDER_ATTACK)
+        tricks.append(legacy_last)
     b.tricks = tricks
     return b
 
@@ -2415,7 +2427,7 @@ def build_controller_get_state(seq: int = 0) -> bytes:
 
 
 def build_controller_get_bindings(seq: int = 0) -> bytes:
-    """Build a CONTROLLER_GET_BINDINGS command (response = 81-byte bindings)."""
+    """Build a CONTROLLER_GET_BINDINGS command (response = 83-byte bindings)."""
     return build_command(MSG_CONTROLLER_GET_BINDINGS, seq=seq)
 
 

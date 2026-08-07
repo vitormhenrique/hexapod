@@ -6,8 +6,9 @@
 // Consumes the controller bridge's edge-triggered TrickId (oha.2/oha.3) and
 // turns each trick into a deterministic, time-stepped *body* choreography:
 // stand up / sit down, a friendly body wave, a crouch<->tall toggle, an
-// in-place yaw twirl, a body-z stretch/push-up, a held lean/look attitude, and
-// a looping dance. Every trick is expressed purely as a sequence of gait id +
+// in-place yaw twirl, a body-z stretch/push-up, a held lean/look attitude, a
+// spider attack stance, a bounded jump-kick, and a looping dance. Every trick
+// is expressed purely as a sequence of gait id +
 // body twist + 6-DOF body-pose + body-height keyframes -- the SAME quantities
 // the RC walk path already feeds into the gait pipeline -- so a trick can never
 // command a raw servo position; it only shapes intent that the existing IK +
@@ -40,6 +41,10 @@ namespace gait {
 // twist / pose / height are interpolated. `height_frac` is a 0..1 body-height
 // override (mapped onto the configured safe range by the control task); a
 // negative value means "do not override height" (leave the live RC/host value).
+// `height_rate_mm_per_s` is zero for normal configured body-height rates;
+// positive values request a faster, still hard-capped rate for the jump-kick.
+// A nonzero gait-shape triplet temporarily overrides the live stride, lift,
+// and cadence during a choreography segment.
 //
 // Plain aggregate (no default member initializers) so the constexpr program
 // tables brace-initialize under gnu++11; omitted trailing fields value-init to
@@ -57,6 +62,10 @@ struct TrickKeyframe {
   float pitch;
   float yaw;
   float height_frac;
+  float height_rate_mm_per_s;
+  uint16_t stride_mm;
+  uint16_t step_height_mm;
+  uint8_t speed_x255;
 };
 
 // A trick program: an ordered keyframe table plus end-of-sequence behaviour.
@@ -77,6 +86,11 @@ struct TrickOutput {
   BodyPose pose;                   // body-pose offset (planted-foot moves)
   bool override_height = false;    // true while the trick drives body height
   float body_height_frac = 0.0f;   // 0..1 height target when override_height
+  float height_rate_mm_per_s = 0.0f;  // 0 = normal configured rate
+  bool override_gait_shape = false;
+  uint16_t stride_mm = 0;
+  uint16_t step_height_mm = 0;
+  uint8_t speed_x255 = 0;
 };
 
 class TrickEngine {

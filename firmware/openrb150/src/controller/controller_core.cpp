@@ -297,6 +297,7 @@ void ControllerCore::step(const RobotState& state,
     uint16_t requested_step_height = intent.motion.step_height_mm;
     uint8_t requested_speed = intent.motion.speed_x255;
     uint8_t requested_duty = intent.motion.duty_x255;
+    float trick_height_rate_override_mm_per_s = 0.0f;
 
     if (rc_drives) {
       const ControllerCommand& rc = intent.rc.command;
@@ -315,6 +316,12 @@ void ControllerCore::step(const RobotState& state,
         effective_wz = trick.twist_wz;
         body_pose = trick.pose;
         if (trick.override_height) height_fraction = trick.body_height_frac;
+        trick_height_rate_override_mm_per_s = trick.height_rate_mm_per_s;
+        if (trick.override_gait_shape) {
+          requested_stride = trick.stride_mm;
+          requested_step_height = trick.step_height_mm;
+          requested_speed = trick.speed_x255;
+        }
       } else {
         // Simultaneous walk + body-pose (Phoenix-style): the bridge always
         // maps the left gimbal to twist and the mode-selected right-gimbal
@@ -361,6 +368,8 @@ void ControllerCore::step(const RobotState& state,
       desired_body.vy = effective_vy;
       desired_body.wz = effective_wz;
       desired_body.body_height_mm = static_cast<float>(requested_body_height);
+        desired_body.height_rate_override_mm_per_s =
+          trick_height_rate_override_mm_per_s;
       desired_body.pose = body_pose;
       const BodyCommand& shaped_body =
         body_command_shaper_.update(desired_body, time.dt_ms);

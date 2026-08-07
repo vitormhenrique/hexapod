@@ -72,7 +72,7 @@ bool validTri(uint8_t v) {
   return v <= static_cast<uint8_t>(controller::TriSource::SwF);
 }
 bool validTrick(uint8_t v) {
-  return v <= static_cast<uint8_t>(controller::TrickId::DanceLoop);
+  return v <= static_cast<uint8_t>(controller::TrickId::JumpKick);
 }
 
 }  // namespace
@@ -201,8 +201,13 @@ uint16_t ControllerApi::encodeBindings(const controller::BindingConfig& cfg,
 
 bool ControllerApi::decodeBindings(const uint8_t* in, uint16_t len,
                                    controller::BindingConfig* out) {
-  if (len != kControllerBindingsLen || out == nullptr) return false;
-  controller::BindingConfig c;
+  if ((len != kControllerBindingsLen && len != kLegacyControllerBindingsLen) ||
+      out == nullptr) {
+    return false;
+  }
+  // Preserve the new NAV2-right default when an older host sends its eight
+  // trick slots. Every serialized field below overwrites this default.
+  controller::BindingConfig c = controller::defaultBindings();
   uint16_t o = 0;
   controller::AxisBinding* axes[13] = {
       &c.walk_forward, &c.walk_strafe, &c.walk_yaw,    &c.body_x,
@@ -233,10 +238,23 @@ bool ControllerApi::decodeBindings(const uint8_t* in, uint16_t len,
     if (!validBool(in[o])) return false;
     *bools[i] = static_cast<controller::BoolSource>(in[o++]);
   }
-  for (uint8_t i = 0; i < controller::kMaxTrickBindings; ++i) {
+  const uint8_t trick_count =
+      len == kLegacyControllerBindingsLen
+          ? static_cast<uint8_t>(controller::kMaxTrickBindings - 1)
+          : controller::kMaxTrickBindings;
+  for (uint8_t i = 0; i < trick_count; ++i) {
     if (!validBool(in[o]) || !validTrick(in[o + 1])) return false;
     c.tricks[i].source = static_cast<controller::BoolSource>(in[o++]);
     c.tricks[i].trick = static_cast<controller::TrickId>(in[o++]);
+  }
+  if (len == kLegacyControllerBindingsLen) {
+    // The eighth legacy slot was NAV2-center/DanceLoop. Shift that operator
+    // binding to slot 8 and insert the new NAV2-right/SpiderAttack default in
+    // slot 7, rather than silently leaving NAV2-right unavailable.
+    c.tricks[controller::kMaxTrickBindings - 1] =
+        c.tricks[controller::kMaxTrickBindings - 2];
+    c.tricks[controller::kMaxTrickBindings - 2] =
+        controller::defaultBindings().tricks[controller::kMaxTrickBindings - 2];
   }
   *out = c;
   return true;

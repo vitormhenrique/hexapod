@@ -571,7 +571,7 @@ def build_controller() -> dict:
 
     GET_STATE / GET_BINDINGS responses are live snapshots (firmware
     test_controller_api covers them), so only the request encoding is pinned.
-    SET_BINDINGS carries a deterministic 81-byte default-bindings payload.
+    SET_BINDINGS carries a deterministic 83-byte default-bindings payload.
     """
     default_bindings = api_mod.ControllerBindings()
     cases = [

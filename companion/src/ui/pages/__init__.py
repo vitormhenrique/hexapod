@@ -3553,6 +3553,8 @@ class RcTroubleshootingPage(BasePage):
         6: "Stretch",
         7: "Lean/look",
         8: "Dance loop",
+        9: "Spider attack",
+        10: "Jump-kick",
     }
     RAW_INPUTS = [
         ("gimbal_lx", "Gimbal", "Left X"),
@@ -3567,7 +3569,7 @@ class RcTroubleshootingPage(BasePage):
         ("sw_b", "2-position", "SW_B / estop"),
         ("sw_c", "2-position", "SW_C / foot contact"),
         ("sw_d", "2-position", "SW_D / terrain leveling"),
-        ("sw_g", "2-position", "SW_G / passive pose"),
+        ("sw_g", "2-position", "SW_G / gait tune"),
         ("sw_h", "2-position", "SW_H / host authority"),
         ("sw_e", "3-position", "SW_E / gait select"),
         ("sw_f", "3-position", "SW_F / right-gimbal mode"),
@@ -3582,8 +3584,8 @@ class RcTroubleshootingPage(BasePage):
         ("nav1_c", "NAV1 trim", "Center / reset"),
         ("nav2_u", "NAV2 trick", "Up / twirl"),
         ("nav2_d", "NAV2 trick", "Down / stretch"),
-        ("nav2_l", "NAV2 trick", "Left / lean/look"),
-        ("nav2_r", "NAV2 trick", "Right / unbound"),
+        ("nav2_l", "NAV2 trick", "Left / jump-kick"),
+        ("nav2_r", "NAV2 trick", "Right / spider attack"),
         ("nav2_c", "NAV2 trick", "Center / dance"),
     ]
 

@@ -222,9 +222,14 @@ sequence, so a press is never lost to a task boundary nor applied twice.
 |----------------|-------|
 | Up | **Twirl** |
 | Down | **Stretch** |
-| Left | **Lean / look** |
+| Left | **Jump-kick**: crouch, bounded fast extension, short tripod flick |
 | Center | **Dance loop** |
-| Right | Unassigned |
+| Right | **Spider attack**: hold a low forward attack stance |
+
+`JumpKick` is a bounded hop attempt, not a ballistic jump: it remains under
+the normal safety, gait, IK, reach, and servo-map gates. Its internal 120 mm/s
+height request is below the firmware’s 200 mm/s hard cap. Bench-test while the
+robot is supported before ground use.
 
 ---
 

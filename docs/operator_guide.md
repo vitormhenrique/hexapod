@@ -122,8 +122,8 @@ requests; firmware capability, authority, and safety checks remain final.
 | `NAV1` Center | Press | Reset trim / save gait settings to EEPROM while tuning |
 | `NAV2` Up | Press | Twirl in place |
 | `NAV2` Down | Press | Stretch/push-up sequence |
-| `NAV2` Left | Press | Hold lean/look pose until cancelled |
-| `NAV2` Right | Press | Unassigned |
+| `NAV2` Left | Press | Bounded jump-kick: crouch, fast capped extension, short tripod flick |
+| `NAV2` Right | Press | Hold spider-attack stance until stick input cancels it |
 | `NAV2` Center | Press | Loop dance until stick input cancels it |
 
 Buttons and nav actions fire once on the rising edge with a 150 ms refractory
@@ -147,6 +147,11 @@ change, so the footprint stays the same as when standing.
 Swing clearance remains the configured step height through the full ride-height
 range, including the 65 mm crouch limit. The toe target cap leaves room for the
 maximum 50 mm configured lift at that lowest height.
+
+The NAV2 jump-kick is not a raw-servo or ballistic jump. It keeps the normal
+state gate, IK reach checks, and servo travel clamps, then asks for 120 mm/s
+height motion below the firmware’s 200 mm/s hard ceiling. First run it with the
+robot supported and keep the surrounding floor clear.
 
 ## Tuning The Gait From The Handset
 
