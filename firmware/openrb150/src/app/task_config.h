@@ -23,7 +23,9 @@ namespace stack_words {
 // Armed RC motion runs gait + body IK + six leg IK solves in this task. Live
 // high-water tracing showed only 31 words free with a 384-word stack during
 // production startup. Leave 95 words of margin at that observed peak for
-// deeper commanded-pose and trick paths.
+// deeper commanded-pose and trick paths. NOTE: the OLED display-state staging
+// in publishControllerCommand() must stay OFF this stack (file-scope static);
+// as a stack local it consumed ~52 words and overflowed this task on arming.
 constexpr uint16_t kControl = 448;
 // dxl: Dynamixel2Arduino call chains (syncRead/readControlTableItem parsing)
 // plus the 160-byte maintenance-job result buffer run on this stack; 256 words
@@ -37,14 +39,27 @@ constexpr uint16_t kDxl = 512;
 constexpr uint16_t kRc = 320;
 // Request/response buffers are static, but live hardware retained an API-task
 // overflow at 576 words while companion maintenance/config traffic was active.
-// Keep enough measured headroom for nested dispatch and serial framing.
+// That chain included a ~568-byte RobotConfig stack temporary inside
+// deserializeRobotConfig() which is now a flash-image copy (config_schema.cpp
+// kZeroRobotConfig), cutting the measured worst case to ~450 words. 640 keeps
+// >180 words of margin over that.
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 constexpr uint16_t kApi = 768;
 #else
-constexpr uint16_t kApi = 704;
+constexpr uint16_t kApi = 640;
 #endif
-constexpr uint16_t kI2c = 384;   // boot: scanAll() + config load; deep call chain
-constexpr uint16_t kHealth = 256;
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
+constexpr uint16_t kI2c = 384;
+#else
+// SparkFun Qwiic1in3OLED initialization and dirty-row display calls add a deep
+// graphics + Wire call chain. Keep measured headroom beyond the former 384-word
+// stack, which could overflow before retained crash/config files were written.
+constexpr uint16_t kI2c = 512;
+#endif
+// healthTask's -fstack-usage chain is tiny: healthTask(32 B) +
+// watchdog::evaluate(24 B) + status_led::ledOn(16 B) + context save. 192 words
+// still leaves >140 words of margin and stays above configMINIMAL_STACK_SIZE.
+constexpr uint16_t kHealth = 192;
 }  // namespace stack_words
 
 // FreeRTOS task priorities. tskIDLE_PRIORITY == 0.

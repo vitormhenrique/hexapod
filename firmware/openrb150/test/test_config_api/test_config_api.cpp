@@ -2,8 +2,7 @@
 //
 // Drives ConfigApi directly through its block/validate/commit interface, with a
 // fake persistence sink backed by the REAL transactional ConfigStore over a RAM
-// EEPROM stand-in -- so the commit path exercises the actual A/B slot write +
-// reload, proving "RAM shadow + EEPROM transaction" end to end.
+// append-file stand-in, proving the RAM-shadow + journal transaction end to end.
 //
 // Run with: pio test -e native
 
@@ -18,27 +17,33 @@ using namespace config;
 
 namespace {
 
-// 4 KB RAM stand-in for the 24LC32.
-class FakeEeprom : public ConfigBackend {
+// RAM stand-in for CONFIG.TXT on the Qwiic OpenLog.
+class FakeEeprom : public ConfigFile {
  public:
-  FakeEeprom() { memset(mem_, 0xFF, sizeof(mem_)); }
-  bool read(uint16_t addr, uint8_t* buf, uint16_t len) override {
-    if (static_cast<uint32_t>(addr) + len > sizeof(mem_)) return false;
-    memcpy(buf, &mem_[addr], len);
+  bool size(uint32_t& out) override {
+    out = size_;
     return true;
   }
-  bool write(uint16_t addr, const uint8_t* buf, uint16_t len) override {
-    if (static_cast<uint32_t>(addr) + len > sizeof(mem_)) return false;
+  bool read(uint32_t offset, uint8_t* buf, uint16_t len) override {
+    if (offset + len > size_) return false;
+    memcpy(buf, &mem_[offset], len);
+    return true;
+  }
+  bool append(const uint8_t* buf, uint16_t len) override {
+    if (size_ + len > sizeof(mem_)) return false;
     if (!writable_) return false;
-    memcpy(&mem_[addr], buf, len);
+    memcpy(&mem_[size_], buf, len);
+    size_ += len;
     ++writes_;
     return true;
   }
+  bool sync() override { return writable_; }
   void setWritable(bool w) { writable_ = w; }
   int writes() const { return writes_; }
 
  private:
-  uint8_t mem_[4096];
+  uint8_t mem_[8192] = {0};
+  uint32_t size_ = 0;
   bool writable_ = true;
   int writes_ = 0;
 };

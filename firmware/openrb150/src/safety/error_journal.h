@@ -45,7 +45,7 @@ enum class ErrorCode : uint8_t {
   DxlDiscoveryIncomplete = 6,  // detail = servos still missing
   I2cFootSensorFault = 7,  // detail = foot index
   I2cMuxMissing = 8,       // detail = 0
-  I2cEepromMissing = 9,    // detail = 0
+  ConfigStorageMissing = 9,  // detail = 0
   ConfigVolatile = 10,     // detail = 0, config cannot be persisted
   ConfigCommitFailed = 11,  // detail = 0
   RcFailsafe = 12,          // detail = 0
@@ -55,14 +55,17 @@ enum class ErrorCode : uint8_t {
   BatteryLow = 16,          // detail = tenths of a volt
   WatchdogStall = 17,       // detail = 0
   GaitSaveRejected = 18,    // detail = GaitSaveReject value
+  CaptureUnavailable = 19,  // detail = 0: OpenLog/SD unavailable
+  CaptureWriteFailed = 20,  // detail = capture row type
+  ArmingStarted = 21,       // detail = requested command source
 };
 
 // Why a gait-parameter save request was refused (ErrorCode::GaitSaveRejected).
 enum class GaitSaveReject : uint8_t {
-  NotPersistent = 1,  // no EEPROM: the config is volatile
+  NotPersistent = 1,  // no OpenLog storage: the config is volatile
   Busy = 2,           // a config transaction was already in flight
   Invalid = 3,        // the resulting config failed schema validation
-  StoreFailed = 4,    // the EEPROM transaction itself failed
+  StoreFailed = 4,    // the storage transaction itself failed
 };
 
 // Severity drives both the recycling policy and the order takePending() drains

@@ -238,7 +238,7 @@ void ControllerCore::step(const RobotState& state,
         rc_authority && rc_cmd.gait_tune_active;
     command.diagnostics.gait_tune_param =
         static_cast<uint8_t>(rc_cmd.gait_tune_param);
-    // Never persist while the robot is moving (AGENTS.md 4.3: no EEPROM writes
+    // Never persist while the robot is moving (AGENTS.md 4.3: no config commits
     // during active walking). The adapter applies the final store checks.
     command.diagnostics.gait_save_seq = rc_cmd.gait_tune_save_seq;
     command.diagnostics.gait_save_requested =

@@ -149,7 +149,7 @@ struct RobotState {
 // Full fixed-size configuration and calibration value for an input step. A
 // value copy makes the snapshot self-contained and replayable. Adapters may
 // reuse a static instance between steps, but must replace it atomically when
-// `revision` changes. `persistent` reports whether EEPROM-backed commits are
+// `revision` changes. `persistent` reports whether storage-backed commits are
 // currently available, while `valid` means the value passed schema validation.
 struct ControllerConfigSnapshot {
   config::RobotConfig robot{};
@@ -166,7 +166,7 @@ struct ControllerDiagnostics {
   uint8_t confident_contact_feet = 0;
   // Gait shape actually commanded this step, after clamping. Adapters publish
   // this on the CRSF downlink and persist it when `gait_save_requested` is set,
-  // so the handset, the log, and EEPROM can never disagree about what ran.
+  // so the handset, the log, and persisted config can never disagree.
   uint16_t applied_body_height_mm = 0;
   uint16_t applied_stride_mm = 0;
   uint16_t applied_step_height_mm = 0;
@@ -178,7 +178,7 @@ struct ControllerDiagnostics {
   // The single-leg preview is running (operator is watching a parameter).
   bool gait_tune_preview = false;
   // The operator asked to persist the applied gait shape. The adapter owns the
-  // EEPROM transaction and applies `gait_save_seq` de-duplication: it acts only
+  // storage transaction and applies `gait_save_seq` de-duplication: it acts only
   // when the sequence differs from the last one it persisted.
   bool gait_save_requested = false;
   uint32_t gait_save_seq = 0;

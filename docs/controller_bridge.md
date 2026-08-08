@@ -117,7 +117,7 @@ it is disengaged NAV1 keeps its normal trim role.
 | `SW_G` | ON: engage gait tuning; OFF: leave gait tuning |
 | `NAV1 Up` / `Down` | Next / previous parameter (step height → stride → duty) |
 | `NAV1 Right` / `Left` | Increase / decrease by `kGaitTuneStepFrac` (5% of range, 20 presses end to end) |
-| `NAV1 Center` | Save the live gait shape to the 24LC32 config |
+| `NAV1 Center` | Save the live gait shape to `CONFIG.TXT` on OpenLog |
 
 While the editor is engaged and the sticks are centred, **leg 1 traces the swing
 arc** at a slow 2 s cycle using the live stride and step height, so the operator
@@ -130,8 +130,8 @@ selected parameter and the applied stride / step height / duty, and its rate is
 raised from 5 Hz to 20 Hz for 3 s after every edit so the readout tracks the
 knob without perceptible lag.
 
-Saving is refused while the robot is moving (`AGENTS.md` 4.3 forbids EEPROM
-writes during walking) and when the config store is volatile; the reason is
+Saving is refused while the robot is moving (`AGENTS.md` 4.3 forbids config
+commits during walking) and when the config store is volatile; the reason is
 reported on the downlink through the deduplicated error journal.
 
 On boot — and after any config commit — `rcTask` seeds the editor from the
@@ -181,7 +181,7 @@ implemented by the control-task trick engine in `oha.5`.
 | `BTN_1` | `StandUp` | Stand up from rest |
 | `BTN_2` | `SitDown` | Sit/rest down |
 | `BTN_3` | `Wave` | Rock the standing body side to side |
-| `BTN_4` | `CrouchToggle` | Toggle crouch height |
+| `BTN_4` press | `capture_toggle_seq` | First press starts `CAPTURE.CSV`; next press stops it |
 | `NAV2 Up` | `Twirl` | Rotate body 360° in place |
 | `NAV2 Down` | `Stretch` | Full-body stretch sequence |
 | `NAV2 Left` | `JumpKick` | Crouch, bounded fast extension, then a short tripod flick |
@@ -355,7 +355,7 @@ also scriptable over USB.
 | --- | --- | --- | --- |
 | `CONTROLLER_GET_STATE` | host→mcu / mcu→host | decoded `ControllerCommand` | Current high-level intent: mode, twist, body pose, trim, gait, shape params, feature requests, arm/estop, last trick, `valid`/`failsafe`. |
 | `CONTROLLER_GET_BINDINGS` | host→mcu / mcu→host | `BindingConfig` | Read the current binding table. |
-| `CONTROLLER_SET_BINDINGS` | host→mcu | `BindingConfig` (+ validate/commit flags) | Replace the binding table; firmware validates ranges then applies (and optionally persists to config EEPROM). |
+| `CONTROLLER_SET_BINDINGS` | host→mcu | `BindingConfig` (+ validate/commit flags) | Replace the binding table; firmware validates ranges then applies (and optionally persists to OpenLog config). |
 | `controller_state` (telemetry) | mcu→host stream | `ControllerCommand` + raw `ChannelPackInputs_t` snapshot | Rate-limited subscription for the companion Diagnostics/“RC input” page and binding UI. |
 
 Notes:

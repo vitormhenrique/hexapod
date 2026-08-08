@@ -180,7 +180,7 @@ engine; the bridge only emits the trigger.
 | BTN 1 | **Stand up** |
 | BTN 2 | **Sit down** |
 | BTN 3 | **Wave** |
-| BTN 4 | **Crouch toggle** |
+| BTN 4 press | **Start OpenLog capture; press again to stop** |
 
 ### 5-way nav clusters — CH11 compact state
 
@@ -202,7 +202,7 @@ With the editor engaged (`SW_G` ON) the same cluster edits gait shape:
 |----------------|----------------|
 | Up / Down | Next / previous parameter (step height → stride → duty) |
 | Left / Right | Decrease / increase by `kGaitTuneStepFrac` (5% of range) |
-| Center | **Save** the applied gait shape to the 24LC32 config |
+| Center | **Save** the applied gait shape to `CONFIG.TXT` on OpenLog |
 
 While the editor is engaged, the sticks are centred, and motion is authorised,
 `GaitPipeline` runs a **single-leg preview**: leg 1 (index 0) traces the swing
@@ -257,6 +257,6 @@ robot is supported before ground use.
 | CH7 | Encoder 1 | Stride length trim |
 | CH8 | Encoder 2 | Step height trim |
 | CH9 | 6× 2-pos switches | Arm / E-stop / feature toggles / host authority |
-| CH10 | 4 buttons + 2 toggles | Mode & gait select, stand/sit/wave/crouch tricks |
+| CH10 | 4 buttons + 2 toggles | Mode/gait select, tricks, BTN 4 capture toggle |
 | CH11 | 2× 5-way nav | Pose trim / gait tuning (NAV1), tricks + tune toggle (NAV2) |
 | CH12–CH16 | reserved | unused (centered) |

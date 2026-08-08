@@ -1352,7 +1352,7 @@ class ConnectionService(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    # --- EEPROM-backed robot config --------------------------------------
+    # --- OpenLog-backed robot config -------------------------------------
 
     def load_config(self) -> None:
         """Read the staged robot config (windowed) and emit ``config_loaded``."""

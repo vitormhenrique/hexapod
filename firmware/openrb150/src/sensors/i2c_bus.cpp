@@ -5,7 +5,6 @@
 namespace i2c {
 namespace {
 
-constexpr uint32_t kWaitTimeoutUs = 5000;
 constexpr uint8_t kErrorAddressNack = 2;
 constexpr uint8_t kErrorDataNack = 3;
 constexpr uint8_t kErrorBus = 4;
@@ -16,7 +15,7 @@ constexpr uint8_t kErrorTimeout = 5;
 bool I2cBus::waitForSync(uint32_t mask) {
   const uint32_t started = micros();
   while ((SERCOM0->I2CM.SYNCBUSY.reg & mask) != 0) {
-    if (static_cast<uint32_t>(micros() - started) >= kWaitTimeoutUs) {
+    if (static_cast<uint32_t>(micros() - started) >= transaction_timeout_us_) {
       ++stats_.timeouts;
       stats_.last_error = kErrorTimeout;
       return false;
@@ -33,7 +32,7 @@ bool I2cBus::waitForFlag(uint8_t flags) {
       stats_.last_error = kErrorBus;
       return false;
     }
-    if (static_cast<uint32_t>(micros() - started) >= kWaitTimeoutUs) {
+    if (static_cast<uint32_t>(micros() - started) >= transaction_timeout_us_) {
       ++stats_.timeouts;
       stats_.last_error = kErrorTimeout;
       return false;
@@ -48,7 +47,7 @@ bool I2cBus::initializeHardware() {
                       GCLK_CLKCTRL_GEN_GCLK0 | GCLK_CLKCTRL_CLKEN;
   const uint32_t clock_started = micros();
   while (GCLK->STATUS.bit.SYNCBUSY) {
-    if (static_cast<uint32_t>(micros() - clock_started) >= kWaitTimeoutUs) {
+    if (static_cast<uint32_t>(micros() - clock_started) >= transaction_timeout_us_) {
       ++stats_.timeouts;
       stats_.last_error = kErrorTimeout;
       return false;
@@ -61,9 +60,7 @@ bool I2cBus::initializeHardware() {
       SERCOM0->I2CM.CTRLA.bit.SWRST) {
     return false;
   }
-
-  SERCOM0->I2CM.CTRLA.reg =
-      SERCOM_I2CM_CTRLA_MODE(I2C_MASTER_OPERATION);
+  SERCOM0->I2CM.CTRLA.reg = SERCOM_I2CM_CTRLA_MODE(I2C_MASTER_OPERATION);
   uint32_t baud = SystemCoreClock / (2u * clock_hz_);
   baud = baud > 8u ? baud - 8u : 0u;
   if (baud > 255u) baud = 255u;
@@ -219,7 +216,20 @@ bool I2cBus::selectNone() {
 void I2cBus::scanRoot(I2cTopology& topo) {
   stats_.root_scans++;
   topo.mux_present = probe(kAddrTcaMux);
-  topo.eeprom_present = probe(kAddrEeprom);
+  if (probe(kAddrOpenLog)) {
+    topo.openlog_present = true;
+    topo.openlog_address = kAddrOpenLog;
+  } else if (probe(kAddrOpenLogJumper)) {
+    topo.openlog_present = true;
+    topo.openlog_address = kAddrOpenLogJumper;
+  }
+  if (probe(kAddrDebugOled)) {
+    topo.oled_present = true;
+    topo.oled_address = kAddrDebugOled;
+  } else if (probe(kAddrDebugOledAlt)) {
+    topo.oled_present = true;
+    topo.oled_address = kAddrDebugOledAlt;
+  }
   // Ensure no channel is left enabled from a prior scan.
   if (topo.mux_present) {
     selectNone();
@@ -248,7 +258,7 @@ void I2cBus::scanChannels(I2cTopology& topo) {
     updateChannelState(info);
   }
 
-  // Always leave the bus with no channel selected so the root bus (EEPROM) is
+  // Always leave the bus with no channel selected so root devices are
   // addressable and no two boards can be live at once.
   selectNone();
 }

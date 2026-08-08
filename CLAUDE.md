@@ -67,3 +67,21 @@ _Add a brief overview of your project architecture_
 ## Conventions & Patterns
 
 _Add your project-specific conventions here_
+
+## Current Config Hardware
+
+Robot configuration is persisted by the SparkFun Qwiic OpenLog at `0x2A`
+(`0x29` with its address jumper), not a 24LC32 EEPROM. `CONFIG.TXT` contains the
+complete append-only config journal and `EVENTS.LOG` contains warnings, errors,
+and retained crash records. The optional 1.3 inch Qwiic OLED is detected at
+`0x3D` or `0x3C`; only `i2cTask` may update either device.
+
+The OLED uses SparkFun's official `Qwiic1in3OLED` implementation from
+SparkFun_Qwiic_OLED_Arduino_Library `v1.0.13`. Two detailed 5x7 views rotate
+every 10 seconds and cover safety/fault, battery/RC, DXL, I2C/OpenLog, gait,
+tuning/trim, and capture.
+
+When OpenLog and SD are ready but `CONFIG.TXT` is missing or empty, firmware
+creates and verifies its first record from the complete compiled default
+`RobotConfig`. A non-empty invalid prefix is preserved, followed by a complete
+default recovery record which must pass readback before config is persistent.

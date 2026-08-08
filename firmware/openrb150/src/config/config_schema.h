@@ -16,11 +16,11 @@
 //
 // The struct is held as a RAM shadow (RobotConfig) and (de)serialized to a
 // compact, little-endian, version-tagged byte payload that the transactional
-// config store (config_store.h) persists in the 24LC32 EEPROM. Serialization is
+// config store persists in CONFIG.TXT on the Qwiic OpenLog. Serialization is
 // explicit (field by field) so the on-wire layout is endian-stable and
 // independent of compiler struct padding.
 //
-// Default values are the compiled SAFE fallback used when the EEPROM is missing
+// Default values are the compiled SAFE fallback used when storage is missing
 // or blank (AGENTS.md 1.3 / 4.3): geometry comes from the HexNav URDF kinematics
 // reference, contact sensing is disabled until calibrated, and servo travel is
 // clamped to a conservative +/-90deg about the 180deg center.

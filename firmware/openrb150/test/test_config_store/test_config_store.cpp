@@ -1,49 +1,57 @@
 // Native (host) unit tests for the portable transactional config store.
-// Uses a RAM-backed fake ConfigBackend; no Arduino/Wire dependencies.
+// Uses a RAM-backed fake append file; no Arduino/Wire dependencies.
 //
 // Run with: pio test -e native
 
 #include <string.h>
 #include <unity.h>
 
+#include "../../src/config/config_bootstrap.h"
 #include "../../src/config/config_store.h"
 
 using namespace config;
 
 namespace {
 
-// 4 KB RAM stand-in for the 24LC32, with optional fault injection to model a
-// power loss partway through a commit.
-class FakeEeprom : public ConfigBackend {
+class FakeFile : public ConfigFile {
  public:
-  FakeEeprom() { memset(mem_, 0xFF, sizeof(mem_)); }
-
-  bool read(uint16_t addr, uint8_t* buf, uint16_t len) override {
-    if (static_cast<uint32_t>(addr) + len > sizeof(mem_)) return false;
-    memcpy(buf, &mem_[addr], len);
-    ++reads_;
+  bool size(uint32_t& out) override {
+    out = size_;
     return true;
   }
 
-  bool write(uint16_t addr, const uint8_t* buf, uint16_t len) override {
-    if (static_cast<uint32_t>(addr) + len > sizeof(mem_)) return false;
-    if (fail_after_writes_ >= 0 && writes_ >= fail_after_writes_) {
-      return false;  // simulate power loss / write failure
+  bool read(uint32_t offset, uint8_t* buf, uint16_t len) override {
+    if (offset + len > size_) return false;
+    memcpy(buf, &mem_[offset], len);
+    return true;
+  }
+
+  bool append(const uint8_t* buf, uint16_t len) override {
+    if (size_ + len > sizeof(mem_)) return false;
+    uint16_t accepted = len;
+    if (fail_after_bytes_ >= 0) {
+      if (static_cast<int32_t>(size_) >= fail_after_bytes_) return false;
+      const uint32_t room = static_cast<uint32_t>(fail_after_bytes_) - size_;
+      if (accepted > room) accepted = static_cast<uint16_t>(room);
     }
-    memcpy(&mem_[addr], buf, len);
-    ++writes_;
-    return true;
+    memcpy(&mem_[size_], buf, accepted);
+    size_ += accepted;
+    return accepted == len;
   }
 
-  void corruptByte(uint16_t addr) { mem_[addr] ^= 0xFF; }
-  void failAfter(int n) { fail_after_writes_ = n; }
-  int writes() const { return writes_; }
+  bool sync() override { return !fail_sync_; }
+
+  void corruptByte(uint32_t offset) { mem_[offset] ^= 0xFF; }
+  bool appendRaw(const uint8_t* data, uint16_t len) { return append(data, len); }
+  void failAfterBytes(int32_t count) { fail_after_bytes_ = count; }
+  void failSync(bool fail) { fail_sync_ = fail; }
+  uint32_t used() const { return size_; }
 
  private:
-  uint8_t mem_[4096];
-  int writes_ = 0;
-  int reads_ = 0;
-  int fail_after_writes_ = -1;  // -1 = never fail
+  uint8_t mem_[8192] = {0};
+  uint32_t size_ = 0;
+  int32_t fail_after_bytes_ = -1;
+  bool fail_sync_ = false;
 };
 
 void fillPattern(uint8_t* p, uint16_t len, uint8_t seed) {
@@ -52,8 +60,8 @@ void fillPattern(uint8_t* p, uint16_t len, uint8_t seed) {
 
 }  // namespace
 
-void test_blank_eeprom_load_fails() {
-  FakeEeprom mem;
+void test_blank_file_load_fails() {
+  FakeFile mem;
   ConfigStore store(mem);
   uint8_t out[64];
   uint16_t out_len = 0xFFFF;
@@ -61,8 +69,66 @@ void test_blank_eeprom_load_fails() {
   TEST_ASSERT_EQUAL_UINT16(0, out_len);
 }
 
+void test_bootstrap_initializes_empty_file_with_defaults() {
+  FakeFile file;
+  ConfigStore store(file);
+  uint8_t defaults[100];
+  fillPattern(defaults, sizeof(defaults), 0x42);
+  uint8_t out[100];
+  uint16_t out_len = 0;
+
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(BootstrapResult::InitializedDefaults),
+      static_cast<uint8_t>(loadOrInitializeConfig(
+          file, store, defaults, sizeof(defaults), out, sizeof(out), out_len)));
+  TEST_ASSERT_EQUAL_UINT16(sizeof(defaults), out_len);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(defaults, out, sizeof(defaults));
+  TEST_ASSERT_GREATER_THAN(0, file.used());
+}
+
+void test_bootstrap_preserves_invalid_prefix_and_appends_defaults() {
+  FakeFile file;
+  const uint8_t corrupt[] = {'N', 'O', 'T', 'C', 'F', 'G'};
+  TEST_ASSERT_TRUE(file.appendRaw(corrupt, sizeof(corrupt)));
+  const uint32_t original_size = file.used();
+  ConfigStore store(file);
+  uint8_t defaults[32];
+  fillPattern(defaults, sizeof(defaults), 0x55);
+  uint8_t out[32];
+  uint16_t out_len = 99;
+
+    TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(BootstrapResult::RecoveredDefaults),
+      static_cast<uint8_t>(loadOrInitializeConfig(
+          file, store, defaults, sizeof(defaults), out, sizeof(out), out_len)));
+    TEST_ASSERT_EQUAL_UINT16(sizeof(defaults), out_len);
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(defaults, out, sizeof(defaults));
+    TEST_ASSERT_GREATER_THAN(original_size, file.used());
+}
+
+void test_bootstrap_loads_valid_file_without_appending() {
+  FakeFile file;
+  ConfigStore store(file);
+  uint8_t persisted[48];
+  fillPattern(persisted, sizeof(persisted), 0x21);
+  TEST_ASSERT_TRUE(store.commit(persisted, sizeof(persisted)));
+  const uint32_t original_size = file.used();
+  uint8_t defaults[48];
+  fillPattern(defaults, sizeof(defaults), 0xA0);
+  uint8_t out[48];
+  uint16_t out_len = 0;
+
+  TEST_ASSERT_EQUAL_UINT8(
+      static_cast<uint8_t>(BootstrapResult::Loaded),
+      static_cast<uint8_t>(loadOrInitializeConfig(
+          file, store, defaults, sizeof(defaults), out, sizeof(out), out_len)));
+  TEST_ASSERT_EQUAL_UINT16(sizeof(persisted), out_len);
+  TEST_ASSERT_EQUAL_UINT8_ARRAY(persisted, out, sizeof(persisted));
+  TEST_ASSERT_EQUAL_UINT32(original_size, file.used());
+}
+
 void test_commit_then_load_roundtrip() {
-  FakeEeprom mem;
+  FakeFile mem;
   ConfigStore store(mem);
   uint8_t payload[100];
   fillPattern(payload, sizeof(payload), 0x10);
@@ -76,8 +142,8 @@ void test_commit_then_load_roundtrip() {
   TEST_ASSERT_EQUAL_UINT8_ARRAY(payload, out, sizeof(payload));
 }
 
-void test_commits_alternate_slots_and_newest_wins() {
-  FakeEeprom mem;
+void test_newest_record_wins() {
+  FakeFile mem;
   ConfigStore store(mem);
 
   uint8_t a[40];
@@ -85,16 +151,13 @@ void test_commits_alternate_slots_and_newest_wins() {
   uint8_t b[50];
   fillPattern(b, sizeof(b), 0x80);
 
-  TEST_ASSERT_TRUE(store.commit(a, sizeof(a)));  // -> slot 0, seq 1
-  TEST_ASSERT_TRUE(store.commit(b, sizeof(b)));  // -> slot 1, seq 2
+  TEST_ASSERT_TRUE(store.commit(a, sizeof(a)));
+  TEST_ASSERT_TRUE(store.commit(b, sizeof(b)));
 
-  // Both slots should now be valid (A/B), with slot 1 newest.
-  SlotStatus st[kSlotCount];
-  store.inspect(st);
-  TEST_ASSERT_TRUE(st[0].valid);
-  TEST_ASSERT_TRUE(st[1].valid);
-  TEST_ASSERT_EQUAL_UINT32(1, st[0].sequence);
-  TEST_ASSERT_EQUAL_UINT32(2, st[1].sequence);
+  StoreStatus status;
+  TEST_ASSERT_TRUE(store.inspect(status));
+  TEST_ASSERT_EQUAL_UINT32(2, status.valid_records);
+  TEST_ASSERT_EQUAL_UINT32(2, status.sequence);
 
   uint8_t out[50];
   uint16_t out_len = 0;
@@ -104,7 +167,7 @@ void test_commits_alternate_slots_and_newest_wins() {
 }
 
 void test_corrupt_newest_falls_back_to_older() {
-  FakeEeprom mem;
+  FakeFile mem;
   ConfigStore store(mem);
 
   uint8_t a[40];
@@ -112,11 +175,10 @@ void test_corrupt_newest_falls_back_to_older() {
   uint8_t b[40];
   fillPattern(b, sizeof(b), 0x80);
 
-  TEST_ASSERT_TRUE(store.commit(a, sizeof(a)));  // slot 0, seq 1
-  TEST_ASSERT_TRUE(store.commit(b, sizeof(b)));  // slot 1, seq 2 (newest)
-
-  // Corrupt a payload byte of the newest slot (slot 1 at kSlotSize+header).
-  mem.corruptByte(static_cast<uint16_t>(kSlotAddr[1] + kHeaderSize + 5));
+  TEST_ASSERT_TRUE(store.commit(a, sizeof(a)));
+  const uint32_t second_record = mem.used();
+  TEST_ASSERT_TRUE(store.commit(b, sizeof(b)));
+  mem.corruptByte(second_record + kHeaderSize + 5);
 
   // Load must now fall back to the older, still-valid slot 0 (payload a).
   uint8_t out[40];
@@ -127,18 +189,18 @@ void test_corrupt_newest_falls_back_to_older() {
 }
 
 void test_corrupt_header_rejected() {
-  FakeEeprom mem;
+  FakeFile mem;
   ConfigStore store(mem);
   uint8_t a[32];
   fillPattern(a, sizeof(a), 0x22);
-  TEST_ASSERT_TRUE(store.commit(a, sizeof(a)));  // slot 0
+  TEST_ASSERT_TRUE(store.commit(a, sizeof(a)));
 
   // Flip a header byte (the magic) -> slot invalid.
-  mem.corruptByte(kSlotAddr[0]);
+  mem.corruptByte(0);
 
-  SlotStatus st[kSlotCount];
-  store.inspect(st);
-  TEST_ASSERT_FALSE(st[0].valid);
+  StoreStatus status;
+  TEST_ASSERT_TRUE(store.inspect(status));
+  TEST_ASSERT_FALSE(status.has_valid_record);
 
   uint8_t out[32];
   uint16_t out_len = 0;
@@ -146,17 +208,14 @@ void test_corrupt_header_rejected() {
 }
 
 void test_power_loss_during_commit_keeps_previous() {
-  FakeEeprom mem;
+  FakeFile mem;
   ConfigStore store(mem);
 
   uint8_t good[40];
   fillPattern(good, sizeof(good), 0x33);
-  TEST_ASSERT_TRUE(store.commit(good, sizeof(good)));  // slot 0, seq 1
+  TEST_ASSERT_TRUE(store.commit(good, sizeof(good)));
 
-  // Next commit writes payload (write #2) then header (write #3). Fail before
-  // the header is written so the new slot never becomes valid.
-  const int writes_before = mem.writes();
-  mem.failAfter(writes_before + 1);  // allow payload write, block header write
+  mem.failAfterBytes(static_cast<int32_t>(mem.used() + kHeaderSize + 10));
 
   uint8_t bad[40];
   fillPattern(bad, sizeof(bad), 0x99);
@@ -171,7 +230,7 @@ void test_power_loss_during_commit_keeps_previous() {
 }
 
 void test_commit_rejects_oversize_payload() {
-  FakeEeprom mem;
+  FakeFile mem;
   ConfigStore store(mem);
   static uint8_t big[kMaxPayload + 1];
   memset(big, 0x5A, sizeof(big));
@@ -200,7 +259,7 @@ void test_header_serialize_roundtrip() {
 }
 
 void test_empty_payload_commit_load() {
-  FakeEeprom mem;
+  FakeFile mem;
   ConfigStore store(mem);
   TEST_ASSERT_TRUE(store.commit(nullptr, 0));
   uint8_t out[8];
@@ -211,9 +270,12 @@ void test_empty_payload_commit_load() {
 
 int main(int, char**) {
   UNITY_BEGIN();
-  RUN_TEST(test_blank_eeprom_load_fails);
+  RUN_TEST(test_blank_file_load_fails);
+  RUN_TEST(test_bootstrap_initializes_empty_file_with_defaults);
+  RUN_TEST(test_bootstrap_preserves_invalid_prefix_and_appends_defaults);
+  RUN_TEST(test_bootstrap_loads_valid_file_without_appending);
   RUN_TEST(test_commit_then_load_roundtrip);
-  RUN_TEST(test_commits_alternate_slots_and_newest_wins);
+  RUN_TEST(test_newest_record_wins);
   RUN_TEST(test_corrupt_newest_falls_back_to_older);
   RUN_TEST(test_corrupt_header_rejected);
   RUN_TEST(test_power_loss_during_commit_keeps_previous);

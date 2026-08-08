@@ -5,8 +5,9 @@
 #include <math.h>
 
 #include "../board/board.h"
+#include "../config/config_bootstrap.h"
 #include "../config/config_api.h"
-#include "../config/eeprom_24lc32.h"
+#include "../config/qwiic_openlog.h"
 #include "../controller/controller_core.h"
 #include "../dxl/dxl_bus.h"
 #include "../dxl/dxl_fault_monitor.h"
@@ -26,6 +27,7 @@
 #include "../input/crsf_parser.h"
 #include "../input/crsf_telemetry.h"
 #include "../input/rc_frame_snapshot.h"
+#include "../logging/capture_log.h"
 #include "../protocol/api.h"
 #include "../protocol/control_api.h"
 #include "../protocol/controller_api.h"
@@ -44,8 +46,10 @@
 #include "../sensors/contact_estimator.h"
 #include "../sensors/finger_sensor.h"
 #include "../sensors/i2c_bus.h"
+#include "../sensors/qwiic_debug_oled.h"
 #include "../safety/command_arbiter.h"
 #include "../safety/error_journal.h"
+#include "../safety/event_log.h"
 #include "../safety/fault_capture.h"
 #include "../safety/state_machine.h"
 #include "../safety/system_state.h"
@@ -428,17 +432,26 @@ volatile bool g_radioStatusBoost = false;
 // live in several tasks, so every access is wrapped in a short critical section
 // by noteError()/takeError(); note() is bounded to a 12-entry table scan.
 safety::ErrorJournal g_errorJournal;
+safety::PersistentEventQueue g_persistentEvents;
 
 void noteError(safety::ErrorCode code, uint8_t detail,
                safety::ErrorSeverity severity, uint32_t now_ms) {
   taskENTER_CRITICAL();
-  g_errorJournal.note(code, detail, severity, now_ms);
+  const bool announced = g_errorJournal.note(code, detail, severity, now_ms);
+  if (announced && severity != safety::ErrorSeverity::Info) {
+    safety::PersistentEvent event;
+    event.timestamp_ms = now_ms;
+    event.code = code;
+    event.detail = detail;
+    event.severity = severity;
+    g_persistentEvents.push(event);
+  }
   taskEXIT_CRITICAL();
 }
 
 
-// Single owner of the root I2C bus (SERCOM0): TCA9548A mux, 24LC32 EEPROM, and the
-// muxed foot sensors. Only i2cTask touches this. Topology is the boot-scan
+// Single owner of the root I2C bus (SERCOM0): mux, OpenLog, OLED, and muxed foot
+// sensors. Only i2cTask touches this. Topology is the boot-scan
 // result describing which optional devices were found.
 i2c::I2cBus g_i2cBus;
 i2c::I2cTopology g_i2cTopology;
@@ -469,18 +482,111 @@ volatile bool g_sensorPollingEnabled = true;
 volatile uint32_t g_i2cLastUpdateMs = 0;
 constexpr uint32_t kI2cStaleMs = 500;
 
-// Persistent robot config in the 24LC32 EEPROM (root bus). When the EEPROM is
-// missing or holds no valid slot the config is marked volatile and the firmware
-// must run on compiled defaults and reject commits (AGENTS.md 4.3). At boot the
-// i2cTask loads any valid slot and hands it to apiTask; thereafter the config
-// API (apiTask) edits a RAM shadow and routes CFG_COMMIT back to i2cTask.
-config::Eeprom24LC32 g_eeprom(g_i2cBus);
-config::ConfigStore g_configStore(g_eeprom);
+// CONFIG.TXT is a hex-encoded append journal containing the complete serialized
+// RobotConfig. EVENTS.LOG is reserved for plain-text runtime diagnostics.
+config::QwiicOpenLog g_openlog(g_i2cBus);
+config::QwiicConfigFile g_configFile(g_openlog);
+config::ConfigStore g_configStore(g_configFile);
+bool g_configStorageAvailable = false;
 bool g_configVolatile = true;
+bool g_retainedCrashLogPending = false;
+bool g_watchdogResetLogPending = false;
+bool g_configBootstrapPending = false;
+bool g_oledInitPending = false;
+sensors::QwiicDebugOled g_debugOled(g_i2cBus);
+sensors::DebugDisplayState g_debugDisplayState;
+
+struct CaptureRuntime {
+  bool recording = false;
+  uint32_t handled_toggle_seq = 0;
+  uint32_t session = 0;
+  uint32_t sample = 0;
+  uint32_t completed_samples = 0;
+  uint32_t sample_ms = 0;
+  uint32_t next_sample_ms = 0;
+  uint8_t row = 0xFF;
+  uint8_t servo_count = 0;
+};
+
+CaptureRuntime g_capture;
+char g_captureLine[256];
+constexpr uint32_t kCaptureIntervalMs = 500;
+constexpr uint8_t kCaptureNoRow = 0xFF;
+constexpr const char* kCaptureFile = "CAPTURE.CSV";
+
+bool appendOpenLogLine(const char* file_name, const char* line, size_t len,
+                       bool sync) {
+  size_t offset = 0;
+  while (offset < len) {
+    const size_t remaining = len - offset;
+    const uint8_t count = remaining < config::QwiicOpenLog::kMaxWriteBytes
+                              ? static_cast<uint8_t>(remaining)
+                              : config::QwiicOpenLog::kMaxWriteBytes;
+    if (!g_openlog.append(file_name,
+                          reinterpret_cast<const uint8_t*>(line + offset),
+                          count)) {
+      return false;
+    }
+    offset += count;
+  }
+  return !sync || g_openlog.sync();
+}
+
+bool appendEventLogLine(const char* line, size_t len) {
+  return appendOpenLogLine("EVENTS.LOG", line, len, true);
+}
+
+bool tryPersistRetainedCrash() {
+  if (!g_retainedCrashLogPending) return true;
+  const size_t length = safety::formatCrashLog(
+      fault_capture::lastSnapshot(), g_captureLine, sizeof(g_captureLine));
+  if (length == 0) {
+    g_retainedCrashLogPending = false;
+    return true;
+  }
+  uint32_t size_before = 0;
+  bool existed_before = false;
+  if (!g_openlog.fileSize("EVENTS.LOG", size_before, existed_before)) {
+    return false;
+  }
+  if (!appendEventLogLine(g_captureLine, length)) return false;
+  uint32_t size_after = 0;
+  bool exists_after = false;
+  if (!g_openlog.fileSize("EVENTS.LOG", size_after, exists_after) ||
+      !exists_after || size_after < size_before + length) {
+    return false;
+  }
+  fault_capture::acknowledgePersisted();
+  g_retainedCrashLogPending = false;
+  return true;
+}
+
+bool tryPersistWatchdogReset() {
+  if (!g_watchdogResetLogPending) return true;
+  const size_t length = safety::formatWatchdogResetLog(
+      watchdog::lastResetMissedMask(), watchdog::lastResetProgressMarker(),
+      watchdog::lastResetControlProgress(), watchdog::lastResetSafetyState(),
+      g_captureLine, sizeof(g_captureLine));
+  uint32_t size_before = 0;
+  bool existed_before = false;
+  if (length == 0 ||
+      !g_openlog.fileSize("EVENTS.LOG", size_before, existed_before) ||
+      !appendEventLogLine(g_captureLine, length)) {
+    return false;
+  }
+  uint32_t size_after = 0;
+  bool exists_after = false;
+  if (!g_openlog.fileSize("EVENTS.LOG", size_after, exists_after) ||
+      !exists_after || size_after < size_before + length) {
+    return false;
+  }
+  g_watchdogResetLogPending = false;
+  return true;
+}
 
 // --- Cross-task config plumbing (AGENTS.md 5.1: only i2cTask touches I2C) ---
 //
-// The config API runs in apiTask (it parses USB frames), but the EEPROM commit
+// The config API runs in apiTask (it parses USB frames), but the storage commit
 // is an I2C transaction that only i2cTask is allowed to perform. So apiTask
 // edits/validates a RAM shadow locally, and a CFG_COMMIT hands the validated
 // serialized payload to i2cTask through this mailbox and blocks (bounded) for
@@ -505,6 +611,27 @@ struct BootLoad {
 };
 BootLoad g_bootLoad;
 
+bool tryBootstrapConfig(const config::RobotConfig& defaults) {
+  if (!g_configBootstrapPending) return true;
+  const uint16_t defaults_len = config::serializeRobotConfig(
+      defaults, g_bootLoad.payload, sizeof(g_bootLoad.payload));
+  uint16_t loaded_len = 0;
+  const config::BootstrapResult bootstrap =
+      defaults_len == config::kConfigPayloadSize
+          ? config::loadOrInitializeConfig(
+                g_configFile, g_configStore, g_bootLoad.payload, defaults_len,
+                g_bootLoad.payload, sizeof(g_bootLoad.payload), loaded_len)
+          : config::BootstrapResult::StorageError;
+  if (bootstrap == config::BootstrapResult::StorageError) {
+    return false;
+  }
+  g_bootLoad.len = loaded_len;
+  g_bootLoad.ready = true;
+  g_configVolatile = false;
+  g_configBootstrapPending = false;
+  return true;
+}
+
 // Persistence sink used by the config API. commitPayload() is called from
 // apiTask; it forwards the bytes to i2cTask and waits for the transaction.
 class TaskConfigPersistence : public config::ConfigPersistence {
@@ -520,7 +647,7 @@ class TaskConfigPersistence : public config::ConfigPersistence {
     g_commit.ok = false;
     g_commit.requested = true;
     xSemaphoreGive(g_commitMutex);
-    // Wait for i2cTask to run the EEPROM transaction (normally < 200 ms).
+    // Wait for i2cTask to append and sync the OpenLog transaction.
     if (xSemaphoreTake(g_commitDone, pdMS_TO_TICKS(1500)) != pdTRUE) {
       return false;  // timed out
     }
@@ -531,7 +658,9 @@ class TaskConfigPersistence : public config::ConfigPersistence {
     xSemaphoreGive(g_commitMutex);
     return ok;
   }
-  bool persistent() const override { return !g_configVolatile; }
+  bool persistent() const override {
+    return g_configStorageAvailable && !g_configVolatile;
+  }
 };
 
 TaskConfigPersistence g_configPersist;
@@ -1061,7 +1190,21 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
 //                        torque-off PassivePoseStream state).
 //   * JetsonControl   - Jetson heartbeat -> arbiter authority is wired
 //                        (lmt.13); available, defaults off, gated by RC.
-void updateFeatureFlags(uint32_t now_ms) {
+// NOTE: the controlTask-loop helpers below are marked noinline deliberately.
+// GCC inlines single-call-site functions, which merged all of their locals
+// into controlTask's frame -- ~760 bytes that stayed live during the deep
+// ControllerCore::step -> gait/IK descent and overflowed the 448-word stack.
+// As real calls, each frame is popped before step() recurses deeper.
+//
+// Flash-resident default images. Assigning `g_x = X{}` materializes the
+// temporary on the caller's stack (628 B RobotState / 320 B ControllerIntent /
+// 508 B ControllerConfigSnapshot); copy-assigning from these constants does a
+// flash->RAM memberwise copy with no stack temporary.
+const controller::RobotState kDefaultRobotState{};
+constexpr controller::ControllerIntent kDefaultControllerIntent{};
+const controller::ControllerConfigSnapshot kDefaultControllerConfigSnapshot{};
+
+__attribute__((noinline)) void updateFeatureFlags(uint32_t now_ms) {
   using protocol::Feature;
   using protocol::FeatureReason;
 
@@ -1147,6 +1290,62 @@ uint8_t fractionToByte(float value) {
   if (value <= 0.0f) return 0;
   if (value >= 1.0f) return 255;
   return static_cast<uint8_t>(value * 255.0f + 0.5f);
+}
+
+int16_t scaledI16(float value, float scale) {
+  const float scaled = value * scale;
+  if (scaled >= 32767.0f) return 32767;
+  if (scaled <= -32768.0f) return -32768;
+  return static_cast<int16_t>(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
+}
+
+logging::RemoteCapture buildRemoteCapture(
+    const controller::ControllerCommand& command,
+    const ChannelPackInputs_t& raw, uint32_t frame_sequence,
+    uint32_t now_ms) {
+  logging::RemoteCapture capture;
+  capture.timestamp_ms = now_ms;
+  capture.frame_sequence = frame_sequence;
+  for (uint8_t i = 0; i < 4; ++i) capture.gimbal[i] = raw.gimbal[i];
+  for (uint8_t i = 0; i < 2; ++i) {
+    capture.pot[i] = raw.pot[i];
+    capture.encoder[i] = raw.encoder[i];
+    capture.toggle[i] = raw.toggles[i];
+    for (uint8_t direction = 0; direction < 5; ++direction) {
+      if (raw.nav[i][direction]) {
+        capture.nav_mask[i] |= static_cast<uint8_t>(1u << direction);
+      }
+    }
+  }
+  for (uint8_t i = 0; i < 8; ++i) {
+    if (raw.switches[i]) capture.switch_mask |= static_cast<uint8_t>(1u << i);
+  }
+  for (uint8_t i = 0; i < 4; ++i) {
+    if (raw.buttons[i]) capture.button_mask |= static_cast<uint8_t>(1u << i);
+  }
+  if (command.valid) capture.flags |= 0x01;
+  if (command.failsafe) capture.flags |= 0x02;
+  if (command.arm_request) capture.flags |= 0x04;
+  if (command.estop) capture.flags |= 0x08;
+  if (command.host_authority) capture.flags |= 0x10;
+  capture.mode = static_cast<uint8_t>(command.mode);
+  capture.gait = command.gait_index;
+  capture.twist_milli[0] = scaledI16(command.twist_vx, 1000.0f);
+  capture.twist_milli[1] = scaledI16(command.twist_vy, 1000.0f);
+  capture.twist_milli[2] = scaledI16(command.twist_wz, 1000.0f);
+  capture.pose[0] = scaledI16(command.pose_x_mm, 1.0f);
+  capture.pose[1] = scaledI16(command.pose_y_mm, 1.0f);
+  capture.pose[2] = scaledI16(command.pose_z_mm, 1.0f);
+  capture.pose[3] = scaledI16(command.pose_roll, 1000.0f);
+  capture.pose[4] = scaledI16(command.pose_pitch, 1000.0f);
+  capture.pose[5] = scaledI16(command.pose_yaw, 1000.0f);
+  capture.speed_x255 = fractionToByte(command.speed);
+  capture.body_height_x255 = fractionToByte(command.body_height);
+  capture.stride_x255 = fractionToByte(command.stride);
+  capture.step_height_x255 = fractionToByte(command.step_height);
+  capture.duty_x255 = fractionToByte(command.duty);
+  capture.capture_toggle_seq = command.capture_toggle_seq;
+  return capture;
 }
 
 uint8_t rcGaitForTelemetry(const controller::ControllerCommand& command) {
@@ -1266,7 +1465,7 @@ bool verifyDiscoveredTorqueOff() {
   return true;
 }
 
-bool refreshControllerConfigSnapshot() {
+__attribute__((noinline)) bool refreshControllerConfigSnapshot() {
   const uint32_t revision = g_configApi.revision();
   if (g_controllerConfig.valid &&
       revision == g_controllerConfigRevision) {
@@ -1276,7 +1475,7 @@ bool refreshControllerConfigSnapshot() {
   if (!controller::makeControllerConfigSnapshot(
           g_configApi.config(), revision, !g_configVolatile,
           g_controllerConfig)) {
-    g_controllerConfig = controller::ControllerConfigSnapshot{};
+    g_controllerConfig = kDefaultControllerConfigSnapshot;
     g_controllerConfig.revision = revision;
     g_controllerConfig.persistent = !g_configVolatile;
     return false;
@@ -1290,9 +1489,9 @@ bool refreshControllerConfigSnapshot() {
   return true;
 }
 
-void collectControllerState(uint32_t now_ms) {
+__attribute__((noinline)) void collectControllerState(uint32_t now_ms) {
   controller::RobotState& state = g_controllerState;
-  state = controller::RobotState{};
+  state = kDefaultRobotState;
   state.config_ready = g_configReady;
 
   if (!g_batterySampled ||
@@ -1331,9 +1530,10 @@ void collectControllerState(uint32_t now_ms) {
   state.watchdog_fault = watchdog::criticalStalled();
 }
 
-void collectControllerIntent(bool maintenance_held, bool host_disarm) {
+__attribute__((noinline)) void collectControllerIntent(bool maintenance_held,
+                                                        bool host_disarm) {
   controller::ControllerIntent& intent = g_controllerIntent;
-  intent = controller::ControllerIntent{};
+  intent = kDefaultControllerIntent;
   controller::RcFrameSnapshot latest_rc;
   taskENTER_CRITICAL();
   const bool rc_snapshot_available = g_rcMailbox.copy(latest_rc);
@@ -1373,7 +1573,7 @@ void collectControllerIntent(bool maintenance_held, bool host_disarm) {
   intent.jetson_heartbeat_received = g_controlApi.consumeJetsonHeartbeat();
 }
 
-void publishControllerCommand(uint32_t now_ms) {
+__attribute__((noinline)) void publishControllerCommand(uint32_t now_ms) {
   const controller::RobotCommand& command = g_controllerCommand;
   g_commandSource = static_cast<uint8_t>(command.command_source);
   g_motionAuthorized = command.motion_authorized;
@@ -1584,8 +1784,36 @@ void publishControllerCommand(uint32_t now_ms) {
       (now_ms - g_controllerIntent.rc.command.gait_tune_last_edit_ms) <
           kCrsfStatusBoostHoldMs;
 
+  // Staged at file scope, not on the controlTask stack: this frame sits on the
+  // same stack as the armed gait/IK path, and the extra ~52 words pushed the
+  // 448-word stack to a 43-word high-water margin (overflow on arming).
+  // Only controlTask writes this staging copy, so no lock is needed here.
+  static sensors::DebugDisplayState display;
+  const controller::ControllerCommand& rc = g_controllerIntent.rc.command;
+  display.body_height_mm = diag.applied_body_height_mm;
+  display.stride_mm = diag.applied_stride_mm;
+  display.step_height_mm = diag.applied_step_height_mm;
+  display.duty_x255 = diag.applied_duty_x255;
+  display.speed_x255 = diag.applied_speed_x255;
+  display.gait = rc.gait_index == 0 ? static_cast<uint8_t>(config::GaitId::Wave)
+         : rc.gait_index == 1
+           ? static_cast<uint8_t>(config::GaitId::Ripple)
+           : static_cast<uint8_t>(config::GaitId::Tripod);
+  display.safety_state = g_safetyState;
+  display.fault_reason = g_faultReason;
+  display.battery_mv = g_controllerState.battery.millivolts;
+  display.battery_valid = g_controllerState.battery.valid;
+  display.rc_seen = rc.ever_seen;
+  display.rc_failsafe = rc.failsafe;
+  display.rc_armed = rc.arm_request;
+  display.tune_param = diag.gait_tune_param;
+  display.tune_active = diag.gait_tune_active;
+  display.trim_roll_cdeg = static_cast<int16_t>(rc.trim_roll * 5729.578f);
+  display.trim_pitch_cdeg = static_cast<int16_t>(rc.trim_pitch * 5729.578f);
+
   taskENTER_CRITICAL();
   g_radioStatus = radio;
+  g_debugDisplayState = display;
   taskEXIT_CRITICAL();
 
   if (command.goal_valid) {
@@ -2182,6 +2410,7 @@ void dxlTask(void*) {
   bool prev_authorized = false;
   bool arming_discovery_started = false;
   bool arming_discovery_finished = false;
+  bool arming_event_noted = false;
   uint8_t arming_discovery_index = 0;
   uint32_t arming_power_on_ms = 0;
   constexpr uint16_t kServoBootDelayMs = 500;
@@ -2201,6 +2430,21 @@ void dxlTask(void*) {
     // wait for the servos to boot, discover exactly the configured IDs once,
     // then let the normal status reader populate fresh present positions. The
     // safety FSM remains in ArmingChecks until all 18 IDs and poses are known.
+    // The arming event is queued for best-effort persistence (i2cTask drains
+    // g_persistentEvents); arming NEVER waits on storage. Written straight to
+    // the persistence queue at Info severity so it is not announced as an
+    // operator-facing error.
+    if (arming && !arming_event_noted) {
+      arming_event_noted = true;
+      safety::PersistentEvent arming_event;
+      arming_event.timestamp_ms = now_ms;
+      arming_event.code = safety::ErrorCode::ArmingStarted;
+      arming_event.detail = g_commandSource;
+      arming_event.severity = safety::ErrorSeverity::Info;
+      taskENTER_CRITICAL();
+      g_persistentEvents.push(arming_event);
+      taskEXIT_CRITICAL();
+    }
     if (arming) {
       if (!board::dxlPowerEnabled()) {
         watchdog::markProgress(10);
@@ -2227,7 +2471,11 @@ void dxlTask(void*) {
         if (arming_discovery_started && !arming_discovery_finished) {
           const config::RobotConfig& cfg = g_configApi.config();
           watchdog::markProgress(11);
-          g_dxlBus.discoverId(cfg.servos[arming_discovery_index].id);
+          const uint8_t discover_id = cfg.servos[arming_discovery_index].id;
+          if (!g_dxlBus.discoverId(discover_id)) {
+            noteError(safety::ErrorCode::DxlDiscoveryIncomplete, discover_id,
+                      safety::ErrorSeverity::Error, now_ms);
+          }
           ++arming_discovery_index;
           if (arming_discovery_index >= config::kNumServos) {
             arming_discovery_finished = true;
@@ -2242,6 +2490,7 @@ void dxlTask(void*) {
       arming_discovery_started = false;
       arming_discovery_finished = false;
       arming_discovery_index = 0;
+      arming_event_noted = false;
     }
 
     // Execute at most one bounded DXL maintenance operation per cycle. A scan
@@ -2315,7 +2564,12 @@ void dxlTask(void*) {
           watchdog::markProgress(52);
           g_dxlBus.setTorqueAll(false);
           torque_enable_fault = true;
+          noteError(safety::ErrorCode::DxlWriteFailed, 0,
+                    safety::ErrorSeverity::Critical, now_ms);
         }
+      } else {
+        noteError(safety::ErrorCode::DxlWriteFailed, 0,
+                  safety::ErrorSeverity::Error, now_ms);
       }
     }
     if (!board::dxlPowerEnabled()) {
@@ -2378,7 +2632,10 @@ void dxlTask(void*) {
       }
       if (count > 0) {
         watchdog::markProgress(60);
-        g_dxlBus.writeGoalPositions(targets, count);
+        if (!g_dxlBus.writeGoalPositions(targets, count)) {
+          noteError(safety::ErrorCode::DxlWriteFailed, 0,
+                    safety::ErrorSeverity::Error, now_ms);
+        }
       }
     }
 
@@ -2427,6 +2684,9 @@ void dxlTask(void*) {
           servo_fault_monitor.observe(
               rr_servo, rr_profile.table_kind,
               g_servoStatus[rr_servo].hardware_error);
+        } else {
+          noteError(safety::ErrorCode::DxlReadFailed, rr_id,
+                    safety::ErrorSeverity::Warning, now_ms);
         }
         ++rr_servo;
       }
@@ -2439,6 +2699,10 @@ void dxlTask(void*) {
       // passing but do not falsely classify the entire bus as dead.
       if (n == 0) {
         if (consec_zero_reads < 0xFFFF) ++consec_zero_reads;
+        if (consec_zero_reads == kDxlBusFailLimit) {
+          noteError(safety::ErrorCode::DxlBusSilent, 5,
+                    safety::ErrorSeverity::Critical, now_ms);
+        }
       } else {
         consec_zero_reads = 0;
       }
@@ -2571,11 +2835,12 @@ void rcTask(void*) {
 
     // Legacy telemetry and USB-controller views retain their existing latest
     // snapshots. The control path above never reads these independently.
+    const ChannelPackInputs_t raw_inputs = g_bridge.rawInputs();
     g_ctrlCmd = command;
     g_rcStatus = rc_status;
     // Publish the raw inputs + active bindings for the controller USB API /
     // controller_state telemetry (apiTask is a reader only).
-    g_ctrlRaw = g_bridge.rawInputs();
+    g_ctrlRaw = raw_inputs;
     g_ctrlBindings = g_bridge.bindings();
     // Publish the raw RC diagnostics snapshot (a8n). Raw ticks refresh only on a
     // fresh frame (so a dropout freezes the last-known sticks); the parser's
@@ -2921,7 +3186,9 @@ void apiTask(void*) {
 void publishTopologySnapshot() {
   protocol::TopologySnapshot& s = g_sensorTopoSnap;
   s.mux_present = g_i2cTopology.mux_present ? 1 : 0;
-  s.eeprom_present = g_i2cTopology.eeprom_present ? 1 : 0;
+  // Keep the wire position stable; this legacy field now reports whether the
+  // replacement config storage (Qwiic OpenLog) is present and SD-ready.
+  s.eeprom_present = g_i2cTopology.openlog_present ? 1 : 0;
   s.num_channels = protocol::kSensorNumChannels;
   for (uint8_t i = 0; i < protocol::kSensorNumChannels; ++i) {
     const i2c::ChannelInfo& c = g_i2cTopology.channels[i];
@@ -2960,11 +3227,42 @@ void publishStatusSnapshot() {
 }
 
 void i2cTask(void*) {
-  // Bring up the root I2C bus and run a one-time discovery scan so capabilities
-  // (mux/EEPROM presence, per-channel foot sensors) are known early. Running it
-  // here keeps the blocking probe work off the control loop.
+  // fault_capture::init() copied the retained previous-reset record before any
+  // peripheral or RTOS work. Check it before discovery so the first possible
+  // SD operation is an attempt to preserve that crash.
+  g_retainedCrashLogPending =
+      fault_capture::lastSnapshot().reason != fault_capture::FatalReason::None;
+  g_watchdogResetLogPending = (g_resetCause & 0x20u) != 0;
+
+  // Bring up only the root bus first. Channel scans, config bootstrap, sensors,
+  // and OLED initialization are lower priority than retained crash persistence.
   g_i2cBus.begin();
-  g_i2cBus.scanAll(g_i2cTopology);
+  i2c::initTopology(g_i2cTopology);
+  g_i2cBus.scanRoot(g_i2cTopology);
+  if (g_i2cTopology.openlog_present) {
+    g_configStorageAvailable =
+        g_openlog.begin(g_i2cTopology.openlog_address);
+    g_i2cTopology.openlog_present = g_configStorageAvailable;
+    if (g_configStorageAvailable && g_retainedCrashLogPending) {
+      (void)tryPersistRetainedCrash();
+    }
+    if (g_configStorageAvailable && !g_retainedCrashLogPending &&
+        g_watchdogResetLogPending) {
+      (void)tryPersistWatchdogReset();
+    }
+  }
+
+  g_configBootstrapPending = g_configStorageAvailable;
+  if (!g_retainedCrashLogPending && !g_watchdogResetLogPending &&
+      g_configBootstrapPending) {
+    (void)tryBootstrapConfig(g_configApi.config());
+  }
+
+  // Only after the crash/config attempts, discover muxed devices. OLED begin
+  // stays deferred until the steady-state loop so its graphics call chain can
+  // never prevent the first diagnostic/config file writes.
+  g_i2cBus.scanChannels(g_i2cTopology);
+  g_oledInitPending = g_i2cTopology.oled_present;
   g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
   const bool imu_present = g_bno085.begin();
   taskENTER_CRITICAL();
@@ -2981,41 +3279,17 @@ void i2cTask(void*) {
   // calibration enables it; raw values still stream as telemetry).
   {
     // Kept off this task's stack (it is ~360 bytes) and fully repopulated by
-    // defaultRobotConfig() on this single-run task, so a file-scope static here
-    // avoids a large transient stack frame during the boot scan.
-    static config::RobotConfig boot_cfg;
-    config::defaultRobotConfig(boot_cfg);
+    // ConfigApi construction before the scheduler, so use the existing stable
+    // default shadow instead of allocating another RobotConfig copy.
+    const config::RobotConfig& boot_config = g_configApi.config();
     sensors::ContactParams params;  // conservative defaults
-    g_contact.configure(boot_cfg.feet, params);
+    g_contact.configure(boot_config.feet, params);
     // Seed the motion intent with the compiled-default gait parameters so the
     // first SET_BODY_TWIST has a sane baseline (host SET_GAIT_PARAMS overrides).
-    g_motionApi.setDefaults(boot_cfg.gait.gait, boot_cfg.gait.body_height_mm,
-                            boot_cfg.gait.stride_len_mm,
-                            boot_cfg.gait.step_height_mm, boot_cfg.gait.duty_x255,
-                            boot_cfg.gait.speed_x255);
-  }
-  // If the config EEPROM is present and holds a valid slot, load it and hand it
-  // to apiTask to adopt as the active config. Otherwise stay volatile so the
-  // firmware runs on compiled defaults and CFG_COMMIT is rejected (AGENTS.md
-  // 4.3).
-  if (g_i2cTopology.eeprom_present) {
-    config::SlotStatus slots[config::kSlotCount];
-    g_configStore.inspect(slots);
-    if (slots[0].valid || slots[1].valid) {
-      uint16_t n = 0;
-      if (g_configStore.load(g_bootLoad.payload, sizeof(g_bootLoad.payload),
-                             n)) {
-        g_bootLoad.len = n;
-        g_bootLoad.ready = true;
-        g_configVolatile = false;
-      } else {
-        g_configVolatile = true;
-      }
-    } else {
-      g_configVolatile = true;
-    }
-  } else {
-    g_configVolatile = true;
+    g_motionApi.setDefaults(
+        boot_config.gait.gait, boot_config.gait.body_height_mm,
+        boot_config.gait.stride_len_mm, boot_config.gait.step_height_mm,
+        boot_config.gait.duty_x255, boot_config.gait.speed_x255);
   }
   // Boot discovery and config seeding are complete: a config (persisted or
   // compiled default) is now available, so the safety machine may leave
@@ -3027,9 +3301,51 @@ void i2cTask(void*) {
   uint32_t i2c_period_ms = period_ms::kI2c;
   for (;;) {
     tick(watchdog::TaskId::I2c);
+    bool storage_io_this_pass = false;
+
+    static uint32_t next_crash_attempt_ms = 0;
+    static uint32_t next_watchdog_attempt_ms = 0;
+    static uint32_t next_bootstrap_attempt_ms = 0;
+    const uint32_t boot_storage_now_ms = millis();
+    if (g_retainedCrashLogPending && g_configStorageAvailable &&
+        static_cast<int32_t>(boot_storage_now_ms - next_crash_attempt_ms) >= 0) {
+      storage_io_this_pass = true;
+      if (!tryPersistRetainedCrash()) {
+        next_crash_attempt_ms = boot_storage_now_ms + 1000u;
+      }
+    }
+    if (!g_retainedCrashLogPending && g_watchdogResetLogPending &&
+        g_configStorageAvailable && !storage_io_this_pass &&
+        static_cast<int32_t>(boot_storage_now_ms - next_watchdog_attempt_ms) >= 0) {
+      storage_io_this_pass = true;
+      if (!tryPersistWatchdogReset()) {
+        next_watchdog_attempt_ms = boot_storage_now_ms + 1000u;
+      }
+    }
+    if (!g_retainedCrashLogPending && !g_watchdogResetLogPending &&
+        g_configBootstrapPending &&
+        !storage_io_this_pass &&
+        static_cast<int32_t>(boot_storage_now_ms - next_bootstrap_attempt_ms) >= 0) {
+      storage_io_this_pass = true;
+      if (!tryBootstrapConfig(g_configApi.config())) {
+        next_bootstrap_attempt_ms = boot_storage_now_ms + 1000u;
+      }
+    }
+    const bool boot_storage_pending = g_configStorageAvailable &&
+      (g_retainedCrashLogPending || g_watchdogResetLogPending ||
+       g_configBootstrapPending);
+
+    if (!boot_storage_pending && g_oledInitPending && !storage_io_this_pass) {
+      if (g_i2cTopology.mux_present) g_i2cBus.selectNone();
+      if (!g_debugOled.begin(g_i2cTopology.oled_address)) {
+        g_i2cTopology.oled_present = false;
+      }
+      g_oledInitPending = false;
+      storage_io_this_pass = true;
+    }
 
     // Service a config commit handed over by apiTask. i2cTask is the sole owner
-    // of Wire/EEPROM, so the transactional store write happens here.
+    // of OpenLog, so the append-and-sync transaction happens here.
     bool do_commit = false;
     if (g_commitMutex != nullptr) {
       if (xSemaphoreTake(g_commitMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
@@ -3037,7 +3353,8 @@ void i2cTask(void*) {
         xSemaphoreGive(g_commitMutex);
       }
     }
-    if (do_commit) {
+    if (do_commit && !boot_storage_pending) {
+      storage_io_this_pass = true;
       const bool ok = g_configStore.commit(g_commit.payload, g_commit.len);
       if (xSemaphoreTake(g_commitMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         g_commit.ok = ok;
@@ -3045,6 +3362,138 @@ void i2cTask(void*) {
         xSemaphoreGive(g_commitMutex);
         if (ok) g_configVolatile = false;  // a valid slot now exists
         xSemaphoreGive(g_commitDone);
+      }
+    }
+
+    // Distinct BTN_4 presses publish a monotonic sequence from rcTask. Toggle only
+    // on odd sequence deltas so even bursts cancel without an unbounded loop.
+    logging::RemoteCapture capture_remote = buildRemoteCapture(
+      g_ctrlCmd, g_ctrlRaw, g_rcDiag.frames_decoded, g_ctrlCmd.frame_ms);
+    const uint32_t toggle_delta =
+        capture_remote.capture_toggle_seq - g_capture.handled_toggle_seq;
+    if (!boot_storage_pending && !storage_io_this_pass && toggle_delta != 0) {
+      g_capture.handled_toggle_seq = capture_remote.capture_toggle_seq;
+      if ((toggle_delta & 1u) != 0) {
+        const uint32_t capture_now_ms = millis();
+        if (!g_capture.recording) {
+          if (!g_configStorageAvailable) {
+            noteError(safety::ErrorCode::CaptureUnavailable, 0,
+                      safety::ErrorSeverity::Warning, capture_now_ms);
+          } else {
+            g_capture.session = capture_now_ms;
+            g_capture.sample = 0;
+            g_capture.completed_samples = 0;
+            g_capture.row = kCaptureNoRow;
+            const size_t len = logging::formatCaptureMarker(
+                true, g_capture.session, capture_now_ms, 0, g_captureLine,
+                sizeof(g_captureLine));
+            const bool ok = len > 0 && appendOpenLogLine(
+                kCaptureFile, g_captureLine, len, true);
+            storage_io_this_pass = true;
+            if (ok) {
+              g_capture.recording = true;
+              g_capture.next_sample_ms = capture_now_ms;
+            } else {
+              noteError(safety::ErrorCode::CaptureWriteFailed, 1,
+                        safety::ErrorSeverity::Error, capture_now_ms);
+            }
+          }
+        } else {
+          const size_t len = logging::formatCaptureMarker(
+              false, g_capture.session, capture_now_ms,
+              g_capture.completed_samples, g_captureLine,
+              sizeof(g_captureLine));
+          const bool ok = len > 0 && appendOpenLogLine(
+              kCaptureFile, g_captureLine, len, true);
+          storage_io_this_pass = true;
+          g_capture.recording = false;
+          g_capture.row = kCaptureNoRow;
+          if (!ok) {
+            noteError(safety::ErrorCode::CaptureWriteFailed, 4,
+                      safety::ErrorSeverity::Error, capture_now_ms);
+          }
+        }
+      }
+    }
+
+    if (!boot_storage_pending && g_capture.recording && !storage_io_this_pass) {
+      const uint32_t capture_now_ms = millis();
+      if (g_capture.row == kCaptureNoRow &&
+          static_cast<int32_t>(capture_now_ms - g_capture.next_sample_ms) >= 0) {
+        ++g_capture.sample;
+        g_capture.sample_ms = capture_now_ms;
+        g_capture.servo_count = g_servoStatusCount;
+        g_capture.row = 0;
+      }
+
+      bool row_ok = true;
+      if (g_capture.row == 0) {
+        capture_remote = buildRemoteCapture(
+          g_ctrlCmd, g_ctrlRaw, g_rcDiag.frames_decoded, g_ctrlCmd.frame_ms);
+        const size_t len = logging::formatRemoteCaptureRow(
+            g_capture.session, g_capture.sample, capture_remote, g_captureLine,
+            sizeof(g_captureLine));
+        row_ok = len > 0 && appendOpenLogLine(
+            kCaptureFile, g_captureLine, len, false);
+        storage_io_this_pass = true;
+        g_capture.row = 1;
+      } else if (g_capture.row != kCaptureNoRow &&
+                 g_capture.row <= g_capture.servo_count) {
+        dxl::ServoStatus servo;
+        servo = g_servoStatus[g_capture.row - 1u];
+        const size_t len = logging::formatServoCaptureRow(
+            g_capture.session, g_capture.sample, g_capture.sample_ms, servo,
+            g_captureLine, sizeof(g_captureLine));
+        row_ok = len > 0 && appendOpenLogLine(
+            kCaptureFile, g_captureLine, len, false);
+        storage_io_this_pass = true;
+        ++g_capture.row;
+      }
+
+      if (row_ok && g_capture.row != kCaptureNoRow &&
+          g_capture.row > g_capture.servo_count) {
+        row_ok = g_openlog.sync();
+        storage_io_this_pass = true;
+        if (row_ok) {
+          ++g_capture.completed_samples;
+          g_capture.row = kCaptureNoRow;
+          g_capture.next_sample_ms = g_capture.sample_ms + kCaptureIntervalMs;
+        }
+      }
+      if (!row_ok) {
+        g_capture.recording = false;
+        g_capture.row = kCaptureNoRow;
+        noteError(safety::ErrorCode::CaptureWriteFailed, 2,
+                  safety::ErrorSeverity::Error, capture_now_ms);
+      }
+    }
+
+    // Persist one deduplicated warning/error at a time. Keep the queue head on
+    // failure and retry slowly so missing/failed media cannot starve sensors.
+    if (!boot_storage_pending && g_configStorageAvailable &&
+      !storage_io_this_pass) {
+      static uint32_t next_log_attempt_ms = 0;
+      const uint32_t log_now_ms = millis();
+      if (static_cast<int32_t>(log_now_ms - next_log_attempt_ms) >= 0) {
+        safety::PersistentEvent event;
+        bool has_event = false;
+        taskENTER_CRITICAL();
+        has_event = g_persistentEvents.peek(event);
+        taskEXIT_CRITICAL();
+        if (has_event) {
+          storage_io_this_pass = true;
+          char line[96];
+          const size_t len = safety::formatEventLog(event, line, sizeof(line));
+          const bool written = len > 0 && appendEventLogLine(line, len);
+          if (written) {
+            taskENTER_CRITICAL();
+            g_persistentEvents.pop();
+            taskEXIT_CRITICAL();
+            next_log_attempt_ms = log_now_ms;
+          } else {
+            next_log_attempt_ms = log_now_ms + 1000u;
+          }
+        }
       }
     }
 
@@ -3144,7 +3593,7 @@ void i2cTask(void*) {
     // Poll one foot sensor per iteration (round-robin) so each pass does bounded
     // Wire work and the control loop is never stalled by a slow/missing board
     // (AGENTS.md 1.1 / 5.4). The mux requires exclusive one-hot channel select;
-    // we select, read, then deselect so the root bus (EEPROM) stays addressable.
+    // we select, read, then deselect so root devices stay addressable.
     if (g_sensorPollingEnabled && g_i2cTopology.mux_present) {
       const uint8_t ch = poll_ch;
       poll_ch = static_cast<uint8_t>((poll_ch + 1) % i2c::kNumFootChannels);
@@ -3207,6 +3656,54 @@ void i2cTask(void*) {
     publishStatusSnapshot();
     g_i2cLastUpdateMs = static_cast<uint32_t>(xTaskGetTickCount()) *
               portTICK_PERIOD_MS;
+
+    // A changed snapshot schedules all eight pages. At most one page is sent
+    // per pass so the optional display cannot monopolize the shared bus.
+    if (!boot_storage_pending && g_i2cTopology.oled_present &&
+      g_debugOled.ready()) {
+      static sensors::DebugDisplayState displayed;
+      static sensors::DebugDisplayState pending;
+      static uint8_t next_page = sensors::QwiicDebugOled::kPageCount;
+      static uint32_t last_refresh_ms = 0;
+      sensors::DebugDisplayState latest;
+      taskENTER_CRITICAL();
+      latest = g_debugDisplayState;
+      taskEXIT_CRITICAL();
+      latest.servo_count = g_servoStatusCount;
+      latest.foot_present_mask = g_footPresentMask;
+      latest.i2c_error = g_i2cBus.stats().last_error;
+      latest.dxl_power = board::dxlPowerEnabled();
+      latest.dxl_hard_fault = g_dxlHardFault;
+      latest.config_storage = g_configStorageAvailable && !g_configVolatile;
+      latest.mux_present = g_i2cTopology.mux_present;
+      latest.capture_recording = g_capture.recording;
+      latest.capture_samples = g_capture.completed_samples;
+      latest.view = static_cast<uint8_t>((millis() / 10000u) %
+                     sensors::QwiicDebugOled::kViewCount);
+      const uint32_t display_now_ms = millis();
+      const bool display_allowed =
+          g_safetyState != static_cast<uint8_t>(safety::State::ArmingChecks);
+      if (display_allowed &&
+          next_page >= sensors::QwiicDebugOled::kPageCount &&
+          (last_refresh_ms == 0 ||
+           (display_now_ms - last_refresh_ms) >= 1000u) &&
+          memcmp(&latest, &displayed, sizeof(latest)) != 0) {
+        pending = latest;
+        next_page = 0;
+      }
+        if (display_allowed && !storage_io_this_pass &&
+          next_page < sensors::QwiicDebugOled::kPageCount) {
+        if (g_debugOled.drawPage(next_page, pending)) {
+          ++next_page;
+          if (next_page == sensors::QwiicDebugOled::kPageCount) {
+            displayed = pending;
+            last_refresh_ms = display_now_ms;
+          }
+        } else {
+          g_i2cTopology.oled_present = false;
+        }
+      }
+    }
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(i2c_period_ms));
   }

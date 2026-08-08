@@ -43,7 +43,8 @@ The firmware must expose runtime capabilities and feature states. Examples:
 
 ```text
 feature.i2c_root_present
-feature.eeprom_config_present
+feature.openlog_config_present
+feature.debug_oled_present
 feature.tca_mux_present
 feature.foot_sensor_0_present ... feature.foot_sensor_5_present
 feature.foot_contact_available
@@ -61,7 +62,8 @@ Rules:
 
 - At boot, firmware scans expected I2C devices and DYNAMIXEL devices before enabling features that depend on them.
 - Missing optional sensors deactivate dependent features and publish a capability/fault reason.
-- Missing 24LC32 config EEPROM must fall back to a compiled safe default config, mark the config as volatile, and reject config commit until EEPROM returns.
+- Missing or SD-unready Qwiic OpenLog must fall back to a compiled safe default config, mark the config as volatile, and reject config commit until storage returns.
+- Missing debug OLED must not affect control, sensing, config persistence, or logging.
 - Missing TCA9548A or missing foot sensors must disable contact-aware gait and terrain leveling, while default gait and IK remain usable.
 - Runtime I2C failures must mark affected channels stale, reduce confidence, and deactivate contact-aware modes if the data is no longer safe.
 - API clients can request feature enable/disable, but firmware may reject or auto-disable a feature if hardware capabilities, robot state, or safety rules do not allow it.
@@ -130,7 +132,7 @@ hexapod/
         config/
           config_schema.h
           config_store.cpp/.h
-          eeprom_24lc32.cpp/.h
+          qwiic_openlog.cpp/.h
           defaults.cpp/.h
         dxl/
           dxl_bus.cpp/.h
@@ -367,7 +369,8 @@ Recommended connection assignment:
 | Mac companion API | USB CDC `Serial` |
 | Jetson API | USB CDC when connected directly, or Mac-to-Jetson proxy when Jetson owns USB |
 | 6 Robotic Finger Sensor v2 boards | TCA9548A channels 0-5 |
-| 24LC32 EEPROM | Root I2C bus at `0x50`, not behind mux |
+| SparkFun Qwiic OpenLog | Root I2C bus at `0x2A` (`0x29` with jumper), not behind mux |
+| SparkFun Qwiic OLED 1.3 in | Root I2C bus at `0x3D` (`0x3C` alternate), not behind mux |
 | TCA9548A mux | Root I2C bus at `0x70` |
 
 If Mac and Jetson must both be connected at the same time, do not share one MCU USB CDC port directly. Use one of these designs:
@@ -462,12 +465,16 @@ MX-28(2.0) table fields used by this project:
 
 The firmware API must expose logical parameters, not raw register assumptions. Example: `SET_SERVO_LIMITS(id, min_tick, max_tick)` writes legacy `CW/CCW Angle Limit` on legacy MX-28, and writes `Min/Max Position Limit` on MX(2.0), after torque is disabled and safety checks pass.
 
-### 4.3 Sensors and EEPROM
+### 4.3 Sensors, config storage, logs, and debug display
 
 I2C root bus devices:
 
 - TCA9548A-compatible I2C mux at `0x70`.
-- 24LC32/CAT24C32-compatible EEPROM at `0x50`.
+- SparkFun Qwiic OpenLog at `0x2A` or `0x29`.
+- Optional SparkFun Qwiic OLED 1.3 in at `0x3D` or `0x3C`.
+- Drive the OLED with the official SparkFun Qwiic OLED Arduino Library
+  (`Qwiic1in3OLED`, pinned to `v1.0.13` for SAMD21 compatibility), not a
+  handwritten SSD1306 command implementation.
 
 Robotic Finger Sensor v2 setup:
 
@@ -482,7 +489,8 @@ I2C discovery behavior:
 ```text
 boot:
   scan root bus
-  detect EEPROM at 0x50
+  detect and validate OpenLog/SD at 0x2A or 0x29
+  detect and initialize debug OLED at 0x3D or 0x3C
   detect TCA mux at 0x70
   for mux channel 0..5:
     select channel exclusively
@@ -494,20 +502,37 @@ boot:
 
 Fallback rules:
 
-- EEPROM missing: load compiled default config, mark config as volatile, reject `CFG_COMMIT`, continue in conservative disarmed/manual-capable mode.
+- OpenLog missing or SD not ready: load compiled default config, mark config as volatile, reject `CFG_COMMIT`, continue in conservative disarmed/manual-capable mode.
+- OpenLog ready but `CONFIG.TXT` missing or empty: serialize the complete compiled default config, append and sync its first committed record, read it back, and continue with persistent config enabled.
+- `CONFIG.TXT` non-empty but invalid: preserve the damaged prefix, append a
+  complete CRC-protected default record, reopen from offset zero with bounded
+  retries, and require verified readback before marking config persistent.
+- OLED missing or failing: disable display updates and continue normally.
 - TCA missing: disable all foot sensor polling, contact-aware gait, and body leveling.
 - One foot sensor missing: allow default walking; allow contact mode only if configured policy permits partial sensors. Default policy should reject terrain leveling unless enough stance-leg contact confidence exists.
 - Runtime I2C errors: mark channel stale, increment counters, reset TCA if needed, and auto-disable features whose data is unsafe.
 
-EEPROM usage:
+OpenLog usage:
 
-- Capacity: 4096 bytes.
-- Page write size: 32 bytes.
-- Use a two-slot transactional config store with magic, version, sequence, length, payload CRC, and header CRC.
-- Load the newest valid slot at boot.
-- Write only on explicit config commit.
-- Keep a RAM shadow config and validate before commit.
-- Do not write EEPROM during active walking.
+- At boot, check the retained `.noinit` crash record before channel scans,
+  config bootstrap, sensors, or OLED initialization. After minimal root/OpenLog
+  readiness, append it to `EVENTS.LOG`, sync, verify file growth, and only then
+  acknowledge/clear the retained record. Retry before lower-priority storage.
+- Keep complete serialized robot configurations in `CONFIG.TXT` as hex-encoded, CRC-protected append records with a commit trailer.
+- Create and verify the initial `CONFIG.TXT` record from compiled defaults when ready media has no config file.
+- Load the newest complete valid record at boot and ignore a torn or corrupt tail.
+- Keep deduplicated warnings, errors, and retained crash records in `EVENTS.LOG`.
+- Each BTN_4 press toggles a bounded 2 Hz `CAPTURE.CSV` session: the first
+  press starts recording and the next press stops it. Log a
+  remote row plus one row per discovered servo with load, temperature, voltage,
+  position, velocity, errors, torque, and validity; sync each complete sample.
+- Write config only on explicit commit, keep a validated RAM shadow, and do not commit during active walking.
+- Only `task_i2c` may communicate with OpenLog or the OLED. Display at most one 128-byte page per task pass.
+- Use SparkFun's bundled 5x7 font across two detailed 128x64 views with a
+  10-second dwell. System health shows safety/fault, battery, RC link/arming,
+  DXL count/power/fault, I2C error/mux/foot mask, OpenLog readiness, gait, and
+  recording count. Motion/tuning shows gait, body/stride/step/duty/speed, trim,
+  tuning selection, and capture state/sample count.
 
 ## 5. Firmware architecture
 
@@ -523,17 +548,17 @@ Initial tasks:
 | `task_dxl` | high | 50 Hz write in active modes, 10-50 Hz read | sync write goals, passive read-only streaming, status reads, DXL error handling, torque state, maintenance writes |
 | `task_rc_crsf` | medium-high | UART event driven | parse ExpressLRS CRSF, normalize channels, failsafe detection |
 | `task_api` | medium | USB serial event driven | host protocol, Jetson/Mac heartbeats, commands, config, feature toggles, DXL parameter requests |
-| `task_i2c` | medium-low | staggered 50-100 Hz proximity target, 25 Hz pressure target, EEPROM jobs on demand | mux selection, sensor reads, EEPROM config store, I2C discovery/recovery |
+| `task_i2c` | medium-low | staggered sensor polling plus storage/display jobs | mux selection, sensor reads, OpenLog config/events/capture, OLED pages, I2C discovery/recovery |
 | `task_health` | low | 1-10 Hz | watchdog, stack high-water marks, battery, uptime, fault summary, feature health |
 
 Ownership rules:
 
 - Only `task_dxl` directly touches Dynamixel2Arduino and `Serial1`.
-- Only `task_i2c` directly touches `Wire`, TCA9548A, 24LC32, and I2C sensors.
+- Only `task_i2c` directly touches the root I2C transport, TCA9548A, OpenLog, OLED, and I2C sensors.
 - Only `task_rc_crsf` directly reads CRSF bytes from `Serial3`.
 - Only `task_api` directly parses and writes USB CDC host frames.
 - Cross-task data moves through bounded static queues, ring buffers, event groups, or fixed-size state snapshots.
-- `task_control` must never wait on I2C, DXL, EEPROM writes, USB serial, or CRSF parsing.
+- `task_control` must never wait on I2C, DXL, storage writes, OLED updates, USB serial, or CRSF parsing.
 
 ### 5.2 Control model
 
@@ -586,7 +611,7 @@ ESTOP
 Important transitions:
 
 - `BOOT -> CONFIG_LOAD` after hardware init.
-- `CONFIG_LOAD -> DISARMED` after valid EEPROM config or default config fallback.
+- `CONFIG_LOAD -> DISARMED` after a valid OpenLog config or compiled-default fallback.
 - `DISARMED -> ARMING_CHECKS` only with RC arming switch or explicit maintenance command.
 - `ARMING_CHECKS -> STAND_READY` only when battery, DXL scan, config, and pose checks pass.
 - `STAND_READY -> RC_MANUAL` when RC command is active.
@@ -725,7 +750,7 @@ read back parameter
 compare expected vs actual
 update RAM config shadow if parameter is part of robot config
 emit event and telemetry
-require explicit config commit if value should be stored in 24LC32 robot config
+require explicit config commit if value should be stored in the OpenLog robot config
 ```
 
 Logical parameters should include at minimum:
@@ -923,12 +948,12 @@ Global layout:
 
 7. **Servo Map and DXL Tuning**
    - Scan DYNAMIXEL IDs and profiles.
-   - View servo-to-leg mapping from EEPROM shadow config.
+  - View servo-to-leg mapping from the persisted config shadow.
    - Edit ID, leg, joint role, sign, zero offset, min/max ticks, speed limits.
    - Set legacy `CW Angle Limit` and `CCW Angle Limit` through logical fields.
    - Set MX(2.0) `Min/Max Position Limit` through the same logical UI when applicable.
    - Edit safe parameters such as return delay, PID gains, speed/acceleration limits, torque limit, and status return level.
-   - Stage, diff, write, read-back verify, commit to 24LC32 config, export/import YAML/JSON.
+  - Stage, diff, write, read-back verify, commit to OpenLog config, export/import YAML/JSON.
    - Raw register editor is expert-only and disabled by default.
 
 8. **Sensor Dashboard and I2C Explorer**
@@ -1090,7 +1115,8 @@ Deliverables:
 - Passive torque-off servo status read prototype.
 - TCA9548A mux select and root/channel I2C scan.
 - I2C device discovery, capabilities, and feature fallback reasons.
-- 24LC32 page read/write and transactional config store.
+- Qwiic OpenLog transport and append-only transactional config journal.
+- Qwiic OLED detection and bounded debug-page updates.
 - CRSF parser with channel normalization and failsafe detection.
 - Fault state machine skeleton.
 - Hardware-in-loop smoke test checklist.
@@ -1099,9 +1125,9 @@ Exit criteria:
 
 - Firmware boots, reports version/status/capabilities over USB, and does not enable DXL power until commanded.
 - DXL scan works with one servo and then full bus, including per-servo profile detection.
-- I2C scan can identify root mux/EEPROM and per-channel sensor devices.
+- I2C scan can identify root mux/OpenLog/OLED and per-channel sensor devices.
 - Missing I2C devices cause feature deactivation and clear reported reasons, not boot failure.
-- EEPROM config load/commit survives power cycle and rejects corrupt slots.
+- OpenLog config load/commit survives power cycle and ignores corrupt or torn records.
 - RC failsafe transitions are visible in status telemetry.
 - No heap allocations after boot in normal operation.
 
@@ -1111,7 +1137,7 @@ Goal: make the robot controller useful without the companion app: safe walking, 
 
 Deliverables:
 
-- EEPROM-backed servo map, servo profiles, sensor calibration, feature defaults, and leg geometry config.
+- OpenLog-backed servo map, servo profiles, sensor calibration, feature defaults, and leg geometry config.
 - Config API: get/set/validate/commit/reset.
 - Feature API: enable/disable contact detection, terrain leveling, sensor polling, Jetson authority, and passive pose streaming where safe.
 - 3-DOF leg IK and body transform model.
@@ -1134,7 +1160,7 @@ Exit criteria:
 
 - RC can arm/disarm, sit/stand, select gait, and command low-speed walking.
 - Jetson can be off with no negative effect.
-- Host can read and update EEPROM config through protocol commands.
+- Host can read and update OpenLog config through protocol commands.
 - Host can toggle foot contact detection and terrain leveling; firmware rejects unsafe enable attempts with clear reasons.
 - Host can stream raw sensor data and fused contact state.
 - Passive pose mode disables all servo torque and streams positions to CLI/UI/ROS 2 model consumers.
@@ -1278,7 +1304,7 @@ Exit criteria:
 
 Seed the project using `tools/seed_beads_backlog.sh`. The script must create epics for all phases and child issues for:
 
-- Firmware safe boot, RTOS task skeleton, protocol framing, USB API, DXL discovery, I2C discovery, EEPROM config, CRSF, and HIL smoke tests.
+- Firmware safe boot, RTOS task skeleton, protocol framing, USB API, DXL discovery, I2C discovery, OpenLog config/events, OLED debug display, CRSF, and HIL smoke tests.
 - Firmware IK/gait, contact estimator, terrain-aware gait, body leveling, API feature toggles, passive pose mode, DXL parameter writes, I2C fallback, telemetry, and safety tests.
 - Companion protocol client, CLI, logger, replay, UI shell, contact page, passive pose page, DXL tuning page, plots, session browser, URDF/ROS 2 model streaming, and calibration workflows.
 - Jetson bridge and later autonomy features.

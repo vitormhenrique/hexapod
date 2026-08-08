@@ -626,7 +626,7 @@ class ProtocolClient:
         r = self._send_built(api.build_set_maint_control_mode(mode))
         return api.parse_maint_control_mode_result(r.payload) if r else None
 
-    # --- EEPROM-backed robot config --------------------------------------
+    # --- OpenLog-backed robot config -------------------------------------
     #
     # The serialized RobotConfig is larger than one frame, so reads/writes are
     # windowed via CFG_GET_BLOCK / CFG_SET_BLOCK. ``read_config`` / ``write_config``

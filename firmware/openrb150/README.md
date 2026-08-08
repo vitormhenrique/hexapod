@@ -51,7 +51,7 @@ The firmware directory also exports `hexapod::controller_portable`, a
 host-only static library for the Arduino-free controller, gait, IK, config,
 protocol, contact, and safety layers. It is intended for native regression
 tests and future ROS 2 packages; it does not build `main.cpp`, FreeRTOS task
-orchestration, DXL bus I/O, `Wire`, the physical EEPROM driver, or board GPIO.
+orchestration, DXL bus I/O, the physical I2C drivers, or board GPIO.
 
 From `firmware/openrb150`, configure, build, and run the standalone smoke test
 with any host CMake 3.16+ toolchain:
@@ -76,7 +76,7 @@ pixi run -e jazzy --manifest-path ../../robot_ros_simulation/pixi.toml \
 
 The CMake and PlatformIO-native builds use the same policy: compile all files
 under `src/` except the explicit hardware-owned entry, RTOS, board, DXL, I2C,
-and EEPROM adapters. A portable source that starts depending on Arduino or
+and OpenLog/OLED adapters. A portable source that starts depending on Arduino or
 other hardware libraries should fail host compilation rather than being
 silently omitted.
 
@@ -92,6 +92,10 @@ silently omitted.
 - The DYNAMIXEL power FET (`BDPIN_DXL_PWR_EN`, pin 31) is held **OFF at boot**.
   Servos are unpowered until firmware explicitly arms them.
 - Logic is 3.3 V and **not 5 V tolerant**. Do not run servos from USB power.
+- If Qwiic OpenLog and its SD card are ready but `CONFIG.TXT` is absent or
+  empty, firmware writes and verifies the complete compiled default config as
+  the first journal record. A non-empty invalid prefix is not overwritten;
+  firmware appends and verifies a complete default recovery record after it.
 
 ### Default stand pose
 
@@ -120,15 +124,23 @@ firmware/openrb150/
     main.cpp                entry point: board init + RTOS task launch
     app/                    FreeRTOS task setup + scheduling (control/dxl/rc/api/i2c/health)
     board/                  board pin map + HAL, safe boot, battery ADC scaling
-    config/                 24LC32 EEPROM driver, transactional config store, schema, config API
+    config/                 Qwiic OpenLog driver, append config journal, schema, config API
     dxl/                    DYNAMIXEL bus, model/table detection, sync write, params, servo map
     gait/                   leg IK, body IK, gait engine, full gait pipeline
     input/                  CRSF (ExpressLRS) parser + channel normalization
     protocol/               USB API: COBS/CRC framing, frame reader, dispatch, per-group handlers, telemetry
+    logging/                portable remote/DYNAMIXEL capture CSV formatting
     safety/                 safety state machine, watchdog, command arbiter, system state
-    sensors/                I2C bus/topology, TCA9548A discovery, finger contact sensor, contact estimator
+    sensors/                I2C topology, mux/contact sensors, optional debug OLED
   test/                     host Unity unit tests (one dir per module, built by the `native` env)
 ```
+
+The 1.3 inch OLED driver is SparkFun's official `Qwiic1in3OLED`, pinned to
+SparkFun_Qwiic_OLED_Arduino_Library `v1.0.13`. Later releases currently compile
+an unrelated CH1120 debug path that uses `Serial.printf`, which is unavailable
+in the OpenRB SAMD21 core. Two detailed pages use the bundled 5x7 font and
+rotate every 10 seconds to show complete health, motion, tuning, and capture
+status; only one dirty text row is sent per `i2cTask` pass.
 
 ## Intentionally not implemented (`#NOTIMPLEMENTED`)
 

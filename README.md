@@ -42,7 +42,7 @@ logging, and rendering work off the UI thread.
 - Inspect connection, battery, DYNAMIXEL, I2C, RC, and command-source state.
 - Enter safety-gated maintenance, torque-off passive pose, and DYNAMIXEL
   configuration workflows.
-- Stage, validate, compare, commit, export, and restore EEPROM-backed robot
+- Stage, validate, compare, commit, export, and restore OpenLog-backed robot
   configuration and calibration data.
 - Use logical DYNAMIXEL parameters rather than table-specific register
   assumptions; torque-off EEPROM changes require read-back verification.
@@ -114,8 +114,8 @@ external DYNAMIXEL supply safe throughout first connection and flashing.
   requests.
 - Passive pose mode turns torque off, stops goal writes, and rejects gait/IK
   commands until the mode exits.
-- EEPROM/configuration writes are maintenance-only, torque-off, read-back
-  verified operations. Stage, validate, review, and commit calibration changes.
+- Robot-config commits are maintenance-only and append to `CONFIG.TXT` on the
+  Qwiic OpenLog. DYNAMIXEL EEPROM writes remain torque-off and read-back verified.
 - Unit tests, simulation, and output-disabled builds do not prove a physical
   DYNAMIXEL power rail or actuator is safe. Hardware-in-the-loop claims require
   physical evidence.

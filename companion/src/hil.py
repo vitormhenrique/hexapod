@@ -995,7 +995,7 @@ def sensor_dashboard(
         if topo is None:
             r.fail("I2C_GET_TOPOLOGY", "no response")
         else:
-            r.check("EEPROM 0x50 present", topo.eeprom_present, "")
+            r.check("Qwiic OpenLog present", topo.eeprom_present, "")
             r.check("TCA mux 0x70 present", topo.mux_present, "")
             present = [i for i, ch in enumerate(topo.channels) if ch.state == 1]
             r.ok(

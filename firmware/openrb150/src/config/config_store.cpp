@@ -53,33 +53,14 @@ uint16_t headerCrc(const uint8_t serialized[kHeaderSize]) {
   return protocol::crc16(serialized, kHeaderSize - 2);
 }
 
-bool ConfigStore::readHeader(uint8_t slot, SlotHeader& h, bool& valid) {
-  valid = false;
-  uint8_t raw[kHeaderSize];
-  if (!backend_.read(kSlotAddr[slot], raw, kHeaderSize)) {
-    return false;
-  }
-  deserializeHeader(raw, h);
-  if (h.magic != kConfigMagic || h.version != kConfigVersion ||
-      h.length > kMaxPayload) {
-    return true;  // read ok, but slot not valid
-  }
-  if (headerCrc(raw) != h.header_crc) {
-    return true;  // corrupt header
-  }
-  valid = true;
-  return true;
-}
-
-bool ConfigStore::payloadValid(uint8_t slot, const SlotHeader& h) {
+bool ConfigStore::payloadValid(uint32_t payload_offset, const SlotHeader& h) {
   uint16_t crc = protocol::kCrc16Init;
-  const uint16_t base = static_cast<uint16_t>(kSlotAddr[slot] + kHeaderSize);
   uint8_t chunk[64];
   uint16_t remaining = h.length;
-  uint16_t off = 0;
+  uint32_t off = 0;
   while (remaining > 0) {
     const uint16_t n = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
-    if (!backend_.read(static_cast<uint16_t>(base + off), chunk, n)) {
+    if (!file_.read(payload_offset + off, chunk, n)) {
       return false;
     }
     crc = protocol::crc16Update(crc, chunk, n);
@@ -89,45 +70,73 @@ bool ConfigStore::payloadValid(uint8_t slot, const SlotHeader& h) {
   return crc == h.payload_crc;
 }
 
-int ConfigStore::newestValidSlot(SlotHeader* out_header) {
-  int best = -1;
-  SlotHeader best_h;
-  for (uint8_t s = 0; s < kSlotCount; ++s) {
+bool ConfigStore::scan(StoreStatus& status, RecordLocation* newest) {
+  status = StoreStatus{};
+  if (!file_.size(status.file_size)) return false;
+
+  uint32_t offset = 0;
+  while (status.file_size - offset >= kHeaderSize + kTrailerSize) {
+    uint8_t raw[kHeaderSize];
+    if (!file_.read(offset, raw, sizeof(raw))) return false;
     SlotHeader h;
-    bool valid = false;
-    if (!readHeader(s, h, valid) || !valid) {
+    deserializeHeader(raw, h);
+    const bool header_valid =
+        h.magic == kConfigMagic && h.version == kConfigVersion &&
+        h.length <= kMaxPayload && headerCrc(raw) == h.header_crc;
+    if (!header_valid) {
+      ++offset;
       continue;
     }
-    if (!payloadValid(s, h)) {
-      continue;
+
+    const uint32_t payload_offset = offset + kHeaderSize;
+    const uint32_t trailer_offset = payload_offset + h.length;
+    const uint32_t record_end = trailer_offset + kTrailerSize;
+    if (record_end > status.file_size) break;
+
+    const bool payload_valid = payloadValid(payload_offset, h);
+    uint8_t trailer[kTrailerSize];
+    if (!file_.read(trailer_offset, trailer, sizeof(trailer))) return false;
+    const bool committed = get_u32(&trailer[0]) == kCommitMagic &&
+                 get_u32(&trailer[4]) == h.sequence;
+    if (payload_valid && committed) {
+      ++status.valid_records;
+      if (!status.has_valid_record || h.sequence > status.sequence) {
+        status.has_valid_record = true;
+        status.sequence = h.sequence;
+        status.length = h.length;
+        if (newest != nullptr) {
+          newest->payload_offset = payload_offset;
+          newest->header = h;
+        }
+      }
     }
-    if (best < 0 || h.sequence > best_h.sequence) {
-      best = s;
-      best_h = h;
-    }
+    offset = record_end;
   }
-  if (best >= 0 && out_header != nullptr) {
-    *out_header = best_h;
-  }
-  return best;
+  return true;
 }
 
 bool ConfigStore::load(uint8_t* out, uint16_t max_len, uint16_t& out_len) {
-  SlotHeader h;
-  const int slot = newestValidSlot(&h);
-  if (slot < 0) {
+  StoreStatus status;
+  RecordLocation newest;
+  if (!scan(status, &newest)) {
+    sequence_known_ = false;
     out_len = 0;
     return false;
   }
-  if (h.length > max_len) {
+  latest_sequence_ = status.sequence;
+  sequence_known_ = true;
+  if (!status.has_valid_record) {
     out_len = 0;
     return false;
   }
-  const uint16_t base = static_cast<uint16_t>(kSlotAddr[slot] + kHeaderSize);
-  if (!backend_.read(base, out, h.length)) {
+  if (newest.header.length > max_len) {
+    out_len = 0;
     return false;
   }
-  out_len = h.length;
+  if (!file_.read(newest.payload_offset, out, newest.header.length)) {
+    return false;
+  }
+  out_len = newest.header.length;
   return true;
 }
 
@@ -136,20 +145,13 @@ bool ConfigStore::commit(const uint8_t* payload, uint16_t len) {
     return false;
   }
 
-  SlotHeader newest;
-  const int active = newestValidSlot(&newest);
-  // Target the inactive slot; if none valid, start at slot 0.
-  const uint8_t target = (active < 0) ? 0 : static_cast<uint8_t>(active ^ 1);
-  const uint32_t seq = (active < 0) ? 1 : newest.sequence + 1;
-
-  const uint16_t payload_addr =
-      static_cast<uint16_t>(kSlotAddr[target] + kHeaderSize);
-
-  // Write payload first; the header (with CRCs) is committed last so a partial
-  // write is never seen as valid.
-  if (len > 0 && !backend_.write(payload_addr, payload, len)) {
-    return false;
+  if (!sequence_known_) {
+    StoreStatus status;
+    if (!scan(status, nullptr)) return false;
+    latest_sequence_ = status.sequence;
+    sequence_known_ = true;
   }
+  const uint32_t seq = latest_sequence_ + 1u;
 
   SlotHeader h;
   h.magic = kConfigMagic;
@@ -163,21 +165,26 @@ bool ConfigStore::commit(const uint8_t* payload, uint16_t len) {
   h.header_crc = headerCrc(raw);
   put_u16(&raw[14], h.header_crc);
 
-  return backend_.write(kSlotAddr[target], raw, kHeaderSize);
+  uint8_t trailer[kTrailerSize];
+  put_u32(&trailer[0], kCommitMagic);
+  put_u32(&trailer[4], seq);
+
+  if (!file_.append(raw, sizeof(raw))) return false;
+  if (len > 0 && !file_.append(payload, len)) return false;
+  if (!file_.append(trailer, sizeof(trailer))) return false;
+  if (!file_.sync()) return false;
+  latest_sequence_ = seq;
+  return true;
 }
 
-void ConfigStore::inspect(SlotStatus status[kSlotCount]) {
-  for (uint8_t s = 0; s < kSlotCount; ++s) {
-    SlotHeader h;
-    bool valid = false;
-    status[s] = SlotStatus{};
-    if (!readHeader(s, h, valid) || !valid) {
-      continue;
-    }
-    status[s].sequence = h.sequence;
-    status[s].length = h.length;
-    status[s].valid = payloadValid(s, h);
+bool ConfigStore::inspect(StoreStatus& status) {
+  if (!scan(status, nullptr)) {
+    sequence_known_ = false;
+    return false;
   }
+  latest_sequence_ = status.sequence;
+  sequence_known_ = true;
+  return true;
 }
 
 }  // namespace config

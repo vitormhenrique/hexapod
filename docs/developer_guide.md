@@ -24,8 +24,8 @@ servo limits, and final goal validation. The Mac and Jetson are clients.
 
 - `task_control` consumes bounded snapshots and creates high-level servo goals.
 - `task_dxl` is the only owner of `Serial1` and DYNAMIXEL operations.
-- `task_i2c` is the only owner of `Wire`, the TCA9548A, foot sensors, and the
-  24LC32 EEPROM.
+- `task_i2c` is the only owner of the root I2C bus, TCA9548A, foot sensors,
+  Qwiic OpenLog, and optional Qwiic OLED.
 - `task_rc_crsf` is the only owner of `Serial3` CRSF input.
 - `task_api` is the only USB frame parser/writer.
 
@@ -76,16 +76,28 @@ servo mapping/sign/trim/travel, leg geometry, gait defaults, feature defaults,
 and foot-sensor calibration. Firmware validation is authoritative; host-side
 validation only gives earlier operator feedback.
 
-Treat the EEPROM as a transactional store:
+Treat `CONFIG.TXT` on the Qwiic OpenLog as an append-only transactional journal:
 
-1. Load the current configuration into a RAM shadow.
+1. Load the current configuration into a RAM shadow. If the file is missing or
+  empty on ready media, create and verify its first record from compiled defaults.
 2. Stage and validate changes while the robot is safe.
 3. Commit only on explicit request, never during active walking.
 4. Read back and log logical DXL parameter changes.
 
-The 24LC32 is optional at boot. Its absence must select compiled safe defaults,
-mark configuration volatile, and reject persistent commit without preventing
-safe disarmed operation.
+The OpenLog is optional at boot. Missing hardware or an unready SD card selects
+compiled safe defaults, marks configuration volatile, and rejects persistent
+commit without preventing safe disarmed operation. `EVENTS.LOG` separately
+records deduplicated warnings/errors and retained crashes. The optional OLED
+shows live gait/tuning/trim values and must never affect control availability.
+A non-empty invalid prefix is preserved for diagnosis. Firmware appends a
+complete default recovery record after it, then reopens and scans from zero;
+only CRC-verified readback makes config persistent.
+
+The retained `.noinit` crash record is checked before full I2C discovery. Once
+OpenLog reports SD ready, firmware writes the crash to `EVENTS.LOG`, syncs it,
+verifies the file grew, and only then clears the retained record. If SD is not
+ready, the crash remains retained across resets and normal logging stays
+deferred. Insert/repair the card and reboot to retry initialization.
 
 ## Simulation and URDF
 

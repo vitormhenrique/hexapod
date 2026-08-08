@@ -25,11 +25,24 @@ first-line troubleshooting. Read it before connecting DYNAMIXEL power.
 | DYNAMIXEL TTL bus | Connect the servo data bus to the OpenRB-150 `Serial1` DYNAMIXEL TTL bus. The firmware controls the board power FET, while the servo supply must be the external fused 12 V distribution described above. |
 | Servo IDs | The assembled robot uses verified sequential IDs 1 through 18 in logical leg/joint order. Confirm the active map before motion; see the [canonical map](ros2_controller_interface_mapping.md#canonical-joint-map). |
 | RC receiver | Connect the ExpressLRS CRSF UART to `Serial3`: D14 TX / D13 RX, crossed as a normal UART link, at 420000 baud. Keep the receiver and controller logic at 3.3 V. |
-| Foot sensors | Root I2C has the TCA9548A mux at `0x70` and the 24LC32 config EEPROM at `0x50`. Put one Robotic Finger Sensor v2 on each mux channel 0 through 5; channels 6 and 7 are reserved. Each board exposes VCNL4040 proximity at `0x60` and LPS25HB pressure at `0x5C`. |
+| Root I2C | Connect the TCA9548A mux at `0x70`, Qwiic OpenLog at `0x2A` (`0x29` jumper), and optional 1.3 inch Qwiic OLED at `0x3D` (`0x3C` alternate). Put one Robotic Finger Sensor v2 on mux channels 0 through 5; channels 6 and 7 are reserved. |
 | Host connection | Use the OpenRB-150 USB CDC port directly for a Mac companion or Jetson bridge. When the Jetson owns USB, one Mac may use its authenticated TCP relay on a trusted network; see the [Jetson relay guide](../jetson/README.md#mac-tcp-relay). Only one high-authority USB client may control motion at once. |
 
 The battery monitor uses `ADC_BATTERY`; validate the measured battery voltage
 before any armed test. Do not infer a safe battery from a USB connection alone.
+
+The optional OLED uses two detailed pages with a 10-second dwell:
+
+- **System health:** safety state/fault, battery and RC link/arming, DXL servo
+   count/power/fault, I2C error and foot mask, mux/OpenLog readiness, gait, and
+   recording sample count.
+- **Motion/tuning:** gait, body height, stride, step height, duty, speed,
+   roll/pitch trim, active tuning parameter, and capture state/sample count.
+
+Both pages use SparkFun's bundled 5x7 font.
+
+Firmware uses SparkFun's official Qwiic OLED library and updates one 8-pixel
+text row per I2C task pass. A missing or failed OLED never blocks robot control.
 
 ## Build, Flash, and First Connection
 
@@ -116,10 +129,10 @@ requests; firmware capability, authority, and safety checks remain final.
 | `BTN_1` | Press | Stand-up choreography |
 | `BTN_2` | Press | Sit-down choreography |
 | `BTN_3` | Press | Standing body-rock wave choreography |
-| `BTN_4` | Press | Toggle crouched/tall stance |
+| `BTN_4` | Press | Start recording; press again to stop and sync `CAPTURE.CSV` |
 | `NAV1` Up / Down | Press | Trim pitch ±1° / select gait parameter while tuning |
 | `NAV1` Left / Right | Press | Trim roll ±1° / decrease-increase the parameter while tuning |
-| `NAV1` Center | Press | Reset trim / save gait settings to EEPROM while tuning |
+| `NAV1` Center | Press | Reset trim / save gait settings to OpenLog while tuning |
 | `NAV2` Up | Press | Twirl in place |
 | `NAV2` Down | Press | Stretch/push-up sequence |
 | `NAV2` Left | Press | Bounded jump-kick: crouch, fast capped extension, short tripod flick |
@@ -127,10 +140,33 @@ requests; firmware capability, authority, and safety checks remain final.
 | `NAV2` Center | Press | Loop dance until stick input cancels it |
 
 Buttons and nav actions fire once on the rising edge with a 150 ms refractory
-window. Any active trick is cancelled when the operator moves a gait/body
+window. BTN_4 is dedicated to capture and no longer toggles crouch; use Pot 2
+for crouched/tall body height. Any active trick is cancelled when the operator moves a gait/body
 stick. Centered walking sticks park all feet at home without advancing phase.
 The detailed CRSF channel and TX16S-direct mappings are in the
 [controller bridge reference](controller_bridge.md).
+
+### Remote SD Capture
+
+Press `BTN_4` once to start recording and press it again to stop and sync. A
+held button does not retrigger; it must be released before the stop press.
+Recording requires a detected,
+SD-ready Qwiic OpenLog. The optional Qwiic OLED shows `HEXAPOD REC` and the
+number of completed samples while capture is active.
+
+`CAPTURE.CSV` is append-only and contains marked sessions:
+
+- `BEGIN` / `END`: session uptime, timestamp, and completed sample count.
+- `R`: raw gimbals, pots, encoders, switch/button/toggle/nav masks, decoded
+   mode/gait, twist, body pose, and gait-shape values.
+- `S`: sample timestamp, servo ID, validity, present position, velocity, raw
+   load, input voltage in millivolts, temperature in Celsius, hardware error,
+   and torque state.
+
+Samples start at 2 Hz. DYNAMIXEL detail reads already rotate across the 18
+servos, so load/temperature/voltage values are the latest converged values.
+Each complete sample is synced to the SD card. A storage failure stops capture
+and reports `CAPTURE_WRITE_FAILED` through the normal error journal.
 
 ### Ride Height Range
 
@@ -172,8 +208,8 @@ Stride, step height, and duty are edited from the NAV1 cluster:
 4. With the sticks centred and the robot armed, **leg 1 traces the swing arc**
    once every 2 s using the live values, so the change is visible on the robot.
    Moving a stick cancels the preview and returns to normal walking.
-5. `NAV1 Center` saves to the 24LC32 config. Saving is refused while the robot
-   is moving or when no EEPROM is present; the reason appears on the handset
+5. `NAV1 Center` appends the complete config to `CONFIG.TXT`. Saving is refused
+   while the robot is moving or when OpenLog storage is unavailable; the reason appears on the handset
    `Error` row.
 6. Turn `SW_G` OFF to leave the editor and restore pose trim.
 
@@ -309,7 +345,8 @@ or joint mapping is a calibration problem, not a visual-only issue.
 | No upload port | Double-tap RESET, reconnect a known data-capable USB cable, then retry `just firmware-flash`. Do not reset an unsupported torque-enabled robot. |
 | Port exists but `status` times out | Check that the selected port is the OpenRB-150, close competing clients, reconnect USB, then retry. A plain serial monitor can corrupt or consume binary frames. |
 | No DXL scan or status | DXL power is expected to be off at boot. First inspect the external fused 12 V rail, common ground, bus connection, and maintenance/safety state. Do not repeatedly force power or torque. |
-| EEPROM commit rejected | Check capabilities/feature reasons and I2C topology. Missing EEPROM uses volatile safe defaults and intentionally rejects commit. |
+| Config commit rejected | Check OpenLog/SD readiness and I2C topology. Missing or unready storage uses volatile safe defaults. Missing files are initialized automatically; a damaged prefix is preserved and followed by a verified default recovery record. |
+| OpenLog present but no files | The board can answer at `0x2A` while reporting `SD_INIT_GOOD=0`. Reseat the microSD, use a supported FAT-formatted card, and reboot. Crash/config/event files are not created until SD initialization succeeds. |
 | Contact feature unavailable | Use **Sensor Dashboard** or `feature get`; inspect mux `0x70`, each channel 0 through 5, stale/fault state, and calibration before retrying. |
 | Telemetry gaps | Lower requested stream rates and inspect `uv run hexapod-cli stream-stats --port <USB_PORT>` for transmit backlog or dropped frames. |
 | Heat, voltage, or hardware fault | Stop motion, disarm, remove power if necessary, and diagnose supply capacity, wiring, temperature, and DXL status before clearing a fault. |

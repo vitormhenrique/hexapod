@@ -69,6 +69,14 @@ void markSafetyState(uint8_t state);
 uint8_t lastResetControlProgress();
 uint8_t lastResetSafetyState();
 
+// Raw forensic access for the minimal recovery image. A bootloader/software
+// reset can replace PM->RCAUSE after a watchdog reset while .noinit survives.
+bool retainedDiagnosticsValidRaw();
+uint32_t retainedMissedMaskRaw();
+uint8_t retainedProgressMarkerRaw();
+uint8_t retainedControlProgressRaw();
+uint8_t retainedSafetyStateRaw();
+
 // True when a motion-critical task (Control or Dxl) missed its heartbeat at the
 // last evaluate() -- the condition under which evaluate() withholds the WDT pet
 // so the hardware watchdog resets the MCU.

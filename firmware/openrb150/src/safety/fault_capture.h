@@ -42,4 +42,8 @@ void init();
 void markStartupStage(StartupStage stage);
 const Snapshot& lastSnapshot();
 
+// Clear the retained .noinit record only after durable external persistence is
+// verified. The RAM snapshot remains available to status/API diagnostics.
+void acknowledgePersisted();
+
 }  // namespace fault_capture

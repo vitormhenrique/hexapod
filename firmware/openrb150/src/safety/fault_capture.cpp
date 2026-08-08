@@ -125,8 +125,6 @@ void init() {
     g_lastSnapshot.pc = g_retainedFault.registers[6];
     g_lastSnapshot.xpsr = g_retainedFault.registers[7];
   }
-  g_retainedFault.magic = 0;
-  g_retainedFault.magic_inverse = 0;
 #endif
   g_currentStage = static_cast<uint8_t>(StartupStage::SetupEntered);
 }
@@ -136,6 +134,14 @@ void markStartupStage(StartupStage stage) {
 }
 
 const Snapshot& lastSnapshot() { return g_lastSnapshot; }
+
+void acknowledgePersisted() {
+#if defined(ARDUINO_ARCH_SAMD)
+  g_retainedFault.magic = 0;
+  g_retainedFault.magic_inverse = 0;
+  __DSB();
+#endif
+}
 
 }  // namespace fault_capture
 

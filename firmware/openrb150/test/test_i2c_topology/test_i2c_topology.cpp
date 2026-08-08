@@ -13,11 +13,15 @@ void test_init_topology_is_empty() {
   I2cTopology topo;
   // Dirty it first, then init.
   topo.mux_present = true;
-  topo.eeprom_present = true;
+  topo.openlog_present = true;
+  topo.oled_present = true;
   topo.channels[0].vcnl_present = true;
   initTopology(topo);
   TEST_ASSERT_FALSE(topo.mux_present);
-  TEST_ASSERT_FALSE(topo.eeprom_present);
+  TEST_ASSERT_FALSE(topo.openlog_present);
+  TEST_ASSERT_FALSE(topo.oled_present);
+  TEST_ASSERT_EQUAL_UINT8(0, topo.openlog_address);
+  TEST_ASSERT_EQUAL_UINT8(0, topo.oled_address);
   for (uint8_t i = 0; i < kNumMuxChannels; ++i) {
     TEST_ASSERT_FALSE(topo.channels[i].scanned);
     TEST_ASSERT_FALSE(topo.channels[i].vcnl_present);
@@ -41,7 +45,10 @@ void test_classify_foot_sensor() {
 
 void test_expected_root_address() {
   TEST_ASSERT_TRUE(isExpectedRootAddress(kAddrTcaMux));
-  TEST_ASSERT_TRUE(isExpectedRootAddress(kAddrEeprom));
+  TEST_ASSERT_TRUE(isExpectedRootAddress(kAddrOpenLog));
+  TEST_ASSERT_TRUE(isExpectedRootAddress(kAddrOpenLogJumper));
+  TEST_ASSERT_TRUE(isExpectedRootAddress(kAddrDebugOled));
+  TEST_ASSERT_TRUE(isExpectedRootAddress(kAddrDebugOledAlt));
   TEST_ASSERT_FALSE(isExpectedRootAddress(kAddrVcnl4040));
   TEST_ASSERT_FALSE(isExpectedRootAddress(0x00));
 }

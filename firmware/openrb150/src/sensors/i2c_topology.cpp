@@ -4,7 +4,10 @@ namespace i2c {
 
 void initTopology(I2cTopology& topo) {
   topo.mux_present = false;
-  topo.eeprom_present = false;
+  topo.openlog_present = false;
+  topo.oled_present = false;
+  topo.openlog_address = 0;
+  topo.oled_address = 0;
   for (uint8_t i = 0; i < kNumMuxChannels; ++i) {
     topo.channels[i] = ChannelInfo{};
   }
@@ -21,7 +24,9 @@ FootSensorState classifyFootSensor(bool vcnl_present, bool lps_present) {
 }
 
 bool isExpectedRootAddress(uint8_t addr) {
-  return addr == kAddrTcaMux || addr == kAddrEeprom;
+  return addr == kAddrTcaMux || addr == kAddrOpenLog ||
+         addr == kAddrOpenLogJumper || addr == kAddrDebugOled ||
+         addr == kAddrDebugOledAlt;
 }
 
 void updateChannelState(ChannelInfo& ch) {

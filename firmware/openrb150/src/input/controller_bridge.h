@@ -127,7 +127,7 @@ enum class ControlMode : uint8_t {
 constexpr uint8_t kNumControlModes = 3;
 
 // Live-tunable gait shape parameters, edited from the NAV1 cluster while the
-// gait-tune mode is engaged and persisted to EEPROM on an explicit save.
+// gait-tune mode is engaged and persisted to OpenLog on an explicit save.
 // The numeric values are part of the CRSF status downlink, so do not renumber.
 enum class GaitTuneParam : uint8_t {
   StepHeight = 0,  // swing clearance, 0..config::kMaxGaitStepMm
@@ -308,6 +308,9 @@ struct ControllerCommand {
   // sequence it persisted, so a press can never be lost to a task boundary and
   // never applied twice.
   uint32_t gait_tune_save_seq = 0;
+  // Bumped once per BTN_4 press. i2cTask compares the sequence to toggle
+  // capture without losing an edge across task-rate boundaries.
+  uint32_t capture_toggle_seq = 0;
   // Feature toggle request levels (switch state, applied by the control layer
   // subject to availability).
   bool feat_foot_contact = false;
@@ -451,11 +454,11 @@ class ControllerBridge {
   float gait_tune_frac_[kNumGaitTuneParams];
 
   // Edge state. Slots 0..kMaxTrickBindings-1 = trick bindings; the next 5 are
-  // the trim nudges (pitch up/down, roll left/right, reset); the last 6 are the
-  // gait-tune editor (toggle, next, prev, increase, decrease, save).
+  // trim nudges; the next 6 are the gait-tune editor; the last is BTN_4 capture.
   static constexpr uint8_t kTrimEdgeBase = kMaxTrickBindings;
   static constexpr uint8_t kGaitTuneEdgeBase = kTrimEdgeBase + 5;
-  static constexpr uint8_t kNumEdgeSlots = kGaitTuneEdgeBase + 6;
+  static constexpr uint8_t kCaptureEdge = kGaitTuneEdgeBase + 6;
+  static constexpr uint8_t kNumEdgeSlots = kCaptureEdge + 1;
   bool edge_prev_[kNumEdgeSlots];
   uint32_t edge_last_ms_[kNumEdgeSlots];
 };

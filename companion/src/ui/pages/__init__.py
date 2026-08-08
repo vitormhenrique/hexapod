@@ -1720,7 +1720,7 @@ class ServoConfigPage(BasePage):
     title = "Robot Calibration && Config"
     subtitle = (
         "Calibrate servo zero/sign/travel, leg geometry, and foot sensors; then "
-        "validate, stage, commit, or export the EEPROM-backed robot config."
+        "validate, stage, commit, or export the OpenLog-backed robot config."
     )
 
     COLUMNS = ["ID", "Leg", "Joint", "Sign", "Trim", "Min tick", "Max tick"]
@@ -1908,7 +1908,7 @@ class ServoConfigPage(BasePage):
         self.stage_btn.clicked.connect(self._stage)
         validate = QPushButton("Validate staged")
         validate.clicked.connect(self.service.validate_config)
-        self.commit_btn = QPushButton("Commit to EEPROM")
+        self.commit_btn = QPushButton("Commit to OpenLog")
         self.commit_btn.clicked.connect(self._commit)
         export = QPushButton("Export JSON\u2026")
         export.clicked.connect(self._export)
@@ -2226,8 +2226,8 @@ class ServoConfigPage(BasePage):
 
     def _commit(self) -> None:
         if self._confirm(
-            "Commit config to EEPROM",
-            "Persist the staged config to the 24LC32 EEPROM? The firmware "
+            "Commit config to OpenLog",
+            "Append the staged config to CONFIG.TXT on the Qwiic OpenLog? The firmware "
             "requires Maintenance with all servo torque off and rejects an "
             "invalid staged config.",
         ):
@@ -2360,7 +2360,7 @@ class ServoConfigPage(BasePage):
         if summary is None:
             self.persist_lbl.setText("--")
             return
-        persist = "persistent" if summary.persistent else "VOLATILE (no EEPROM)"
+        persist = "persistent" if summary.persistent else "VOLATILE (no OpenLog)"
         staged = "staged valid" if summary.staged_valid else "staged invalid"
         self.persist_lbl.setText(f"{persist} \u2014 {staged}")
 
@@ -3125,7 +3125,7 @@ class SensorDashboardPage(BasePage):
 
         badges = QHBoxLayout()
         self.mux_badge = StatusBadge("TCA9548A mux")
-        self.eeprom_badge = StatusBadge("24LC32 EEPROM")
+        self.eeprom_badge = StatusBadge("Qwiic OpenLog")
         badges.addWidget(self.mux_badge)
         badges.addWidget(self.eeprom_badge)
         badges.addStretch(1)

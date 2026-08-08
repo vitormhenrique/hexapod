@@ -6,7 +6,7 @@
 // Exposes the persistent robot config (config_schema.h) to a host through the
 // protocol layer (AGENTS.md 6.2 "Config" group): get summary, block get/set,
 // validate, commit, reset-to-defaults. Implements the
-// "RAM shadow + transactional EEPROM commit" model required by issue 22l.2:
+// "RAM shadow + transactional persistent commit" model required by issue 22l.2:
 //
 //   * `staging_`  - the editable RAM shadow (serialized payload bytes). Host
 //                   edits it in place with CFG_SET_BLOCK and reads it back with
@@ -14,13 +14,13 @@
 //                   frame, so transfers are block-windowed.
 //   * `shadow_`   - the last config known-good (committed or adopted at boot).
 //   * commit      - validates the staged bytes, then persists them through an
-//                   abstract ConfigPersistence sink (the 24LC32 transactional
-//                   store on-target). Invalid configs are rejected; a volatile
-//                   store (missing EEPROM) rejects commit (AGENTS.md 4.3).
+//                   abstract ConfigPersistence sink (the OpenLog journal on
+//                   target). Invalid configs are rejected; unavailable media
+//                   rejects commit.
 //
 // The persistence sink is abstract so this whole module is unit-tested on the
-// host with a fake EEPROM-backed store; on-target the sink routes the commit to
-// the I2C task, which is the sole owner of Wire/EEPROM (AGENTS.md 5.1).
+// host with a fake file; on-target the sink routes the commit to i2cTask, the
+// sole owner of the root bus and OpenLog.
 //
 // No Arduino deps; no heap. The caller owns the response buffer.
 // ===========================================================================
@@ -71,7 +71,7 @@ enum class CfgError : uint8_t {
   Rejected = 3,    // staging requires a maintenance lock
 };
 
-// Abstract persistence sink. Decouples ConfigApi from Wire/EEPROM so it is
+// Abstract persistence sink. Decouples ConfigApi from physical storage so it is
 // host-testable; on-target the implementation routes commits to the I2C task.
 class ConfigPersistence {
  public:
@@ -93,7 +93,7 @@ class ConfigApi {
   // Load compiled defaults into both the staged shadow and the last-good copy.
   void resetToDefaults();
 
-  // Adopt an externally loaded persisted payload (e.g. the valid EEPROM slot at
+  // Adopt an externally loaded persisted payload (e.g. the newest journal record at
   // boot) as the staged shadow + last-good copy. Returns false (and changes
   // nothing) if the payload does not deserialize and validate.
   bool adoptPayload(const uint8_t* payload, uint16_t len);
@@ -111,7 +111,7 @@ class ConfigApi {
   // path: the operator has no maintenance lock and no torque-off requirement,
   // and the gait block carries no servo geometry or travel limits, so it is
   // deliberately not gated on the host mutation policy. It is still a full
-  // transactional EEPROM commit -- validated first, rejected on a volatile
+  // transactional persistent commit -- validated first, rejected on a volatile
   // store, and only adopted (with a revision bump) once the store confirms.
   // Callers must ensure the robot is not walking (AGENTS.md 4.3).
   CfgResult saveGaitDefaults(const GaitDefaults& gait);

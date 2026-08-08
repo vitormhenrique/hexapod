@@ -4,7 +4,7 @@
 // I2C topology model and device classification (portable, no Arduino deps).
 //
 // The robot's I2C tree (AGENTS.md 4.3):
-//   * root bus: TCA9548A 8-channel mux @ 0x70, 24LC32 config EEPROM @ 0x50
+//   * root bus: TCA9548A mux, Qwiic OpenLog, optional Qwiic debug OLED
 //   * mux channels 0..5: one Robotic Finger Sensor v2 foot board each, which
 //     carries a VCNL4040 proximity sensor (0x60) and an LPS25HB pressure
 //     sensor (0x5C). Channels 6,7 are reserved.
@@ -19,8 +19,11 @@
 namespace i2c {
 
 // Root-bus device addresses.
-constexpr uint8_t kAddrTcaMux = 0x70;   // TCA9548A 8-channel I2C mux
-constexpr uint8_t kAddrEeprom = 0x50;   // 24LC32 / CAT24C32 config EEPROM
+constexpr uint8_t kAddrTcaMux = 0x70;
+constexpr uint8_t kAddrOpenLog = 0x2A;
+constexpr uint8_t kAddrOpenLogJumper = 0x29;
+constexpr uint8_t kAddrDebugOled = 0x3D;
+constexpr uint8_t kAddrDebugOledAlt = 0x3C;
 
 // Robotic Finger Sensor v2 on-board device addresses.
 constexpr uint8_t kAddrVcnl4040 = 0x60;  // proximity / ambient (VCNL4040)
@@ -48,7 +51,10 @@ struct ChannelInfo {
 // Full discovered I2C topology.
 struct I2cTopology {
   bool mux_present = false;
-  bool eeprom_present = false;
+  bool openlog_present = false;
+  bool oled_present = false;
+  uint8_t openlog_address = 0;
+  uint8_t oled_address = 0;
   ChannelInfo channels[kNumMuxChannels];
 };
 
@@ -58,7 +64,7 @@ void initTopology(I2cTopology& topo);
 // Classify a foot board from the presence of its two on-board devices.
 FootSensorState classifyFootSensor(bool vcnl_present, bool lps_present);
 
-// True if `addr` is an expected root-bus device (mux or EEPROM).
+// True if `addr` is an expected root-bus device.
 bool isExpectedRootAddress(uint8_t addr);
 
 // Recompute the derived `state` of a single channel from its presence flags.

@@ -144,11 +144,10 @@ BindingConfig defaultBindings() {
   c.gait_tune_increase = BoolSource::Nav1Right;
   c.gait_tune_decrease = BoolSource::Nav1Left;
   c.gait_tune_save = BoolSource::Nav1Center;
-  // Tricks: 4 buttons + every NAV2 direction.
+  // BTN_4 is dedicated to SD capture; the other buttons and NAV2 trigger tricks.
   c.tricks[0] = {BoolSource::Btn1, TrickId::StandUp};
   c.tricks[1] = {BoolSource::Btn2, TrickId::SitDown};
   c.tricks[2] = {BoolSource::Btn3, TrickId::Wave};
-  c.tricks[3] = {BoolSource::Btn4, TrickId::CrouchToggle};
   c.tricks[4] = {BoolSource::Nav2Up, TrickId::Twirl};
   c.tricks[5] = {BoolSource::Nav2Down, TrickId::Stretch};
   c.tricks[6] = {BoolSource::Nav2Left, TrickId::JumpKick};
@@ -853,6 +852,12 @@ const ControllerCommand& ControllerBridge::update(
   // NAV1 is dual-purpose: pose trim normally, gait-parameter editing while the
   // gait-tune mode is engaged (updateGaitTune ran above and owns the mode).
   if (!cmd_.gait_tune_active) updatePoseTrim(now_ms);
+
+  // BTN_4 is dedicated to capture. One distinct press bumps the sequence;
+  // holding the button cannot retrigger until it has been released.
+  if (risingEdge(kCaptureEdge, readBool(BoolSource::Btn4), now_ms)) {
+    ++cmd_.capture_toggle_seq;
+  }
 
   // Tricks: first binding whose source rises this frame wins (one per frame).
   cmd_.trick = TrickId::None;

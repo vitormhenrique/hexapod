@@ -75,23 +75,23 @@ constexpr uint8_t kMacMaintenance = 8;
 // which joints have been commanded since reset (others stay at center).
 struct MaintTargetSet {
   uint32_t seq = 0;
-  uint16_t tick[config::kNumLegs][config::kJointsPerLeg];
-  bool set[config::kNumLegs][config::kJointsPerLeg];
+  uint16_t tick[config::kNumLegs][config::kJointsPerLeg] = {};
+  bool set[config::kNumLegs][config::kJointsPerLeg] = {};
   // True when the stored goal tick was saturated against the configured servo
   // travel (clamp_low or clamp_high). Surfaced on the servo_goals stream so the
   // host can flag a commanded joint that hit its limit.
-  bool clamped[config::kNumLegs][config::kJointsPerLeg];
+  bool clamped[config::kNumLegs][config::kJointsPerLeg] = {};
   // Last SET_LEG_TARGET foot target (mm, body frame) and its IK verdict,
   // recorded for EVERY attempt (reachable or not) so the leg_state stream can
   // animate commanded foot positions and flag unreachable poses (eax.3). This
   // is visualization-only: an unreachable attempt is still NOT committed to the
   // joint ticks above, so motion behavior is unchanged.
-  int16_t foot_x_mm[config::kNumLegs];
-  int16_t foot_y_mm[config::kNumLegs];
-  int16_t foot_z_mm[config::kNumLegs];
-  bool leg_target_set[config::kNumLegs];  // a SET_LEG_TARGET was attempted
-  bool leg_reachable[config::kNumLegs];   // last attempt's IK reachability
-  bool leg_clamped[config::kNumLegs];     // last attempt saturated any joint
+  int16_t foot_x_mm[config::kNumLegs] = {};
+  int16_t foot_y_mm[config::kNumLegs] = {};
+  int16_t foot_z_mm[config::kNumLegs] = {};
+  bool leg_target_set[config::kNumLegs] = {};  // a SET_LEG_TARGET was attempted
+  bool leg_reachable[config::kNumLegs] = {};   // last attempt's IK reachability
+  bool leg_clamped[config::kNumLegs] = {};     // last attempt saturated any joint
 };
 
 class MaintTargetApi {

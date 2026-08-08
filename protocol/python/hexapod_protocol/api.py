@@ -1337,7 +1337,7 @@ class TopologyChannel:
 
 @dataclass
 class I2cTopologyResult:
-    """Response to I2C_GET_TOPOLOGY (mux/eeprom presence + per-channel state)."""
+    """Response to I2C_GET_TOPOLOGY (mux/config-storage + channel state)."""
 
     mux_present: bool
     eeprom_present: bool
@@ -2124,7 +2124,7 @@ def build_cfg_validate(seq: int = 0) -> bytes:
 
 
 def build_cfg_commit(seq: int = 0) -> bytes:
-    """Build a CFG_COMMIT command (persist the staged config to EEPROM)."""
+    """Build a CFG_COMMIT command (persist staged config to Qwiic OpenLog)."""
     return build_command(MSG_CFG_COMMIT, seq=seq)
 
 

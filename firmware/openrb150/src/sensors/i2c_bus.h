@@ -4,10 +4,10 @@
 // I2C bus manager (single owner of SERCOM0 / the root I2C bus).
 //
 // Per AGENTS.md 5.1 only the I2C task may touch SERCOM0, the TCA9548A mux, the
-// 24LC32 EEPROM, and the foot sensors. This class encapsulates that ownership
+// Qwiic OpenLog, debug OLED, and foot sensors. This class encapsulates ownership
 // and provides the Phase 1 discovery path (rbg.7):
 //
-//   * root-bus scan: detect the mux (0x70) and EEPROM (0x50)
+//   * root-bus scan: detect the mux, OpenLog, and optional debug OLED
 //   * exclusive mux channel selection (exactly one channel active at a time)
 //   * per-channel sensor scan for the Robotic Finger Sensor v2 devices
 //
@@ -19,6 +19,7 @@
 // ===========================================================================
 
 #include <Arduino.h>
+#include <Wire.h>
 #include <stdint.h>
 
 #include "i2c_topology.h"
@@ -43,6 +44,11 @@ class I2cBus {
   // foot-sensor harness runs reliable; raise later only if proven safe.
   bool begin(uint32_t clock_hz = 100000);
   bool isReady() const { return ready_; }
+  TwoWire& wire() { return Wire; }
+  uint32_t transactionTimeoutUs() const { return transaction_timeout_us_; }
+  void setTransactionTimeoutUs(uint32_t timeout_us) {
+    transaction_timeout_us_ = timeout_us == 0 ? 5000u : timeout_us;
+  }
 
   bool write(uint8_t addr, const uint8_t* data, uint8_t len,
              bool send_stop = true);
@@ -63,8 +69,7 @@ class I2cBus {
   // Deselect all mux channels (write 0x00). Leaves the root bus addressable.
   bool selectNone();
 
-  // Scan the root bus for the mux and EEPROM, filling topo.mux_present /
-  // topo.eeprom_present. Leaves all mux channels deselected.
+  // Scan root devices and record the detected alternate addresses.
   void scanRoot(I2cTopology& topo);
 
   // Scan foot-sensor channels 0..5 (requires the mux to be present). For each
@@ -89,6 +94,7 @@ class I2cBus {
   I2cStats stats_;
   bool ready_ = false;
   uint32_t clock_hz_ = 100000;
+  uint32_t transaction_timeout_us_ = 5000;
 };
 
 }  // namespace i2c

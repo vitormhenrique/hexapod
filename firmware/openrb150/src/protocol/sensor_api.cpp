@@ -65,7 +65,7 @@ bool SensorApi::applyFeature(Feature f, bool enable, uint8_t* out,
 }
 
 bool SensorApi::encodeTopology(uint8_t* out, size_t out_cap, uint16_t* out_len) {
-  // [mux_present, eeprom_present, num_channels,
+  // [mux_present, config_storage_present, num_channels,
   //  {scanned, vcnl, lps, device_count, state} x num_channels].
   const uint8_t n = kSensorNumChannels;
   const size_t need = 3u + static_cast<size_t>(n) * 5u;
@@ -91,7 +91,7 @@ bool SensorApi::encodeTopology(uint8_t* out, size_t out_cap, uint16_t* out_len) 
     // No snapshot yet: report an all-absent topology so the host gets a
     // well-formed (if empty) response rather than an error.
     out[o++] = 0;  // mux
-    out[o++] = 0;  // eeprom
+    out[o++] = 0;  // config storage
     out[o++] = n;
     for (uint8_t i = 0; i < n; ++i) {
       out[o++] = 0;

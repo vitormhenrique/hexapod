@@ -70,7 +70,7 @@ Tune flag byte at offset 20:
 | --- | --- |
 | 0 | Gait-tune editor engaged |
 | 1 | Leg-1 preview running |
-| 2 | A save is queued for the EEPROM transaction |
+| 2 | A save is queued for the OpenLog config transaction |
 | 3 | Config store is volatile (a save would be rejected) |
 | 4-5 | Selected parameter: 0 step height, 1 stride, 2 duty |
 | 6-7 | Error severity: 0 info, 1 warning, 2 error, 3 critical |

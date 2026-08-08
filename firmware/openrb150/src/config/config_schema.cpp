@@ -127,10 +127,15 @@ void applyRobotMotionProfile(RobotConfig& cfg) {
   }
 }
 
+// Flash-resident zero image. `cfg = RobotConfig{}` materializes a ~508-byte
+// temporary on the caller's stack (this sits under the api/control task call
+// chains); copy-assigning from this constant avoids the stack transient.
+constexpr RobotConfig kZeroRobotConfig{};
+
 }  // namespace
 
 void defaultRobotConfig(RobotConfig& cfg) {
-  cfg = RobotConfig{};  // zero-init via member defaults
+  cfg = kZeroRobotConfig;  // zero-init via member defaults
   cfg.schema_version = kSchemaVersion;
   memset(cfg.robot_name, 0, sizeof(cfg.robot_name));
   strncpy(cfg.robot_name, "HexNav", sizeof(cfg.robot_name) - 1);
@@ -241,7 +246,7 @@ bool deserializeRobotConfig(const uint8_t* in, uint16_t len, RobotConfig& out) {
   if (in == nullptr || len < 2) return false;
   uint16_t o = 0;
 
-  out = RobotConfig{};
+  out = kZeroRobotConfig;
   out.schema_version = getU16(in, o);
   const bool legacy_v3 = out.schema_version == kLegacySchemaVersionV3 &&
                          len == kLegacyConfigPayloadSizeV3;

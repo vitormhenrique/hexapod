@@ -36,7 +36,7 @@ __attribute__((section(".noinit"))) volatile RetainedWatchdogState g_retainedSta
 // Motion-critical tasks: a sustained stall of either one is a hard safety
 // failure, so the hardware WDT pet is withheld and the MCU resets. The other
 // tasks (Rc/Api/I2c) are handled by the software fault path (missedMask -> FSM)
-// without forcing a reset, so a momentarily-busy host link or EEPROM commit
+// without forcing a reset, so a momentarily-busy host link or config commit
 // cannot reboot a robot whose motion loop is healthy.
 constexpr uint32_t kCriticalMask =
     (1u << static_cast<uint8_t>(TaskId::Control)) |
@@ -250,6 +250,55 @@ uint8_t lastResetControlProgress() { return g_lastResetControlProgress; }
 uint8_t lastResetSafetyState() { return g_lastResetSafetyState; }
 
 bool criticalStalled() { return (g_missedMask & kCriticalMask) != 0; }
+
+bool retainedDiagnosticsValidRaw() {
+#if defined(ARDUINO_ARCH_SAMD)
+  return g_retainedState.magic == kRetainedMagic &&
+         g_retainedState.missed_mask_inverse == ~g_retainedState.missed_mask &&
+         g_retainedState.progress_marker_inverse ==
+             ~g_retainedState.progress_marker;
+#else
+  return false;
+#endif
+}
+
+uint32_t retainedMissedMaskRaw() {
+#if defined(ARDUINO_ARCH_SAMD)
+  return retainedDiagnosticsValidRaw() ? g_retainedState.missed_mask : 0;
+#else
+  return 0;
+#endif
+}
+
+uint8_t retainedProgressMarkerRaw() {
+#if defined(ARDUINO_ARCH_SAMD)
+  return retainedDiagnosticsValidRaw()
+             ? static_cast<uint8_t>(g_retainedState.progress_marker)
+             : 0;
+#else
+  return 0;
+#endif
+}
+
+uint8_t retainedControlProgressRaw() {
+#if defined(ARDUINO_ARCH_SAMD)
+  return retainedDiagnosticsValidRaw()
+             ? static_cast<uint8_t>(g_retainedState.control_progress)
+             : 0;
+#else
+  return 0;
+#endif
+}
+
+uint8_t retainedSafetyStateRaw() {
+#if defined(ARDUINO_ARCH_SAMD)
+  return retainedDiagnosticsValidRaw()
+             ? static_cast<uint8_t>(g_retainedState.safety_state)
+             : 0;
+#else
+  return 0;
+#endif
+}
 
 
 }  // namespace watchdog

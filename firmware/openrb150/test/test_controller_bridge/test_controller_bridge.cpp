@@ -301,6 +301,39 @@ void test_encoders_no_longer_drive_gait_shape() {
   TEST_ASSERT_EQUAL_FLOAT(step, c.step_height);
 }
 
+void test_btn4_each_press_toggles_capture_without_a_trick() {
+  ControllerBridge bridge;
+  ChannelPackInputs_t input = makeNeutral();
+  uint32_t now_ms = 100;
+  feed(bridge, input, now_ms);
+  const uint32_t initial_sequence = bridge.command().capture_toggle_seq;
+
+  input.buttons[3] = true;
+  feed(bridge, input, now_ms += kEdgeRefractoryMs + 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(TrickId::None),
+                          static_cast<uint8_t>(bridge.command().trick));
+  TEST_ASSERT_EQUAL_UINT32(initial_sequence + 1,
+                           bridge.command().capture_toggle_seq);
+
+  // Holding the same press does not retrigger.
+  feed(bridge, input, now_ms += 2000);
+  TEST_ASSERT_EQUAL_UINT32(initial_sequence + 1,
+                           bridge.command().capture_toggle_seq);
+
+  input.buttons[3] = false;
+  feed(bridge, input, now_ms += 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(TrickId::None),
+                          static_cast<uint8_t>(bridge.command().trick));
+
+  // The next distinct press increments again; i2cTask interprets this as stop.
+  input.buttons[3] = true;
+  feed(bridge, input, now_ms += kEdgeRefractoryMs + 10);
+  TEST_ASSERT_EQUAL_UINT32(initial_sequence + 2,
+                           bridge.command().capture_toggle_seq);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(TrickId::None),
+                          static_cast<uint8_t>(bridge.command().trick));
+}
+
 // --- gait-tune editor (SW_G enters, NAV1 edits) -----------------------------
 
 // Press a boolean input for one frame and release it on the next, advancing
@@ -667,9 +700,11 @@ void test_custom_profile_locks_after_stable_frames() {
 void test_custom_btn4_uses_four_buttons() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
-  in.buttons[3] = true;  // Btn4 -> CrouchToggle proves CH10 packs 4 buttons
-  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::CrouchToggle),
-                         static_cast<uint8_t>(feed(b, in, 100).trick));
+  in.buttons[3] = true;  // Btn4 capture proves CH10 packs all four buttons.
+  const ControllerCommand& command = feed(b, in, 100);
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::None),
+                         static_cast<uint8_t>(command.trick));
+  TEST_ASSERT_EQUAL_UINT32(1, command.capture_toggle_seq);
 }
 
 void test_custom_digital_fields_use_valid_crsf_range_and_round_trip() {
@@ -1020,6 +1055,7 @@ int main(int, char**) {
   RUN_TEST(test_failsafe_on_stale_timeout);
   RUN_TEST(test_shape_params_from_pots);
   RUN_TEST(test_encoders_no_longer_drive_gait_shape);
+  RUN_TEST(test_btn4_each_press_toggles_capture_without_a_trick);
   RUN_TEST(test_gait_tune_toggle_switches_nav1_from_trim_to_parameters);
   RUN_TEST(test_gait_tune_adjusts_selected_parameter_and_clamps);
   RUN_TEST(test_gait_tune_save_bumps_sequence_once_per_press);
