@@ -76,6 +76,7 @@ size_t formatCaptureMarker(bool begin, uint32_t session, uint32_t timestamp_ms,
   unsignedField(writer, session);
   unsignedField(writer, timestamp_ms);
   unsignedField(writer, samples);
+  if (begin) unsignedField(writer, 2);  // CAPTURE.CSV schema version.
   return writer.finish();
 }
 
@@ -111,9 +112,79 @@ size_t formatRemoteCaptureRow(uint32_t session, uint32_t sample,
   return writer.finish();
 }
 
+size_t formatAppliedMotionCaptureRow(uint32_t session, uint32_t sample,
+                                     uint32_t timestamp_ms,
+                                     const AppliedMotionCapture& motion,
+                                     char* out, size_t out_cap) {
+  if (out == nullptr || out_cap == 0) return 0;
+  CsvWriter writer(out, out_cap);
+  writer.text("C");
+  unsignedField(writer, session);
+  unsignedField(writer, sample);
+  unsignedField(writer, timestamp_ms);
+  unsignedField(writer, motion.goal_sequence);
+  unsignedField(writer, motion.command_source);
+  unsignedField(writer, motion.safety_state);
+  unsignedField(writer, motion.gait);
+  unsignedField(writer, motion.flags);
+  unsignedField(writer, motion.body_height_mm);
+  unsignedField(writer, motion.stride_mm);
+  unsignedField(writer, motion.step_height_mm);
+  unsignedField(writer, motion.duty_x255);
+  unsignedField(writer, motion.speed_x255);
+  return writer.finish();
+}
+
+size_t formatLegCaptureRow(uint32_t session, uint32_t sample,
+                           uint32_t timestamp_ms, uint32_t goal_sequence,
+                           const gait::PipelineLegTarget* legs, uint8_t count,
+                           char* out, size_t out_cap) {
+  if (out == nullptr || out_cap == 0 || (count > 0 && legs == nullptr)) return 0;
+  CsvWriter writer(out, out_cap);
+  writer.text("L");
+  unsignedField(writer, session);
+  unsignedField(writer, sample);
+  unsignedField(writer, timestamp_ms);
+  unsignedField(writer, goal_sequence);
+  unsignedField(writer, count);
+  for (uint8_t leg = 0; leg < count; ++leg) {
+    unsignedField(writer, leg);
+    signedField(writer, legs[leg].foot_x_mm);
+    signedField(writer, legs[leg].foot_y_mm);
+    signedField(writer, legs[leg].foot_z_mm);
+    unsignedField(writer, legs[leg].flags);
+  }
+  return writer.finish();
+}
+
+size_t formatGoalCaptureRow(uint32_t session, uint32_t sample,
+                            uint32_t timestamp_ms, uint32_t goal_sequence,
+                            const GoalCapture* goals, uint8_t count, char* out,
+                            size_t out_cap) {
+  if (out == nullptr || out_cap == 0 || (count > 0 && goals == nullptr)) return 0;
+  CsvWriter writer(out, out_cap);
+  writer.text("G");
+  unsignedField(writer, session);
+  unsignedField(writer, sample);
+  unsignedField(writer, timestamp_ms);
+  unsignedField(writer, goal_sequence);
+  unsignedField(writer, count);
+  for (uint8_t index = 0; index < count; ++index) {
+    const GoalCapture& goal = goals[index];
+    unsignedField(writer, goal.id);
+    unsignedField(writer, goal.leg);
+    unsignedField(writer, goal.joint);
+    unsignedField(writer, goal.goal_tick);
+    signedField(writer, goal.goal_angle_centideg);
+    unsignedField(writer, goal.flags);
+  }
+  return writer.finish();
+}
+
 size_t formatServoCaptureRow(uint32_t session, uint32_t sample,
                              uint32_t timestamp_ms,
-                             const dxl::ServoStatus& servo, char* out,
+                             const dxl::ServoStatus& servo,
+                             int16_t present_angle_centideg, char* out,
                              size_t out_cap) {
   if (out == nullptr || out_cap == 0) return 0;
   CsvWriter writer(out, out_cap);
@@ -124,6 +195,7 @@ size_t formatServoCaptureRow(uint32_t session, uint32_t sample,
   unsignedField(writer, servo.id);
   unsignedField(writer, servo.ok ? 1u : 0u);
   signedField(writer, servo.present_position);
+  signedField(writer, present_angle_centideg);
   signedField(writer, servo.present_velocity);
   signedField(writer, servo.present_load);
   unsignedField(writer, servo.present_voltage_mv);

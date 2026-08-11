@@ -28,7 +28,7 @@
 // ELRS clamps raw channel values below CPACK_CRSF_MIN, which would otherwise
 // collapse several low-valued bitfield states to the same value.
 #define CPACK_SWITCH_FIELD_MAX     31u  // 5 independent switches (B,C,D,G,H)
-#define CPACK_BTN_TOGGLE_FIELD_MAX 44u  // 9 toggle pairs x 5 button states
+#define CPACK_BTN_TOGGLE_FIELD_MAX 143u // 9 toggle pairs x 16 button masks
 #define CPACK_NAV_FIELD_MAX        35u  // 6 NAV1 states x 6 NAV2 states
 #define CPACK_ARM_POT_STEPS        511u
 #define CPACK_ARM_POT_ON_BASE      1536u
@@ -154,19 +154,16 @@ inline uint16_t packButtonsToggles(const bool btn[4], const uint8_t tog[2]) {
     return val;
 }
 
-// Compact the physically valid controls for RF transport. A momentary button
-// is none (0) or BTN_1..BTN_4 (1..4); each toggle pair has 3 x 3 states.
+// Compact the full four-bit button mask for RF transport. Each toggle pair has
+// 3 x 3 states, so all 9 x 16 physical combinations fit in one CRSF channel.
 inline uint16_t packButtonToggleState(const bool btn[4], const uint8_t tog[2]) {
-    uint8_t button_state = 0;
+    uint8_t button_mask = 0;
     for (int i = 0; i < 4; i++) {
-        if (btn[i]) {
-            button_state = (uint8_t)(i + 1);
-            break;
-        }
+        if (btn[i]) button_mask |= (uint8_t)(1u << i);
     }
     const uint8_t toggle0 = tog[0] <= 2 ? tog[0] : 2;
     const uint8_t toggle1 = tog[1] <= 2 ? tog[1] : 2;
-    return (uint16_t)(((toggle0 * 3u + toggle1) * 5u) + button_state);
+    return (uint16_t)(((toggle0 * 3u + toggle1) * 16u) + button_mask);
 }
 
 // Pack 10 nav switches (2x5-way) into 11-bit value
@@ -271,9 +268,9 @@ inline void unpackButtonsToggles(uint16_t val, bool btn[4], uint8_t tog[2]) {
 
 inline void unpackButtonToggleState(uint16_t val, bool btn[4], uint8_t tog[2]) {
     if (val > CPACK_BTN_TOGGLE_FIELD_MAX) val = CPACK_BTN_TOGGLE_FIELD_MAX;
-    const uint8_t button_state = (uint8_t)(val % 5u);
-    const uint8_t toggle_state = (uint8_t)(val / 5u);
-    for (int i = 0; i < 4; i++) btn[i] = button_state == (uint8_t)(i + 1);
+    const uint8_t button_mask = (uint8_t)(val % 16u);
+    const uint8_t toggle_state = (uint8_t)(val / 16u);
+    for (int i = 0; i < 4; i++) btn[i] = (button_mask & (1u << i)) != 0;
     tog[0] = (uint8_t)(toggle_state / 3u);
     tog[1] = (uint8_t)(toggle_state % 3u);
 }

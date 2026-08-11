@@ -220,6 +220,8 @@ protocol::MotionApi g_motionApi;
 struct GoalFrame {
   uint8_t count = 0;
   gait::PipelineJoint joints[config::kNumServos];
+  gait::PipelineLegTarget legs[config::kNumLegs];
+  logging::AppliedMotionCapture applied;
 };
 GoalFrame g_goalFrame;
 SemaphoreHandle_t g_goalMutex = nullptr;  // guards g_goalFrame
@@ -499,23 +501,53 @@ sensors::DebugDisplayState g_debugDisplayState;
 struct CaptureRuntime {
   bool recording = false;
   uint32_t handled_toggle_seq = 0;
+  uint32_t handled_start_seq = 0;
   uint32_t session = 0;
   uint32_t sample = 0;
   uint32_t completed_samples = 0;
   uint32_t sample_ms = 0;
+  uint32_t sample_file_size = 0;
+  uint16_t sample_bytes = 0;
   uint32_t next_sample_ms = 0;
   uint8_t row = 0xFF;
   uint8_t servo_count = 0;
+  uint8_t servo_index = 0;
+  uint8_t goal_count = 0;
+  uint8_t goal_index = 0;
+  bool goal_valid = false;
+  logging::RemoteCapture remote;
+  logging::AppliedMotionCapture motion;
+  logging::GoalCapture goals[config::kNumServos];
+  gait::PipelineLegTarget legs[config::kNumLegs];
+  dxl::ServoStatus servos[config::kNumServos];
+  int16_t present_angle_centideg[config::kNumServos];
 };
 
 CaptureRuntime g_capture;
 char g_captureLine[256];
 constexpr uint32_t kCaptureIntervalMs = 500;
 constexpr uint8_t kCaptureNoRow = 0xFF;
+constexpr uint8_t kCaptureRowRemote = 0;
+constexpr uint8_t kCaptureRowControl = 1;
+constexpr uint8_t kCaptureRowLegs = 2;
+constexpr uint8_t kCaptureRowGoals = 3;
+constexpr uint8_t kCaptureRowServos = 4;
+constexpr uint8_t kCaptureGoalsPerRow = 6;
 constexpr const char* kCaptureFile = "CAPTURE.CSV";
+
+bool openLogFileGrew(const char* file_name, uint32_t size_before,
+                     uint32_t expected_growth) {
+  uint32_t size_after = 0;
+  bool exists_after = false;
+  return g_openlog.fileSize(file_name, size_after, exists_after) &&
+         exists_after && size_after >= size_before + expected_growth;
+}
 
 bool appendOpenLogLine(const char* file_name, const char* line, size_t len,
                        bool sync) {
+  uint32_t size_before = 0;
+  bool existed_before = false;
+  if (!g_openlog.fileSize(file_name, size_before, existed_before)) return false;
   size_t offset = 0;
   while (offset < len) {
     const size_t remaining = len - offset;
@@ -529,7 +561,9 @@ bool appendOpenLogLine(const char* file_name, const char* line, size_t len,
     }
     offset += count;
   }
-  return !sync || g_openlog.sync();
+  return !sync ||
+         (g_openlog.sync() && openLogFileGrew(file_name, size_before,
+                                               static_cast<uint32_t>(len)));
 }
 
 bool appendEventLogLine(const char* line, size_t len) {
@@ -1299,6 +1333,14 @@ int16_t scaledI16(float value, float scale) {
   return static_cast<int16_t>(scaled >= 0.0f ? scaled + 0.5f : scaled - 0.5f);
 }
 
+int16_t servoAngleCentideg(const dxl::ServoMap& map, uint8_t leg,
+                            uint8_t joint, int32_t tick) {
+  if (tick < 0 || tick > config::kServoMaxTick) return 0;
+  return scaledI16(map.tickToAngle(leg, joint,
+                                   static_cast<uint16_t>(tick)),
+                   5729.578f);
+}
+
 logging::RemoteCapture buildRemoteCapture(
     const controller::ControllerCommand& command,
     const ChannelPackInputs_t& raw, uint32_t frame_sequence,
@@ -1345,6 +1387,7 @@ logging::RemoteCapture buildRemoteCapture(
   capture.step_height_x255 = fractionToByte(command.step_height);
   capture.duty_x255 = fractionToByte(command.duty);
   capture.capture_toggle_seq = command.capture_toggle_seq;
+  capture.capture_start_seq = command.capture_start_seq;
   return capture;
 }
 
@@ -1824,8 +1867,33 @@ __attribute__((noinline)) void publishControllerCommand(uint32_t now_ms) {
       for (uint8_t index = 0; index < command.goals.count; ++index) {
         g_goalFrame.joints[index] = command.goals.joints[index];
       }
+      for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+        g_goalFrame.legs[leg] = command.goals.legs[leg];
+      }
+      const uint32_t goal_sequence = g_goalSeq + 1u;
+      logging::AppliedMotionCapture& applied = g_goalFrame.applied;
+      applied.goal_sequence = goal_sequence;
+      applied.body_height_mm = command.diagnostics.applied_body_height_mm;
+      applied.stride_mm = command.diagnostics.applied_stride_mm;
+      applied.step_height_mm = command.diagnostics.applied_step_height_mm;
+      applied.command_source = static_cast<uint8_t>(command.command_source);
+      applied.safety_state = static_cast<uint8_t>(command.safety_state);
+      applied.gait = radio.gait;
+      applied.duty_x255 = command.diagnostics.applied_duty_x255;
+      applied.speed_x255 = command.diagnostics.applied_speed_x255;
+      applied.flags = logging::kAppliedMotionFlagMotionGate |
+                      logging::kAppliedMotionFlagGoalValid;
+      if (command.diagnostics.any_goal_clamped) {
+        applied.flags |= logging::kAppliedMotionFlagGoalClamped;
+      }
+      if (command.diagnostics.any_goal_unreachable) {
+        applied.flags |= logging::kAppliedMotionFlagGoalUnreachable;
+      }
+      if (command.diagnostics.any_goal_reach_limited) {
+        applied.flags |= logging::kAppliedMotionFlagGoalReachLimited;
+      }
       g_goalClamped = command.diagnostics.any_goal_clamped;
-      ++g_goalSeq;
+      g_goalSeq = goal_sequence;
       g_goalValid = true;
       xSemaphoreGive(g_goalMutex);
     }
@@ -3365,15 +3433,22 @@ void i2cTask(void*) {
       }
     }
 
-    // Distinct BTN_4 presses publish a monotonic sequence from rcTask. Toggle only
-    // on odd sequence deltas so even bursts cancel without an unbounded loop.
+    // BTN_4 toggles capture; BTN_1 + BTN_2 held for three seconds sends a
+    // separate start-only sequence. Both are monotonic so they survive task
+    // boundaries and packet coalescing.
     logging::RemoteCapture capture_remote = buildRemoteCapture(
       g_ctrlCmd, g_ctrlRaw, g_rcDiag.frames_decoded, g_ctrlCmd.frame_ms);
     const uint32_t toggle_delta =
         capture_remote.capture_toggle_seq - g_capture.handled_toggle_seq;
-    if (!boot_storage_pending && !storage_io_this_pass && toggle_delta != 0) {
+    const uint32_t start_delta =
+        capture_remote.capture_start_seq - g_capture.handled_start_seq;
+    if (!boot_storage_pending && !storage_io_this_pass &&
+        (toggle_delta != 0 || start_delta != 0)) {
       g_capture.handled_toggle_seq = capture_remote.capture_toggle_seq;
-      if ((toggle_delta & 1u) != 0) {
+      g_capture.handled_start_seq = capture_remote.capture_start_seq;
+      const bool start_requested = start_delta != 0 && !g_capture.recording;
+      const bool toggle_requested = (toggle_delta & 1u) != 0;
+      if (start_requested || toggle_requested) {
         const uint32_t capture_now_ms = millis();
         if (!g_capture.recording) {
           if (!g_configStorageAvailable) {
@@ -3383,6 +3458,8 @@ void i2cTask(void*) {
             g_capture.session = capture_now_ms;
             g_capture.sample = 0;
             g_capture.completed_samples = 0;
+            g_capture.sample_file_size = 0;
+            g_capture.sample_bytes = 0;
             g_capture.row = kCaptureNoRow;
             const size_t len = logging::formatCaptureMarker(
                 true, g_capture.session, capture_now_ms, 0, g_captureLine,
@@ -3418,41 +3495,153 @@ void i2cTask(void*) {
 
     if (!boot_storage_pending && g_capture.recording && !storage_io_this_pass) {
       const uint32_t capture_now_ms = millis();
+      bool row_ok = true;
       if (g_capture.row == kCaptureNoRow &&
           static_cast<int32_t>(capture_now_ms - g_capture.next_sample_ms) >= 0) {
-        ++g_capture.sample;
-        g_capture.sample_ms = capture_now_ms;
-        g_capture.servo_count = g_servoStatusCount;
-        g_capture.row = 0;
+        bool exists = false;
+        if (g_openlog.fileSize(kCaptureFile, g_capture.sample_file_size,
+                               exists) && exists) {
+          ++g_capture.sample;
+          g_capture.sample_ms = capture_now_ms;
+          g_capture.sample_bytes = 0;
+          g_capture.remote = buildRemoteCapture(
+              g_ctrlCmd, g_ctrlRaw, g_rcDiag.frames_decoded, g_ctrlCmd.frame_ms);
+          g_capture.servo_count = g_servoStatusCount > config::kNumServos
+                                      ? config::kNumServos
+                                      : g_servoStatusCount;
+          g_capture.servo_index = 0;
+          const dxl::ServoMap map(g_configApi.config());
+          for (uint8_t index = 0; index < g_capture.servo_count; ++index) {
+            g_capture.servos[index] = g_servoStatus[index];
+            const config::ServoConfig* servo =
+                map.servoForId(g_capture.servos[index].id);
+            g_capture.present_angle_centideg[index] = servo == nullptr
+                ? 0
+                : servoAngleCentideg(map, servo->leg, servo->joint,
+                                     g_capture.servos[index].present_position);
+          }
+
+          g_capture.goal_valid = false;
+          g_capture.goal_count = 0;
+          g_capture.goal_index = 0;
+          logging::AppliedMotionCapture& motion = g_capture.motion;
+          motion.goal_sequence = g_goalSeq;
+          motion.body_height_mm = 0;
+          motion.stride_mm = 0;
+          motion.step_height_mm = 0;
+          motion.command_source = g_commandSource;
+          motion.safety_state = g_safetyState;
+          motion.gait = 0;
+          motion.duty_x255 = 0;
+          motion.speed_x255 = 0;
+          motion.flags = 0;
+          if (g_goalMutex != nullptr &&
+              xSemaphoreTake(g_goalMutex, pdMS_TO_TICKS(2)) == pdTRUE) {
+            if (g_goalValid) {
+              g_capture.goal_valid = true;
+              g_capture.goal_count = g_goalFrame.count > config::kNumServos
+                  ? config::kNumServos
+                  : g_goalFrame.count;
+              g_capture.motion = g_goalFrame.applied;
+              for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+                g_capture.legs[leg] = g_goalFrame.legs[leg];
+              }
+              for (uint8_t index = 0; index < g_capture.goal_count; ++index) {
+                const gait::PipelineJoint& joint = g_goalFrame.joints[index];
+                logging::GoalCapture& goal = g_capture.goals[index];
+                goal.id = joint.id;
+                goal.leg = joint.leg;
+                goal.joint = joint.joint;
+                goal.goal_tick = joint.tick;
+                goal.goal_angle_centideg =
+                    servoAngleCentideg(map, joint.leg, joint.joint, joint.tick);
+                goal.flags = joint.clamped ? logging::kGoalCaptureFlagClamped : 0;
+              }
+            }
+            xSemaphoreGive(g_goalMutex);
+          }
+          g_capture.row = kCaptureRowRemote;
+        } else {
+          row_ok = false;
+        }
       }
 
-      bool row_ok = true;
-      if (g_capture.row == 0) {
-        capture_remote = buildRemoteCapture(
-          g_ctrlCmd, g_ctrlRaw, g_rcDiag.frames_decoded, g_ctrlCmd.frame_ms);
+      if (row_ok && g_capture.row == kCaptureRowRemote) {
         const size_t len = logging::formatRemoteCaptureRow(
-            g_capture.session, g_capture.sample, capture_remote, g_captureLine,
+            g_capture.session, g_capture.sample, g_capture.remote, g_captureLine,
             sizeof(g_captureLine));
         row_ok = len > 0 && appendOpenLogLine(
             kCaptureFile, g_captureLine, len, false);
         storage_io_this_pass = true;
-        g_capture.row = 1;
-      } else if (g_capture.row != kCaptureNoRow &&
-                 g_capture.row <= g_capture.servo_count) {
-        dxl::ServoStatus servo;
-        servo = g_servoStatus[g_capture.row - 1u];
-        const size_t len = logging::formatServoCaptureRow(
-            g_capture.session, g_capture.sample, g_capture.sample_ms, servo,
+        if (row_ok) g_capture.sample_bytes += static_cast<uint16_t>(len);
+        if (row_ok) g_capture.row = kCaptureRowControl;
+      } else if (row_ok && g_capture.row == kCaptureRowControl) {
+        const size_t len = logging::formatAppliedMotionCaptureRow(
+            g_capture.session, g_capture.sample, g_capture.sample_ms,
+            g_capture.motion, g_captureLine, sizeof(g_captureLine));
+        row_ok = len > 0 && appendOpenLogLine(
+            kCaptureFile, g_captureLine, len, false);
+        storage_io_this_pass = true;
+        if (row_ok) {
+          g_capture.sample_bytes += static_cast<uint16_t>(len);
+          g_capture.row = g_capture.goal_valid ? kCaptureRowLegs
+                                                : kCaptureRowServos;
+        }
+      } else if (row_ok && g_capture.row == kCaptureRowLegs) {
+        const size_t len = logging::formatLegCaptureRow(
+            g_capture.session, g_capture.sample, g_capture.sample_ms,
+            g_capture.motion.goal_sequence, g_capture.legs, config::kNumLegs,
             g_captureLine, sizeof(g_captureLine));
         row_ok = len > 0 && appendOpenLogLine(
             kCaptureFile, g_captureLine, len, false);
         storage_io_this_pass = true;
-        ++g_capture.row;
+        if (row_ok) {
+          g_capture.sample_bytes += static_cast<uint16_t>(len);
+          g_capture.row = kCaptureRowGoals;
+        }
+      } else if (row_ok && g_capture.row == kCaptureRowGoals) {
+        const uint8_t remaining =
+            static_cast<uint8_t>(g_capture.goal_count - g_capture.goal_index);
+        const uint8_t count = remaining < kCaptureGoalsPerRow
+                                  ? remaining
+                                  : kCaptureGoalsPerRow;
+        const size_t len = logging::formatGoalCaptureRow(
+            g_capture.session, g_capture.sample, g_capture.sample_ms,
+            g_capture.motion.goal_sequence,
+            &g_capture.goals[g_capture.goal_index], count, g_captureLine,
+            sizeof(g_captureLine));
+        row_ok = len > 0 && appendOpenLogLine(
+            kCaptureFile, g_captureLine, len, false);
+        storage_io_this_pass = true;
+        if (row_ok) {
+          g_capture.sample_bytes += static_cast<uint16_t>(len);
+          g_capture.goal_index =
+              static_cast<uint8_t>(g_capture.goal_index + count);
+          if (g_capture.goal_index >= g_capture.goal_count) {
+            g_capture.row = kCaptureRowServos;
+          }
+        }
+      } else if (row_ok && g_capture.row == kCaptureRowServos &&
+                 g_capture.servo_index < g_capture.servo_count) {
+        const dxl::ServoStatus& servo =
+            g_capture.servos[g_capture.servo_index];
+        const size_t len = logging::formatServoCaptureRow(
+            g_capture.session, g_capture.sample, g_capture.sample_ms, servo,
+            g_capture.present_angle_centideg[g_capture.servo_index],
+            g_captureLine, sizeof(g_captureLine));
+        row_ok = len > 0 && appendOpenLogLine(
+            kCaptureFile, g_captureLine, len, false);
+        storage_io_this_pass = true;
+        if (row_ok) {
+          g_capture.sample_bytes += static_cast<uint16_t>(len);
+          ++g_capture.servo_index;
+        }
       }
 
-      if (row_ok && g_capture.row != kCaptureNoRow &&
-          g_capture.row > g_capture.servo_count) {
-        row_ok = g_openlog.sync();
+      if (row_ok && g_capture.row == kCaptureRowServos &&
+          g_capture.servo_index >= g_capture.servo_count) {
+        row_ok = g_openlog.sync() && openLogFileGrew(
+            kCaptureFile, g_capture.sample_file_size, g_capture.sample_bytes);
         storage_io_this_pass = true;
         if (row_ok) {
           ++g_capture.completed_samples;

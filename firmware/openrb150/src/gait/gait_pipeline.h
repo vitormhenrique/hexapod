@@ -70,9 +70,23 @@ struct PipelineJoint {
   bool clamped = false;
 };
 
+// Final per-leg gait target after reach limiting and preview substitution.
+// Positions are rounded millimetres in the body frame used by the gait engine;
+// the flags report the target state passed into the subsequent IK solve.
+constexpr uint8_t kPipelineLegFlagSwing = 1u << 0;
+constexpr uint8_t kPipelineLegFlagReachable = 1u << 1;
+constexpr uint8_t kPipelineLegFlagClamped = 1u << 2;
+struct PipelineLegTarget {
+  int16_t foot_x_mm = 0;
+  int16_t foot_y_mm = 0;
+  int16_t foot_z_mm = 0;
+  uint8_t flags = 0;
+};
+
 // Result of one pipeline tick: up to one goal per mapped servo (18 max).
 struct PipelineOutput {
   PipelineJoint joints[config::kNumServos];
+  PipelineLegTarget legs[config::kNumLegs];
   uint8_t count = 0;            // number of mapped joints written
   bool any_unreachable = false;  // a leg IK target left the reachable workspace
   bool any_reach_limited = false;  // a foot was pulled in to the reach margin (lmt.14)

@@ -129,6 +129,7 @@ requests; firmware capability, authority, and safety checks remain final.
 | `BTN_1` | Press | Stand-up choreography |
 | `BTN_2` | Press | Sit-down choreography |
 | `BTN_3` | Press | Standing body-rock wave choreography |
+| `BTN_1` + `BTN_2` | Hold 3 seconds | Start `CAPTURE.CSV` recording |
 | `BTN_4` | Press | Start recording; press again to stop and sync `CAPTURE.CSV` |
 | `NAV1` Up / Down | Press | Trim pitch ±1° / select gait parameter while tuning |
 | `NAV1` Left / Right | Press | Trim roll ±1° / decrease-increase the parameter while tuning |
@@ -139,10 +140,13 @@ requests; firmware capability, authority, and safety checks remain final.
 | `NAV2` Right | Press | Hold spider-attack stance until stick input cancels it |
 | `NAV2` Center | Press | Loop dance until stick input cancels it |
 
-Buttons and nav actions fire once on the rising edge with a 150 ms refractory
-window. BTN_4 is dedicated to capture and no longer toggles crouch; use Pot 2
-for crouched/tall body height. Any active trick is cancelled when the operator moves a gait/body
-stick. Centered walking sticks park all feet at home without advancing phase.
+Buttons and nav actions trigger immediately with a 150 ms refractory window.
+Holding a trick button repeats its choreography every 2 seconds. Holding
+`BTN_1` and `BTN_2` together for 3 seconds starts recording and suppresses
+both individual tricks while the combination is held. BTN_4 is dedicated to
+capture and no longer toggles crouch; use Pot 2 for crouched/tall body height.
+Any active trick is cancelled when the operator moves a gait/body stick.
+Centered walking sticks park all feet at home without advancing phase.
 The detailed CRSF channel and TX16S-direct mappings are in the
 [controller bridge reference](controller_bridge.md).
 
@@ -154,19 +158,33 @@ Recording requires a detected,
 SD-ready Qwiic OpenLog. The optional Qwiic OLED shows `HEXAPOD REC` and the
 number of completed samples while capture is active.
 
-`CAPTURE.CSV` is append-only and contains marked sessions:
+`CAPTURE.CSV` is append-only and contains marked sessions. New sessions write
+`BEGIN,...,2`; the final `2` is the capture schema version. All rows with one
+sample number were copied from the same remote, goal-frame, and servo-status
+snapshots before any OpenLog writes began:
 
-- `BEGIN` / `END`: session uptime, timestamp, and completed sample count.
-- `R`: raw gimbals, pots, encoders, switch/button/toggle/nav masks, decoded
-   mode/gait, twist, body pose, and gait-shape values.
-- `S`: sample timestamp, servo ID, validity, present position, velocity, raw
-   load, input voltage in millivolts, temperature in Celsius, hardware error,
-   and torque state.
+- `BEGIN` / `END`: session uptime, timestamp, completed sample count; `BEGIN`
+   also carries the capture schema version.
+- `R`: raw gimbals, pots, encoders, switch/button/toggle/nav masks, and the
+   conditioned remote targets: mode/gait, twist, body pose, and gait shape.
+- `C`: the motion command that reached the gait pipeline: goal-frame sequence,
+   command source, safety state, active gait, motion/reach/clamp flags, and the
+   applied body height, stride, step height, duty, and speed.
+- `L`: all six final gait foot targets in body-frame millimetres after reach
+   limiting, with swing, reachable, and joint-clamp flags.
+- `G`: final calibrated servo goal ticks and logical goal angles in centidegrees
+   after IK, servo-map limits, and the arm-transition slew; each row packs up to
+   six joints and carries the same goal-frame sequence as `C` and `L`.
+- `S`: sample timestamp, servo ID, validity, present tick and logical present
+   angle in centidegrees, velocity, raw load, input voltage in millivolts,
+   temperature in Celsius, hardware error, and torque state.
 
-Samples start at 2 Hz. DYNAMIXEL detail reads already rotate across the 18
-servos, so load/temperature/voltage values are the latest converged values.
-Each complete sample is synced to the SD card. A storage failure stops capture
-and reports `CAPTURE_WRITE_FAILED` through the normal error journal.
+Samples begin at 2 Hz and each snapshot is written in 24 bounded I2C task
+passes: `R`, `C`, `L`, three `G` rows, and one `S` row per discovered servo.
+DYNAMIXEL detail reads already rotate across the 18 servos, so
+load/temperature/voltage values are the latest converged values. Each complete
+sample is synced to the SD card. A storage failure stops capture and reports
+`CAPTURE_WRITE_FAILED` through the normal error journal.
 
 ### Ride Height Range
 

@@ -147,7 +147,7 @@ Encoders are **relative**: track deltas frame-to-frame and handle the wrap at
 
 On the RF wire, `packInputs()` scales each discrete state into `191..1792`;
 `unpackChannels()` reverses that scaling with round-to-nearest. The possible
-decoded values are `0..31` for CH9, `0..44` for CH10, and `0..35` for CH11.
+decoded values are `0..31` for CH9, `0..143` for CH10, and `0..35` for CH11.
 
 ### CH9 — `CPACK_CH_SWITCHES` (`packAuxSwitches` / `unpackAuxSwitches`)
 
@@ -164,15 +164,15 @@ decoded values are `0..31` for CH9, `0..44` for CH10, and `0..35` for CH11.
 
 ### CH10 — `CPACK_CH_BTN_TOGGLE` (`packButtonToggleState` / `unpackButtonToggleState`)
 
-Each toggle uses `UP = 0`, `CENTER = 1`, `DOWN = 2`. The button state is `0`
-for none or `1..4` for `BTN_1..BTN_4`:
+Each toggle uses `UP = 0`, `CENTER = 1`, `DOWN = 2`. The lower four bits are
+the complete button mask, so simultaneous presses are preserved:
 
 ```text
-state = ((SW_E * 3 + SW_F) * 5) + button
+state = ((SW_E * 3 + SW_F) * 16) + button_mask
 ```
 
-This produces 45 valid states (`0..44`) with wide spacing after CRSF scaling.
-If multiple momentary buttons are held, the lowest-numbered button is sent.
+`button_mask` bit 0 through bit 3 represents `BTN_1` through `BTN_4`. This
+produces 144 valid states (`0..143`) with wide spacing after CRSF scaling.
 
 ### CH11 — `CPACK_CH_NAV` (`packNavStates` / `unpackNavStates`)
 

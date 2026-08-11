@@ -452,6 +452,25 @@ void test_stand_is_not_reach_limited() {
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 
+void test_pipeline_exports_final_leg_targets_for_capture() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  PipelineOutput out;
+  pipe.update(20, out);
+
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    float x, y, z;
+    pipe.engine().nominalFoot(leg, x, y, z);
+    TEST_ASSERT_INT_WITHIN(1, static_cast<int>(x), out.legs[leg].foot_x_mm);
+    TEST_ASSERT_INT_WITHIN(1, static_cast<int>(y), out.legs[leg].foot_y_mm);
+    TEST_ASSERT_INT_WITHIN(1, static_cast<int>(z), out.legs[leg].foot_z_mm);
+    TEST_ASSERT_TRUE(out.legs[leg].flags & kPipelineLegFlagReachable);
+    TEST_ASSERT_FALSE(out.legs[leg].flags & kPipelineLegFlagSwing);
+    TEST_ASSERT_FALSE(out.legs[leg].flags & kPipelineLegFlagClamped);
+  }
+}
+
 // oha.3: a non-neutral body pose shifts/tilts the body over planted (Stand)
 // feet, changing the solved goal ticks vs the neutral stance -- this is the
 // "move the core without moving the legs" path. A modest pose stays reachable.
@@ -659,6 +678,7 @@ int main(int, char**) {
   RUN_TEST(test_default_lateral_stance_never_reverses_after_ik);
   RUN_TEST(test_default_yaw_stance_never_reverses_after_ik);
   RUN_TEST(test_stand_is_not_reach_limited);
+  RUN_TEST(test_pipeline_exports_final_leg_targets_for_capture);
   RUN_TEST(test_body_pose_moves_core_over_planted_feet);
   RUN_TEST(test_body_pose_neutral_restores_walk_path);
   RUN_TEST(test_extreme_body_pose_is_reach_limited_not_unreachable);

@@ -200,6 +200,9 @@ void ControllerBridge::reset() {
   tx_direct_layout_streak_ = 0;
   arm_release_pending_ = false;
   arm_release_since_ms_ = 0;
+  capture_start_hold_active_ = false;
+  capture_start_hold_fired_ = false;
+  capture_start_hold_since_ms_ = 0;
   conditioner_.reset();
   for (uint8_t index = 0; index < 4; ++index) conditioned_gimbal_[index] = 0.0f;
   for (uint8_t index = 0; index < 2; ++index) {
@@ -267,13 +270,10 @@ bool ControllerBridge::looksLikeCustomChannelPack(
       ch[CPACK_CH_SWITCHES], CPACK_SWITCH_FIELD_MAX);
   const bool switches_ok = (switches & ~uint16_t(0x001F)) == 0;
 
-  // CH10: 4 buttons (bits 0..3) + SwE tri (bits 4..5) + SwF tri (bits 6..7).
-  // A tri field of 3 is invalid, and nothing above bit 7 may be set.
+  // CH10: a 4-bit button mask plus one of the nine valid SwE/SwF pairs.
   const uint16_t bt = ChannelPack::crsfToDiscrete(
       ch[CPACK_CH_BTN_TOGGLE], CPACK_BTN_TOGGLE_FIELD_MAX);
-  const bool btn_toggle_ok = (bt & ~uint16_t(0x00FF)) == 0 &&
-                             (((bt >> 4) & 0x03) <= 2) &&
-                             (((bt >> 6) & 0x03) <= 2);
+  const bool btn_toggle_ok = (bt / 16u) < 9u;
 
   // CH11: packed nav (Nav1 bits 0..4, Nav2 bits 5..9); nothing above bit 9.
   const uint16_t nav = ChannelPack::crsfToDiscrete(
@@ -612,6 +612,20 @@ bool ControllerBridge::risingEdge(uint8_t slot, bool level, uint32_t now_ms) {
   return fired;
 }
 
+bool ControllerBridge::repeatingTrickTrigger(uint8_t slot, bool level,
+                                              uint32_t now_ms) {
+  if (!level) {
+    edge_prev_[slot] = false;
+    return false;
+  }
+  const uint32_t interval = edge_prev_[slot] ? kTrickRepeatMs
+                                             : kEdgeRefractoryMs;
+  const bool fired = (now_ms - edge_last_ms_[slot]) >= interval;
+  if (fired) edge_last_ms_[slot] = now_ms;
+  edge_prev_[slot] = true;
+  return fired;
+}
+
 void ControllerBridge::updatePoseTrim(uint32_t now_ms) {
   // Operator pose trim (edge-nudged). Reset zeroes it.
   if (risingEdge(kTrimEdgeBase + 4, readBool(cfg_.trim_reset), now_ms)) {
@@ -859,7 +873,24 @@ const ControllerCommand& ControllerBridge::update(
     ++cmd_.capture_toggle_seq;
   }
 
-  // Tricks: first binding whose source rises this frame wins (one per frame).
+  const bool capture_start_hold = readBool(BoolSource::Btn1) &&
+                                  readBool(BoolSource::Btn2);
+  if (!capture_start_hold) {
+    capture_start_hold_active_ = false;
+    capture_start_hold_fired_ = false;
+  } else if (!capture_start_hold_active_) {
+    capture_start_hold_active_ = true;
+    capture_start_hold_since_ms_ = now_ms;
+  } else if (!capture_start_hold_fired_ &&
+             (now_ms - capture_start_hold_since_ms_) >=
+                 kCaptureStartHoldMs) {
+    ++cmd_.capture_start_seq;
+    capture_start_hold_fired_ = true;
+  }
+
+  // Tricks: first binding whose source fires this frame wins (one per frame).
+  // BTN_1 + BTN_2 is reserved for capture start, so neither choreography can
+  // trigger while the operator is holding that combination.
   cmd_.trick = TrickId::None;
   for (uint8_t i = 0; i < kMaxTrickBindings; ++i) {
     const TrickBinding& tb = cfg_.tricks[i];
@@ -868,7 +899,13 @@ const ControllerCommand& ControllerBridge::update(
       edge_prev_[i] = false;
       continue;
     }
-    if (risingEdge(i, readBool(tb.source), now_ms) &&
+    const bool reserved_for_capture = capture_start_hold &&
+        (tb.source == BoolSource::Btn1 || tb.source == BoolSource::Btn2);
+    if (reserved_for_capture) {
+      edge_prev_[i] = true;
+      continue;
+    }
+    if (repeatingTrickTrigger(i, readBool(tb.source), now_ms) &&
         cmd_.trick == TrickId::None) {
       cmd_.trick = tb.trick;
     }

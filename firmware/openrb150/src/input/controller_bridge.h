@@ -255,6 +255,11 @@ constexpr float kTrimStepRad = 0.0174533f;  // 1 deg / press
 constexpr float kTrimMaxRad = poselim::kMaxRotRad;
 // Minimum gap between successive trick / trim edge fires (debounce).
 constexpr uint32_t kEdgeRefractoryMs = 150;
+// Held choreography inputs retrigger after this interval. It leaves the
+// shortest one-shot programs time to complete before starting again.
+constexpr uint32_t kTrickRepeatMs = 2000;
+// Holding BTN_1 and BTN_2 together for this interval starts an SD capture.
+constexpr uint32_t kCaptureStartHoldMs = 3000;
 // No fresh frame within this window -> failsafe hold.
 constexpr uint32_t kDefaultFailsafeMs = 250;
 // SW_A must remain released for this long before disarming. Kill and link loss
@@ -311,6 +316,9 @@ struct ControllerCommand {
   // Bumped once per BTN_4 press. i2cTask compares the sequence to toggle
   // capture without losing an edge across task-rate boundaries.
   uint32_t capture_toggle_seq = 0;
+  // Bumped once after BTN_1 and BTN_2 have been held together for three
+  // seconds. Unlike capture_toggle_seq, this request only starts a capture.
+  uint32_t capture_start_seq = 0;
   // Feature toggle request levels (switch state, applied by the control layer
   // subject to availability).
   bool feat_foot_contact = false;
@@ -411,6 +419,9 @@ class ControllerBridge {
 
   // Rising-edge detector with refractory debounce, keyed by a small slot index.
   bool risingEdge(uint8_t slot, bool level, uint32_t now_ms);
+  // An edge detector for tricks that emits an initial press and repeats while
+  // the same control remains held.
+  bool repeatingTrickTrigger(uint8_t slot, bool level, uint32_t now_ms);
 
   // Apply the NAV1 cluster: gait-parameter editing while the tune mode is
   // engaged, otherwise the persistent operator pose trim.
@@ -447,6 +458,9 @@ class ControllerBridge {
 
   bool arm_release_pending_ = false;
   uint32_t arm_release_since_ms_ = 0;
+  bool capture_start_hold_active_ = false;
+  bool capture_start_hold_fired_ = false;
+  uint32_t capture_start_hold_since_ms_ = 0;
 
   // NAV1-edited gait shape, as fractions of the safe range. Index order is
   // GaitTuneParam (step height, stride, duty). Survives mode changes and link

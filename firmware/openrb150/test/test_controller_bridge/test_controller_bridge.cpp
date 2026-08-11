@@ -334,6 +334,52 @@ void test_btn4_each_press_toggles_capture_without_a_trick() {
                           static_cast<uint8_t>(bridge.command().trick));
 }
 
+void test_channelpack_preserves_simultaneous_button_presses() {
+  ChannelPackInputs_t input = makeNeutral();
+  input.buttons[0] = true;
+  input.buttons[1] = true;
+  input.buttons[3] = true;
+  input.toggles[0] = 2;
+  input.toggles[1] = 1;
+  uint16_t channels[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&input, channels);
+
+  ChannelPackInputs_t output = makeNeutral();
+  ChannelPack::unpackChannels(channels, &output);
+  TEST_ASSERT_TRUE(output.buttons[0]);
+  TEST_ASSERT_TRUE(output.buttons[1]);
+  TEST_ASSERT_FALSE(output.buttons[2]);
+  TEST_ASSERT_TRUE(output.buttons[3]);
+  TEST_ASSERT_EQUAL_UINT8(2, output.toggles[0]);
+  TEST_ASSERT_EQUAL_UINT8(1, output.toggles[1]);
+}
+
+void test_btn1_btn2_hold_starts_capture_without_a_trick() {
+  ControllerBridge bridge;
+  ChannelPackInputs_t input = makeNeutral();
+  uint32_t now_ms = 100;
+  feed(bridge, input, now_ms);
+  const uint32_t initial_sequence = bridge.command().capture_start_seq;
+
+  input.buttons[0] = true;
+  input.buttons[1] = true;
+  feed(bridge, input, now_ms += 10);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(TrickId::None),
+                          static_cast<uint8_t>(bridge.command().trick));
+  feed(bridge, input, now_ms += kCaptureStartHoldMs - 1);
+  TEST_ASSERT_EQUAL_UINT32(initial_sequence,
+                           bridge.command().capture_start_seq);
+  feed(bridge, input, now_ms += 1);
+  TEST_ASSERT_EQUAL_UINT32(initial_sequence + 1,
+                           bridge.command().capture_start_seq);
+
+  feed(bridge, input, now_ms += kTrickRepeatMs * 2);
+  TEST_ASSERT_EQUAL_UINT32(initial_sequence + 1,
+                           bridge.command().capture_start_seq);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(TrickId::None),
+                          static_cast<uint8_t>(bridge.command().trick));
+}
+
 // --- gait-tune editor (SW_G enters, NAV1 edits) -----------------------------
 
 // Press a boolean input for one frame and release it on the next, advancing
@@ -480,21 +526,23 @@ void test_host_authority_switch() {
 
 // --- tricks ----------------------------------------------------------------
 
-void test_trick_fires_once_per_press() {
+void test_trick_repeats_while_button_is_held() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
   in.buttons[0] = true;  // Btn1 -> StandUp
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::StandUp),
                          static_cast<uint8_t>(feed(b, in, 100).trick));
-  // Held: no repeat.
+  // Held: no repeat before the cadence elapses.
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::None),
-                         static_cast<uint8_t>(feed(b, in, 150).trick));
+                         static_cast<uint8_t>(feed(b, in, 100 + kTrickRepeatMs - 1).trick));
+  TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::StandUp),
+                         static_cast<uint8_t>(feed(b, in, 101 + kTrickRepeatMs).trick));
   // Release, then press again past the refractory window: fires again.
   in.buttons[0] = false;
-  feed(b, in, 200);
+  feed(b, in, 101 + kTrickRepeatMs + 10);
   in.buttons[0] = true;
   TEST_ASSERT_EQUAL_UINT(static_cast<uint8_t>(TrickId::StandUp),
-                         static_cast<uint8_t>(feed(b, in, 400).trick));
+                         static_cast<uint8_t>(feed(b, in, 101 + kTrickRepeatMs + kEdgeRefractoryMs + 10).trick));
 }
 
 void test_trick_refractory_debounce() {
@@ -1056,13 +1104,15 @@ int main(int, char**) {
   RUN_TEST(test_shape_params_from_pots);
   RUN_TEST(test_encoders_no_longer_drive_gait_shape);
   RUN_TEST(test_btn4_each_press_toggles_capture_without_a_trick);
+  RUN_TEST(test_channelpack_preserves_simultaneous_button_presses);
+  RUN_TEST(test_btn1_btn2_hold_starts_capture_without_a_trick);
   RUN_TEST(test_gait_tune_toggle_switches_nav1_from_trim_to_parameters);
   RUN_TEST(test_gait_tune_adjusts_selected_parameter_and_clamps);
   RUN_TEST(test_gait_tune_save_bumps_sequence_once_per_press);
   RUN_TEST(test_gait_tune_defaults_track_config_until_editor_opens);
   RUN_TEST(test_feature_toggle_levels);
   RUN_TEST(test_host_authority_switch);
-  RUN_TEST(test_trick_fires_once_per_press);
+  RUN_TEST(test_trick_repeats_while_button_is_held);
   RUN_TEST(test_trick_refractory_debounce);
   RUN_TEST(test_nav_cluster_trick_binding);
   RUN_TEST(test_pose_trim_nudge_and_reset);

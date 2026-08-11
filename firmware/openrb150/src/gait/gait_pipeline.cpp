@@ -209,6 +209,12 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
     if (!ik.reachable) {
       out.any_unreachable = true;
     }
+    PipelineLegTarget& captured_leg = out.legs[leg];
+    captured_leg.foot_x_mm = static_cast<int16_t>(lroundf(f.x_mm));
+    captured_leg.foot_y_mm = static_cast<int16_t>(lroundf(f.y_mm));
+    captured_leg.foot_z_mm = static_cast<int16_t>(lroundf(f.z_mm));
+    captured_leg.flags = f.swing ? kPipelineLegFlagSwing : 0;
+    if (ik.reachable) captured_leg.flags |= kPipelineLegFlagReachable;
     // JointRole order: Coxa=0, Femur=1, Tibia=2 (config_schema.h), matching the
     // IkResult fields so the angle index lines up with the joint index.
     const float angles[config::kJointsPerLeg] = {ik.coxa, ik.femur, ik.tibia};
@@ -247,6 +253,7 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
       pj.leg = leg;
       pj.joint = j;
       pj.clamped = jc.clamped_low || jc.clamped_high;
+      if (pj.clamped) captured_leg.flags |= kPipelineLegFlagClamped;
     }
   }
 }

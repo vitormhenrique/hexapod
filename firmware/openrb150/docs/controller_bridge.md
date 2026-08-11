@@ -169,17 +169,20 @@ gimbal steers, translates, or tilts the body — body motion needs no dedicated
 gait. Stand and Sit remain explicit robot-state/choreography actions rather
 than gait-family choices.
 
-### Push buttons — CH10 compact state (trick triggers, rising edge)
+### Push buttons — CH10 compact state (trick triggers and capture)
 
-Buttons fire a one-shot trick on the **rising edge** (debounced with a 150 ms
-refractory window). The choreography itself lives in the control-task trick
-engine; the bridge only emits the trigger.
+Buttons trigger immediately with a 150 ms refractory window. A held trick
+button emits the same trigger every 2 seconds, giving the active choreography
+time to finish before it repeats. Holding BTN 1 and BTN 2 together for 3
+seconds starts an OpenLog capture and suppresses both individual trick
+triggers for the duration of the combination.
 
 | Button | Trick |
 |--------|-------|
 | BTN 1 | **Stand up** |
 | BTN 2 | **Sit down** |
 | BTN 3 | **Wave** |
+| BTN 1 + BTN 2 held 3 seconds | **Start OpenLog capture** |
 | BTN 4 press | **Start OpenLog capture; press again to stop** |
 
 ### 5-way nav clusters — CH11 compact state
