@@ -97,6 +97,10 @@ def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
         def read_config(self):
             return self.config
 
+        def set_maint_control_mode(self, mode):
+            self.calls.append(("mode", mode))
+            return api.MaintControlModeResult(api.MAINT_TARGET_OK, mode, 1)
+
         def dxl_torque(self, on):
             self.calls.append(("torque", on))
             return api.DxlJobResult(
@@ -120,7 +124,11 @@ def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
     with qtbot.waitSignal(service.joint_target_result, timeout=2000):
         service.center_all_joints()
 
-    assert client.calls == [("torque", True), ("targets",)]
+    assert client.calls == [
+        ("mode", api.MAINT_CONTROL_JOINT_TARGETS),
+        ("torque", True),
+        ("targets",),
+    ]
     assert torque_states == [(servo.id, True, True) for servo in client.config.servos]
     assert client.angles is not None and len(client.angles) == 18
     servo_map = cfg.ServoMap(client.config)

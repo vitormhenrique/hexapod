@@ -5416,3 +5416,6 @@ class JointMatrixPage(BasePage):
             )
             cell.apply.setEnabled(bench_ready)
             cell.release.setEnabled(bench_ready)
+
+# Fixture calibration wizard (separate module keeps this file smaller).
+from .servo_calibration import ServoCalibrationPage  # noqa: E402

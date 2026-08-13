@@ -24,6 +24,7 @@ from ui.pages import (
     PassivePosePage,
     PlotWorkbenchPage,
     RcTroubleshootingPage,
+    ServoCalibrationPage,
     ServoConfigPage,
     ServoTuningPage,
     SensorDashboardPage,
@@ -59,6 +60,7 @@ class MainWindow(QMainWindow):
         self.nav.add_section("Tune")
         self.nav.add_item("leg_lab", "Leg Lab")
         self.nav.add_item("joint_matrix", "Joint Matrix")
+        self.nav.add_item("servo_calibration", "Servo Calibration")
         self.nav.add_item("servo_config", "Servo Config")
         self.nav.add_item("servo_tuning", "Servo && DXL")
         self.nav.add_section("Analyze")
@@ -103,6 +105,7 @@ class MainWindow(QMainWindow):
             ("passive_pose", PassivePosePage(self.service)),
             ("leg_lab", LegLabPage(self.service)),
             ("joint_matrix", JointMatrixPage(self.service)),
+            ("servo_calibration", ServoCalibrationPage(self.service)),
             ("servo_config", ServoConfigPage(self.service)),
             ("servo_tuning", ServoTuningPage(self.service)),
             ("plots", PlotWorkbenchPage(self.service)),
@@ -192,6 +195,7 @@ class MainWindow(QMainWindow):
             "passive_pose",
             "leg_lab",
             "joint_matrix",
+            "servo_calibration",
             "servo_config",
             "servo_tuning",
             "sensors",

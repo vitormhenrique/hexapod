@@ -943,6 +943,141 @@ def angle_to_tick(servo: ServoConfig, angle_rad: float) -> JointCommand:
     return out
 
 
+# Fixture poses used by the companion servo calibration wizard (physical
+# servo degrees where 180 is mechanical center / URDF-relative zero).
+FIXTURE_SERVO_DEGREES = (180, 135, 225)
+
+
+def relative_deg_from_servo_deg(servo_deg: float) -> float:
+    """Physical servo degrees (180 = center) -> URDF-zero-relative degrees."""
+    return float(servo_deg) - 180.0
+
+
+def identity_tick_for_servo_deg(servo_deg: float) -> int:
+    """Tick that commands ``servo_deg`` under sign=+1, trim=0 (no clamp)."""
+    relative_deg = relative_deg_from_servo_deg(servo_deg)
+    return SERVO_CENTER_TICK + _lround(relative_deg * TICKS_PER_DEG)
+
+
+def identity_angle_cdeg_for_tick(tick: int) -> int:
+    """Relative centidegrees for a raw tick under the identity servo map."""
+    relative_deg = (float(int(tick) - SERVO_CENTER_TICK)) / TICKS_PER_DEG
+    return _lround(relative_deg * 100.0)
+
+
+@dataclass
+class ServoCalibrationFit:
+    """Result of fitting sign/trim from fixture servo-degree -> tick samples."""
+
+    sign: int
+    trim_ticks: int
+    residual_ticks_rms: float
+    samples: list[tuple[float, int]] = field(default_factory=list)
+    ok: bool = True
+    detail: str = ""
+
+
+def fit_servo_sign_trim(
+    samples: list[tuple[float, int]],
+) -> ServoCalibrationFit:
+    """Fit ``sign`` (+1/-1) and ``trim_ticks`` from (servo_deg, tick) samples.
+
+    Model (mirrors ``angle_to_tick`` without travel clamps)::
+
+        tick = 2048 + trim + sign * round((servo_deg - 180) * ticks/deg)
+
+    Requires at least the center pose (180°) plus one non-zero fixture angle so
+    the direction of motion can resolve the sign. Residuals are reported in
+    ticks RMS against the fitted model.
+    """
+    cleaned: list[tuple[float, int]] = []
+    for servo_deg, tick in samples:
+        t = int(tick)
+        if t < 0 or t > SERVO_MAX_TICK:
+            return ServoCalibrationFit(
+                sign=1,
+                trim_ticks=0,
+                residual_ticks_rms=0.0,
+                ok=False,
+                detail=f"tick {t} outside 0..{SERVO_MAX_TICK}",
+            )
+        cleaned.append((float(servo_deg), t))
+    if len(cleaned) < 2:
+        return ServoCalibrationFit(
+            sign=1,
+            trim_ticks=0,
+            residual_ticks_rms=0.0,
+            ok=False,
+            detail="need at least two fixture samples",
+        )
+
+    # Prefer the 180° sample for trim; otherwise use the mean residual at q=0
+    # from a provisional +1 fit.
+    center_ticks = [t for d, t in cleaned if abs(d - 180.0) < 0.5]
+    if center_ticks:
+        trim = int(round(sum(center_ticks) / len(center_ticks))) - SERVO_CENTER_TICK
+    else:
+        trim = 0
+
+    # Resolve sign from the non-zero pose with the largest |relative| command.
+    signed_votes = [
+        (relative_deg_from_servo_deg(d), t) for d, t in cleaned if abs(d - 180.0) >= 0.5
+    ]
+    if not signed_votes:
+        return ServoCalibrationFit(
+            sign=1,
+            trim_ticks=trim,
+            residual_ticks_rms=0.0,
+            samples=cleaned,
+            ok=False,
+            detail="need a non-center fixture (135 or 225) to resolve sign",
+        )
+    signed_votes.sort(key=lambda item: abs(item[0]), reverse=True)
+    rel_deg, tick = signed_votes[0]
+    expected_offset = _lround(rel_deg * TICKS_PER_DEG)
+    if expected_offset == 0:
+        return ServoCalibrationFit(
+            sign=1,
+            trim_ticks=trim,
+            residual_ticks_rms=0.0,
+            samples=cleaned,
+            ok=False,
+            detail="fixture offset rounded to zero ticks",
+        )
+    observed = tick - SERVO_CENTER_TICK - trim
+    # Pick the sign that matches the observed direction; default +1 on ties.
+    sign = 1 if observed * expected_offset >= 0 else -1
+
+    # Refine trim with all samples under the chosen sign (median of
+    # tick - 2048 - sign*offset) so a noisy center reading cannot dominate.
+    trims = []
+    for servo_deg, t in cleaned:
+        offset = _lround(relative_deg_from_servo_deg(servo_deg) * TICKS_PER_DEG)
+        trims.append(t - SERVO_CENTER_TICK - sign * offset)
+    trims.sort()
+    mid = len(trims) // 2
+    if len(trims) % 2:
+        trim = int(trims[mid])
+    else:
+        trim = int(round(0.5 * (trims[mid - 1] + trims[mid])))
+
+    # Residual RMS.
+    err_sq = 0.0
+    for servo_deg, t in cleaned:
+        offset = _lround(relative_deg_from_servo_deg(servo_deg) * TICKS_PER_DEG)
+        pred = SERVO_CENTER_TICK + trim + sign * offset
+        err_sq += float(t - pred) ** 2
+    rms = math.sqrt(err_sq / len(cleaned))
+    return ServoCalibrationFit(
+        sign=sign,
+        trim_ticks=trim,
+        residual_ticks_rms=rms,
+        samples=cleaned,
+        ok=True,
+        detail=f"sign={sign:+d} trim={trim} rms={rms:.2f} ticks",
+    )
+
+
 class ServoMap:
     """Host-side view of the config servo map (mirror dxl::ServoMap)."""
 

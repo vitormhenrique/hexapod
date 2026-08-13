@@ -1474,6 +1474,15 @@ class ConnectionService(QObject):
                 self.event.emit("error", "center all: failed to read active config")
                 self.joint_target_result.emit(None)
                 return
+            # A previous Gait Lab session can leave the maintenance controller
+            # in GaitPipeline mode, where joint targets are silently ignored.
+            mode = client.set_maint_control_mode(api.MAINT_CONTROL_JOINT_TARGETS)
+            if mode is None or not mode.ok:
+                self.event.emit(
+                    "error", "center all: failed to select joint-target mode"
+                )
+                self.joint_target_result.emit(None)
+                return
             servo_map = cfg.ServoMap(robot_config)
             angles_cdeg: list[int] = []
             for leg in range(cfg.NUM_LEGS):
@@ -1509,6 +1518,108 @@ class ConnectionService(QObject):
             self.joint_target_result.emit(res)
 
         threading.Thread(target=worker, name="hexapod-center-all", daemon=True).start()
+
+    def set_joint_targets_raw_ticks(
+        self,
+        targets: list[tuple[int, int, int]],
+        robot_config=None,
+        ensure_setup: bool = True,
+    ) -> None:
+        """Command joints to exact physical raw ticks.
+
+        The firmware maps ``SET_JOINT_TARGET`` angles through the CONFIGURED
+        servo map (sign/trim), so each requested tick is inverted through the
+        same map (``tick_to_angle``) before sending -- the round trip lands on
+        the requested physical tick regardless of the persisted calibration.
+        ``robot_config`` avoids a slow windowed config read when the caller
+        already holds the active config. ``ensure_setup=False`` skips the
+        control-mode/torque handshake for fast nudges after an initial
+        commanded pose. Each entry is ``(leg, joint, tick)``. Emits
+        ``joint_target_result``.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("calib ticks: not connected")
+            self.joint_target_result.emit(None)
+            return
+
+        def worker() -> None:
+            config = robot_config
+            if config is None:
+                config = client.read_config()
+                if config is None:
+                    self.error.emit("calib ticks: failed to read active config")
+                    self.joint_target_result.emit(None)
+                    return
+            servo_map = cfg.ServoMap(config)
+            if ensure_setup:
+                # Joint-target control mode so the gait pipeline cannot
+                # overwrite, then torque on (seeds goals from present pose).
+                mode = client.set_maint_control_mode(
+                    api.MAINT_CONTROL_JOINT_TARGETS
+                )
+                if mode is None or not mode.ok:
+                    self.error.emit(
+                        "calib ticks: failed to select joint-target mode"
+                    )
+                    self.joint_target_result.emit(None)
+                    return
+                torque = client.dxl_torque(True)
+                torque_ok = (
+                    torque is not None
+                    and torque.done
+                    and torque.code == api.DXL_CODE_OK
+                )
+                if not torque_ok:
+                    self.error.emit("calib ticks: failed to enable torque")
+                    self.joint_target_result.emit(None)
+                    return
+            last = None
+            for leg, joint, tick in targets:
+                t = max(0, min(cfg.SERVO_MAX_TICK, int(tick)))
+                servo = servo_map.servo_for(leg, joint)
+                if servo is None:
+                    self.error.emit(
+                        f"calib ticks: leg {leg + 1} joint {joint} unmapped"
+                    )
+                    self.joint_target_result.emit(None)
+                    return
+                angle_cdeg = round(
+                    cfg.tick_to_angle(servo, t) * cfg.RAD_TO_DEG * 100.0
+                )
+                last = client.set_joint_target(leg, joint, angle_cdeg)
+                if last is None or not last.ok:
+                    self.error.emit(
+                        f"calib ticks: leg {leg + 1} joint {joint} rejected"
+                    )
+                    self.joint_target_result.emit(last)
+                    return
+            self.event.emit(
+                "commit", f"calib ticks: commanded {len(targets)} joint(s)"
+            )
+            self.joint_target_result.emit(last)
+
+        threading.Thread(
+            target=worker, name="hexapod-calib-ticks", daemon=True
+        ).start()
+
+    def set_leg_fixture_pose_raw(
+        self,
+        leg: int,
+        coxa_tick: int,
+        femur_tick: int,
+        tibia_tick: int,
+        robot_config=None,
+    ) -> None:
+        """Command one leg's three joints to exact physical raw ticks."""
+        self.set_joint_targets_raw_ticks(
+            [
+                (leg, 0, coxa_tick),
+                (leg, 1, femur_tick),
+                (leg, 2, tibia_tick),
+            ],
+            robot_config=robot_config,
+        )
 
     def dxl_get_param(self, servo_id: int, param: int) -> None:
         self._run_dxl("get_param", lambda c: c.dxl_get_param(servo_id, param))
