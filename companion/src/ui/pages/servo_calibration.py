@@ -1,15 +1,14 @@
 """Leg-by-leg fixture calibration wizard (physical 180° / 135° / 225°).
 
-Workflow:
+Linear Next/Previous workflow (18 poses = 6 legs × 3 fixture angles):
   1. Enter maintenance + scan.
-  2. Center ALL servos at raw tick 2048 (physical 180°) so every horn starts
-     from a known pose.
-  3. Per leg, per fixture angle (180/135/225): the active leg's three joints
-     are commanded to the raw-tick guess; the operator edits each tick freely
-     and presses that joint's Send button to apply it (editing never moves a
-     servo) until the fixture seats.
-  4. Capture corrected ticks; after 180/135/225 are captured, fit sign + trim
-     for coxa/femur/tibia and advance to the next leg.
+  2. Center ALL servos at raw tick 2048 (physical 180°).
+  3. One primary button drives the walk-through:
+       "Move leg to pose"   commands the shown ticks for the active pose;
+       "Capture & Next"     stores the corrected ticks and advances.
+     Editing a tick never moves a servo; per-joint Send applies fine
+     adjustments. "Previous pose" steps back at any time.
+  4. Completing a leg's three fixtures fits sign + trim for its servos.
   5. When legs are done, stage + validate + commit the config.
 
 Raw ticks are inverted through the LIVE servo map before sending, because the
@@ -173,6 +172,9 @@ class ServoCalibrationPage(BasePage):
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(10)
+        self.step_lbl = QLabel("")
+        self.step_lbl.setObjectName("MonoLabel")
+        form.addRow("Pose", self.step_lbl)
         self.leg_lbl = QLabel("")
         self.leg_lbl.setObjectName("MonoLabel")
         form.addRow("Active leg", self.leg_lbl)
@@ -192,10 +194,11 @@ class ServoCalibrationPage(BasePage):
         box = QGroupBox("Active leg joint ticks")
         lay = QVBoxLayout(box)
         hint = QLabel(
-            "Raw-tick guesses for the fixture angle are pre-filled. Command "
-            "pose moves the leg there. Editing a tick NEVER moves the servo: "
-            "type or step freely, then press that joint's Send (or Command "
-            "pose again) to apply. Capture when the fixture seats."
+            "Raw-tick guesses for the fixture angle are pre-filled. The big "
+            "button below always shows the next action: first it moves the "
+            "leg to the shown ticks, then it captures and advances. Editing "
+            "a tick NEVER moves the servo \u2014 press that joint's Send to "
+            "apply a fine adjustment."
         )
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color: {DRACULA.comment};")
@@ -245,19 +248,21 @@ class ServoCalibrationPage(BasePage):
         lay.addLayout(grid)
 
         row = QHBoxLayout()
-        self.command_btn = QPushButton("2. Command pose")
-        self.command_btn.setProperty("accent", True)
-        self.command_btn.setToolTip(
-            "Send the three corrected ticks for this leg (exact physical ticks)."
+        self.prev_btn = QPushButton("\u25c0 Previous pose")
+        self.prev_btn.setToolTip(
+            "Step back one pose (does not move the robot until you press the "
+            "primary button)."
         )
-        self.command_btn.clicked.connect(self._command_pose)
+        self.prev_btn.clicked.connect(self._go_previous)
+        self.next_btn = QPushButton("Move leg to pose")
+        self.next_btn.setProperty("accent", True)
+        self.next_btn.setMinimumWidth(220)
+        self.next_btn.clicked.connect(self._primary_action)
         self.reset_guess_btn = QPushButton("Reset to guess")
         self.reset_guess_btn.clicked.connect(self._reset_to_guess)
-        self.capture_btn = QPushButton("3. Capture fixture")
-        self.capture_btn.clicked.connect(self._capture_fixture)
-        row.addWidget(self.command_btn)
+        row.addWidget(self.prev_btn)
+        row.addWidget(self.next_btn)
         row.addWidget(self.reset_guess_btn)
-        row.addWidget(self.capture_btn)
         row.addStretch(1)
         lay.addLayout(row)
 
@@ -283,9 +288,7 @@ class ServoCalibrationPage(BasePage):
     def _actions_box(self) -> QGroupBox:
         box = QGroupBox("Session")
         lay = QHBoxLayout(box)
-        self.prev_fixture_btn = QPushButton("Previous fixture")
-        self.prev_fixture_btn.clicked.connect(self._prev_fixture)
-        self.skip_leg_btn = QPushButton("Skip leg")
+        self.skip_leg_btn = QPushButton("Skip leg \u25b6")
         self.skip_leg_btn.setToolTip(
             "Advance without fitting this leg (keeps previous config values)."
         )
@@ -298,7 +301,6 @@ class ServoCalibrationPage(BasePage):
         self.apply_btn.clicked.connect(self._apply_and_commit)
         self.reset_session_btn = QPushButton("Reset session")
         self.reset_session_btn.clicked.connect(self._reset_session)
-        lay.addWidget(self.prev_fixture_btn)
         lay.addWidget(self.skip_leg_btn)
         lay.addWidget(self.apply_btn)
         lay.addWidget(self.reset_session_btn)
@@ -316,12 +318,22 @@ class ServoCalibrationPage(BasePage):
     def _fixture_deg(self) -> int:
         return int(self.FIXTURES[self._fixture_index])
 
+    @property
+    def _step(self) -> int:
+        """Linear pose index 0..17 (leg-major, fixture-minor)."""
+        return self._leg * len(self.FIXTURES) + self._fixture_index
+
+    @property
+    def _total_steps(self) -> int:
+        return self._cfg.NUM_LEGS * len(self.FIXTURES)
+
     def _guess_tick(self, _joint: int) -> int:
         return self._cfg.identity_tick_for_servo_deg(self._fixture_deg)
 
     def _refresh_pose_ui(self) -> None:
         leg = self._leg
         name = self.LEG_NAMES[leg] if leg < len(self.LEG_NAMES) else ""
+        self.step_lbl.setText(f"{self._step + 1} / {self._total_steps}")
         self.leg_lbl.setText(f"Leg {leg + 1} — {name}  ({leg + 1}/6)")
         self.fixture_lbl.setText(
             f"{self._fixture_deg}\u00b0  "
@@ -352,11 +364,15 @@ class ServoCalibrationPage(BasePage):
                 "Center all servos first (step 1), then seat the Leg "
                 f"{leg + 1} fixture at {self._fixture_deg}\u00b0."
             )
+        elif not self._pose_commanded:
+            self.step_hint.setText(
+                f"Press 'Move leg to pose' to put Leg {leg + 1} at "
+                f"{self._fixture_deg}\u00b0, then seat the fixture."
+            )
         else:
             self.step_hint.setText(
-                f"Seat the Leg {leg + 1} fixture at {self._fixture_deg}\u00b0, "
-                "Command pose, adjust ticks, press Send per joint, then "
-                "Capture fixture."
+                "Adjust ticks (Send per joint) until the fixture seats, then "
+                "press 'Capture & Next'."
             )
 
     def _update_present_label(self, joint: int) -> None:
@@ -414,6 +430,13 @@ class ServoCalibrationPage(BasePage):
             robot_config=self._robot_config,
             ensure_setup=False,
         )
+
+    def _primary_action(self) -> None:
+        """One button drives the walk-through: move to pose, then capture."""
+        if not self._pose_commanded:
+            self._command_pose()
+        else:
+            self._capture_fixture()
 
     def _command_pose(self) -> None:
         if not self._bench_ready():
@@ -495,14 +518,22 @@ class ServoCalibrationPage(BasePage):
         self._refresh_pose_ui()
         self._apply_gates()
 
-    def _prev_fixture(self) -> None:
+    def _go_previous(self) -> None:
         if self._fixture_index > 0:
             self._fixture_index -= 1
         elif self._leg > 0:
             self._leg -= 1
             self._fixture_index = len(self.FIXTURES) - 1
+        else:
+            self.pose_status.setText("already at the first pose")
+            return
         self._pose_commanded = False
+        self.pose_status.setText(
+            f"back to pose {self._step + 1}/{self._total_steps} \u2014 press "
+            "'Move leg to pose' to re-command it"
+        )
         self._refresh_pose_ui()
+        self._apply_gates()
 
     def _skip_leg(self) -> None:
         if self._leg + 1 < self._cfg.NUM_LEGS:
@@ -728,13 +759,21 @@ class ServoCalibrationPage(BasePage):
             if self._centered
             else "1. Center all servos (180\u00b0)"
         )
-        self.command_btn.setEnabled(ready)
-        self.capture_btn.setEnabled(ready and self._pose_commanded)
+        # Primary button: one action at a time, label says which.
+        self.next_btn.setEnabled(ready)
+        if not self._centered:
+            self.next_btn.setText("Center all first")
+        elif not self._pose_commanded:
+            self.next_btn.setText("Move leg to pose")
+        else:
+            self.next_btn.setText("Capture & Next \u25b6")
+        self.prev_btn.setEnabled(
+            not self._busy and self._centered and self._step > 0
+        )
         self.reset_guess_btn.setEnabled(ready)
         for btn in self._send_btns.values():
             btn.setEnabled(ready and self._pose_commanded)
-        self.prev_fixture_btn.setEnabled(not self._busy)
-        self.skip_leg_btn.setEnabled(not self._busy)
+        self.skip_leg_btn.setEnabled(not self._busy and self._centered)
         self.reset_session_btn.setEnabled(not self._busy)
         self.apply_btn.setEnabled(
             self._connected
