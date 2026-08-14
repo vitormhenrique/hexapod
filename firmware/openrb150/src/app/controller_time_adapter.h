@@ -2,9 +2,9 @@
 
 // Target-only conversion from the FreeRTOS scheduler clock to the portable
 // ControllerTime contract. ControllerCore includes controller_time.h directly;
-// only the ATSAMD21 task adapter includes this header.
+// only the on-target task adapter includes this header.
 
-#include <FreeRTOS_SAMD21.h>
+#include "rtos.h"
 
 #include "../controller/controller_time.h"
 

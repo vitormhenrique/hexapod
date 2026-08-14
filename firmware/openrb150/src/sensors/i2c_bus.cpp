@@ -1,6 +1,8 @@
 #include "i2c_bus.h"
 
+#if defined(ARDUINO_ARCH_SAMD)
 #include <wiring_private.h>
+#endif
 
 namespace i2c {
 namespace {
@@ -11,6 +13,8 @@ constexpr uint8_t kErrorBus = 4;
 constexpr uint8_t kErrorTimeout = 5;
 
 }  // namespace
+
+#if defined(ARDUINO_ARCH_SAMD)
 
 bool I2cBus::waitForSync(uint32_t mask) {
   const uint32_t started = micros();
@@ -116,12 +120,6 @@ bool I2cBus::recover() {
   return initializeHardware();
 }
 
-bool I2cBus::fail(uint8_t error, bool recover_bus) {
-  stats_.last_error = error;
-  if (recover_bus) (void)recover();
-  return false;
-}
-
 bool I2cBus::start(uint8_t addr, bool read_operation) {
   if (!ready_ && !recover()) return false;
   const uint8_t state = SERCOM0->I2CM.STATUS.bit.BUSSTATE;
@@ -179,6 +177,74 @@ bool I2cBus::read(uint8_t addr, uint8_t* data, uint8_t len, bool send_stop) {
   }
   SERCOM0->I2CM.CTRLB.bit.ACKACT = 1;
   return !send_stop || sendStop() || fail(kErrorTimeout, true);
+}
+
+#else  // !ARDUINO_ARCH_SAMD: generic Arduino Wire implementation (Teensy 4.x)
+
+// The Teensy 4.x Wire driver performs bounded synchronous transfers, so the
+// register-level SERCOM timeout machinery above is unnecessary. The same
+// public contract holds: no call blocks past the driver's internal bound, and
+// errors surface through stats_/return values instead of hanging the task.
+
+bool I2cBus::initializeHardware() {
+  Wire.begin();
+  Wire.setClock(clock_hz_);
+  ready_ = true;
+  stats_.last_error = 0;
+  return true;
+}
+
+bool I2cBus::begin(uint32_t clock_hz) {
+  clock_hz_ = clock_hz == 0 ? 100000 : clock_hz;
+  ready_ = false;
+  return initializeHardware();
+}
+
+bool I2cBus::recover() {
+  ready_ = false;
+  Wire.end();
+  ++stats_.recoveries;
+  return initializeHardware();
+}
+
+bool I2cBus::write(uint8_t addr, const uint8_t* data, uint8_t len,
+                   bool send_stop) {
+  if (len > 0 && data == nullptr) return false;
+  if (!ready_ && !recover()) return false;
+  Wire.beginTransmission(addr);
+  if (len > 0) Wire.write(data, len);
+  const uint8_t err = Wire.endTransmission(send_stop);
+  if (err == 0) return true;
+  // Wire error codes: 2 = address NACK, 3 = data NACK, 4/5 = bus/timeout.
+  if (err == 2) return fail(kErrorAddressNack, false);
+  if (err == 3) return fail(kErrorDataNack, false);
+  if (err == 5) {
+    ++stats_.timeouts;
+    return fail(kErrorTimeout, true);
+  }
+  return fail(kErrorBus, true);
+}
+
+bool I2cBus::read(uint8_t addr, uint8_t* data, uint8_t len, bool send_stop) {
+  if (data == nullptr || len == 0) return false;
+  if (!ready_ && !recover()) return false;
+  const uint8_t received = Wire.requestFrom(
+      addr, len, static_cast<uint8_t>(send_stop ? 1 : 0));
+  if (received != len) return fail(kErrorAddressNack, false);
+  for (uint8_t index = 0; index < len; ++index) {
+    const int value = Wire.read();
+    if (value < 0) return fail(kErrorBus, false);
+    data[index] = static_cast<uint8_t>(value);
+  }
+  return true;
+}
+
+#endif  // ARDUINO_ARCH_SAMD
+
+bool I2cBus::fail(uint8_t error, bool recover_bus) {
+  stats_.last_error = error;
+  if (recover_bus) (void)recover();
+  return false;
 }
 
 bool I2cBus::writeRead(uint8_t addr, const uint8_t* write_data,

@@ -12,7 +12,8 @@ namespace {
 constexpr float kProtoTryOrder[] = {1.0f, 2.0f};
 }  // namespace
 
-DxlBus::DxlBus(HardwareSerial& port) : dxl_(port, /*dir_pin=*/-1) {}
+DxlBus::DxlBus(HardwareSerial& port, int16_t dir_pin)
+    : dxl_(port, dir_pin) {}
 
 void DxlBus::begin(uint32_t baud) {
   baud_ = baud;

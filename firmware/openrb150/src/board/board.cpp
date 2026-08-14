@@ -1,10 +1,12 @@
 #include "board.h"
 
+#if defined(ARDUINO_ARCH_SAMD)
 #include <wiring_private.h>
+#endif
 
 #include "battery_calc.h"
 #include "../hil/output_guard.h"
-#include "openrb150_pins.h"
+#include "board_pins.h"
 
 namespace board {
 namespace {
@@ -13,6 +15,7 @@ bool g_userLedOn = false;
 bool g_dxlPowerOn = false;
 uint32_t g_dxlPowerTransitions = 0;
 
+#if defined(ARDUINO_ARCH_SAMD)
 // The Arduino SAMD core's analogRead() waits indefinitely for ADC register
 // synchronization and conversion completion. A stalled ADC must not prevent
 // the control task from yielding to the USB API, so every wait is bounded.
@@ -36,6 +39,7 @@ void disableAdc() {
   ADC->CTRLA.bit.ENABLE = 0;
   (void)waitForAdcSync();
 }
+#endif  // ARDUINO_ARCH_SAMD
 
 }  // namespace
 
@@ -57,10 +61,18 @@ void init() {
   g_userLedOn = false;
 
   // --- Battery ADC. -------------------------------------------------------
+#if defined(ARDUINO_ARCH_SAMD)
   // Conversion setup happens in the bounded reader below. Do not call the
   // Arduino analogReadResolution() helper here: it has an unbounded ADC sync
   // wait and could block the USB API before the scheduler starts.
   pinMode(pins::kBatteryAdc, INPUT);
+#else
+  // Teensy 4.x: analogRead() is bounded (the hardware ADC always completes).
+  // INPUT_DISABLE turns off the digital keeper so the divider reading is not
+  // distorted; the resolution matches kAdcResolutionBits (12 -> 0..4095).
+  pinMode(pins::kBatteryAdc, INPUT_DISABLE);
+  analogReadResolution(kAdcResolutionBits);
+#endif
 }
 
 void setUserLed(bool on) {
@@ -96,6 +108,7 @@ bool dxlPowerEnabled() { return g_dxlPowerOn; }
 uint32_t dxlPowerTransitions() { return g_dxlPowerTransitions; }
 
 bool readBatteryRaw(uint16_t& raw) {
+#if defined(ARDUINO_ARCH_SAMD)
   raw = 0;
   const PinDescription& pin = g_APinDescription[pins::kBatteryAdc];
   pinPeripheral(pins::kBatteryAdc, PIO_ANALOG);
@@ -134,6 +147,11 @@ bool readBatteryRaw(uint16_t& raw) {
   ADC->INTFLAG.reg = ADC_INTFLAG_RESRDY;
   disableAdc();
   return true;
+#else
+  // Teensy 4.x: the core's analogRead() is a bounded synchronous conversion.
+  raw = static_cast<uint16_t>(analogRead(pins::kBatteryAdc));
+  return true;
+#endif
 }
 
 bool readBatteryPinMilliVolts(uint16_t& millivolts) {

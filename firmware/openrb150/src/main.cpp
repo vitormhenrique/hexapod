@@ -23,9 +23,19 @@
 void setup() {
   fault_capture::init();
 
+#if defined(ARDUINO_ARCH_SAMD)
   // PM->RCAUSE identifies the previous reset (POR/BOD/EXT/WDT/SYST). Capture it
   // before peripheral initialization so post-reset diagnostics are definitive.
   app::setResetCause(PM->RCAUSE.reg);
+#elif defined(__IMXRT1062__)
+  // SRC_SRSR accumulates reset causes (POR/WDOG/JTAG/...). Capture and clear
+  // (write-1-to-clear) so the next boot reports fresh bits.
+  const uint32_t srsr = SRC_SRSR;
+  SRC_SRSR = srsr;
+  app::setResetCause(static_cast<uint8_t>(srsr));
+#else
+  app::setResetCause(0);
+#endif
 
   // Safe boot: configure pins and force DYNAMIXEL power OFF before anything.
   board::init();

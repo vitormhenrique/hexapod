@@ -56,7 +56,10 @@ class DxlBus {
   static constexpr uint32_t kReadTimeoutMs = 20;
   static constexpr uint32_t kWriteTimeoutMs = 20;
 
-  explicit DxlBus(HardwareSerial& port);
+  // `dir_pin` drives the half-duplex transceiver's TX-enable (high = transmit)
+  // on boards without automatic direction control (MicroMod carrier DXL_TXEN).
+  // Pass -1 on boards with hardware auto-direction (OpenRB-150).
+  explicit DxlBus(HardwareSerial& port, int16_t dir_pin = -1);
 
   // Initialize the DXL UART. Does NOT enable DXL power (board HAL owns that)
   // and does NOT enable torque. Safe to call once before any scan.

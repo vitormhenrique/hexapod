@@ -1,10 +1,12 @@
 #include "tasks.h"
 
+#include "rtos.h"
+
 #include <Arduino.h>
-#include <FreeRTOS_SAMD21.h>
 #include <math.h>
 
 #include "../board/board.h"
+#include "../board/board_pins.h"
 #include "../config/config_bootstrap.h"
 #include "../config/config_api.h"
 #include "../config/qwiic_openlog.h"
@@ -61,6 +63,11 @@
 namespace app {
 namespace {
 
+#if defined(ARDUINO_ARCH_SAMD)
+// Boot-time FreeRTOS heap budget. Only meaningful on the SAMD21 port, whose
+// project-owned freertos_config.h sizes a fixed configTOTAL_HEAP_SIZE. The
+// Teensy port allocates task stacks through the (guarded) newlib heap in the
+// 512 KB OCRAM region, so no compile-time budget is needed there.
 constexpr size_t kHeapAlignmentBytes = 8;
 constexpr size_t kHeapBlockHeaderBytes = 8;
 constexpr size_t kHeapReserveBytes = 512;
@@ -83,14 +90,16 @@ constexpr size_t kStartupTaskHeapBytes =
 constexpr size_t kStartupSemaphoreHeapBytes =
   3u * heapBlockBytes(sizeof(StaticSemaphore_t));
 
-static_assert(priority::kHealth < configMAX_PRIORITIES,
-        "FreeRTOS priority table must include healthTask");
 static_assert(configUSE_TIMERS == 0,
         "unused FreeRTOS timer daemon must stay disabled");
 static_assert(configTOTAL_HEAP_SIZE >=
           kStartupTaskHeapBytes + kStartupSemaphoreHeapBytes +
             kHeapReserveBytes + (kHeapAlignmentBytes - 1u),
         "FreeRTOS heap no longer covers boot allocations plus reserve");
+#endif  // ARDUINO_ARCH_SAMD
+
+static_assert(priority::kHealth < configMAX_PRIORITIES,
+        "FreeRTOS priority table must include healthTask");
 
 // Task handles, indexed by watchdog::TaskId, so the health task can read each
 // task's stack high-water mark.
@@ -100,9 +109,10 @@ TaskHandle_t g_handles[watchdog::kTaskCount] = {nullptr};
 protocol::api::DeviceInfo g_deviceInfo;
 uint8_t g_resetCause = 0;
 
-// Single owner of the DYNAMIXEL TTL bus (Serial1). Only dxlTask touches this,
-// satisfying the AGENTS.md rule that one task owns Dynamixel2Arduino/Serial1.
-dxl::DxlBus g_dxlBus(Serial1);
+// Single owner of the DYNAMIXEL TTL bus. Only dxlTask touches this,
+// satisfying the AGENTS.md rule that one task owns Dynamixel2Arduino and its
+// UART. The port and (optional) direction pin come from the board pin map.
+dxl::DxlBus g_dxlBus(HEXAPOD_DXL_SERIAL, board::pins::kDxlDirPin);
 
 // Latest per-servo status snapshot, published by dxlTask via Sync Read and read
 // by telemetry/safety consumers. Single writer (dxlTask); readers take a copy.
@@ -799,6 +809,7 @@ uint8_t packHilFlags(const hil::OutputGuardStatus& status) {
 // is bounded, so a wedged host (stopped draining) costs at most ~20 ms before
 // the frame is dropped and counted as TX backlog by the caller.
 bool txFrame(const uint8_t* frame, size_t n) {
+#if defined(ARDUINO_ARCH_SAMD)
   // CDC is the only PluggableUSB module, so its endpoints are 1 (ACM), 2
   // (OUT), 3 (IN) — see CDC.cpp CDC_ENDPOINT_IN = pluggedEndpoint + 2.
   constexpr uint8_t kCdcInEp = 3;
@@ -816,6 +827,30 @@ bool txFrame(const uint8_t* frame, size_t n) {
     off += chunk;
   }
   return true;
+#else
+  // Teensy 4.x USB CDC is buffered and multi-packet safe, and
+  // availableForWrite() reports real buffer capacity. Gate each chunk on it
+  // with a bounded yield so a wedged host (stopped draining) costs at most
+  // ~20 ms before the frame is dropped and counted as TX backlog.
+  constexpr uint32_t kBufferDrainTimeoutMs = 20;
+  size_t off = 0;
+  uint32_t waited_ms = 0;
+  while (off < n) {
+    const int room = Serial.availableForWrite();
+    if (room <= 0) {
+      if (waited_ms >= kBufferDrainTimeoutMs) return false;  // host not draining
+      vTaskDelay(pdMS_TO_TICKS(1));
+      ++waited_ms;
+      continue;
+    }
+    const size_t chunk =
+        (n - off < static_cast<size_t>(room)) ? (n - off)
+                                              : static_cast<size_t>(room);
+    if (Serial.write(frame + off, chunk) != chunk) return false;
+    off += chunk;
+  }
+  return true;
+#endif
 }
 
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
@@ -1411,12 +1446,13 @@ uint8_t batteryPercent(uint16_t millivolts) {
 
 bool sendCrsfTelemetry(uint8_t type, const uint8_t* payload,
                        uint8_t payload_len) {
-#if defined(PIN_SERIAL3_TX)
+#if HEXAPOD_HAS_CRSF_UART
   uint8_t frame[crsf::kMaxFrameLen];
   const uint8_t frame_len = crsf::telemetry::buildFrame(
       type, payload, payload_len, frame, sizeof(frame));
-  if (frame_len == 0 || Serial3.availableForWrite() < frame_len) return false;
-  return Serial3.write(frame, frame_len) == frame_len;
+  if (frame_len == 0 || HEXAPOD_CRSF_SERIAL.availableForWrite() < frame_len)
+    return false;
+  return HEXAPOD_CRSF_SERIAL.write(frame, frame_len) == frame_len;
 #else
   (void)type;
   (void)payload;
@@ -2816,9 +2852,9 @@ void rcTask(void*) {
   g_rcMailbox.reset();
   taskEXIT_CRITICAL();
   g_bridge.reset();
-#if defined(PIN_SERIAL3_RX)
-  // Serial3 is the ExpressLRS CRSF receiver link; rcTask owns it exclusively.
-  Serial3.begin(kCrsfBaud);
+#if HEXAPOD_HAS_CRSF_UART
+  // The CRSF UART is the ExpressLRS receiver link; rcTask owns it exclusively.
+  HEXAPOD_CRSF_SERIAL.begin(kCrsfBaud);
 #endif
   TickType_t next = xTaskGetTickCount();
   constexpr uint16_t kMaxBytesPerCycle = 128;
@@ -2833,11 +2869,11 @@ void rcTask(void*) {
         static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
     crsf::ChannelData frame;
     bool fresh = false;
-#if defined(PIN_SERIAL3_RX)
+#if HEXAPOD_HAS_CRSF_UART
     uint16_t bytes_processed = 0;
-    while (Serial3.available() > 0 &&
+    while (HEXAPOD_CRSF_SERIAL.available() > 0 &&
            bytes_processed < kMaxBytesPerCycle) {
-      const uint8_t b = static_cast<uint8_t>(Serial3.read());
+      const uint8_t b = static_cast<uint8_t>(HEXAPOD_CRSF_SERIAL.read());
       ++bytes_processed;
       if (g_crsfParser.push(b, frame)) {
         // Feed the raw 11-bit ChannelPack ticks to the bridge decoder.
@@ -3939,10 +3975,12 @@ void start() {
   // Guards the controlTask -> dxlTask servo goal frame (lmt.1).
   g_goalMutex = xSemaphoreCreateMutex();
 
+#if defined(ARDUINO_ARCH_SAMD)
   // Fatal hooks run with scheduler/peripheral state unknown. Never let them
   // block forever flushing USB; the library's LED code remains deterministic.
   vSetErrorLed(board::pinUserLed(), HIGH);
   vSetErrorSerial(nullptr);
+#endif
 
   // Task stacks are allocated once here, at boot, before the scheduler runs;
   // there is no runtime heap churn afterward (AGENTS.md 1.2).

@@ -14,6 +14,20 @@
 
 #include <Arduino.h>
 
+// --- Serial routing (preprocessor-visible for the task layer) ---------------
+// DYNAMIXEL TTL bus is Serial1 (SERCOM2) with hardware auto-direction, so no
+// direction pin is needed (kDxlDirPin == -1 below).
+#define HEXAPOD_DXL_SERIAL Serial1
+// ExpressLRS CRSF receiver on the expansion UART header (Serial3, D14 TX /
+// D13 RX). Only present on the real OpenRB-150 variant; the mkrzero fallback
+// has no Serial3, in which case the CRSF link is compiled out.
+#if defined(PIN_SERIAL3_RX) && defined(PIN_SERIAL3_TX)
+#define HEXAPOD_CRSF_SERIAL Serial3
+#define HEXAPOD_HAS_CRSF_UART 1
+#else
+#define HEXAPOD_HAS_CRSF_UART 0
+#endif
+
 namespace board {
 namespace pins {
 
@@ -47,6 +61,11 @@ constexpr bool kHasDxlPowerControl = true;
 constexpr uint8_t kDxlPowerEnable = 31;  // nominal; inert without the FET
 constexpr bool kHasDxlPowerControl = false;
 #endif
+
+// --- DYNAMIXEL bus direction control ----------------------------------------
+// The OpenRB-150 DXL transceiver handles direction automatically, so
+// Dynamixel2Arduino is constructed without a direction pin.
+constexpr int16_t kDxlDirPin = -1;
 
 }  // namespace pins
 }  // namespace board
