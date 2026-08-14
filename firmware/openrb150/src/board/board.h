@@ -71,6 +71,15 @@ bool userLedOn();
 // Raw pin number of the USER LED, for low-level consumers (e.g. RTOS error LED).
 uint8_t pinUserLed();
 
+// --- Onboard RGB status NeoPixel (MicroMod carrier only) --------------------
+// Single WS2812-class pixel fed from the carrier's PWM1 net. The driver
+// applies a fixed global dimming factor, skips retransmission when the color
+// is unchanged, and bounds the interrupts-off encode window to one 24-bit
+// frame (~30 us). On boards without the pixel, setRgbStatusLed() is inert and
+// hasRgbStatusLed() reports false so callers can skip the work entirely.
+bool hasRgbStatusLed();
+void setRgbStatusLed(uint8_t r, uint8_t g, uint8_t b);
+
 // --- DYNAMIXEL power FET ----------------------------------------------------
 // On the mkrzero fallback variant there is no FET; these calls are inert and
 // dxlPowerEnabled() always reports false. hasDxlPowerControl() lets callers

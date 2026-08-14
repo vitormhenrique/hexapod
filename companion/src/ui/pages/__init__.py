@@ -5419,3 +5419,4 @@ class JointMatrixPage(BasePage):
 
 # Fixture calibration wizard (separate module keeps this file smaller).
 from .servo_calibration import ServoCalibrationPage  # noqa: E402
+from .openlog_config_file import OpenLogConfigFilePage  # noqa: E402

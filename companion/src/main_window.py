@@ -28,6 +28,7 @@ from ui.pages import (
     ServoConfigPage,
     ServoTuningPage,
     SensorDashboardPage,
+    OpenLogConfigFilePage,
     UrdfViewerPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
@@ -62,6 +63,7 @@ class MainWindow(QMainWindow):
         self.nav.add_item("joint_matrix", "Joint Matrix")
         self.nav.add_item("servo_calibration", "Servo Calibration")
         self.nav.add_item("servo_config", "Servo Config")
+        self.nav.add_item("openlog_config", "OpenLog File")
         self.nav.add_item("servo_tuning", "Servo && DXL")
         self.nav.add_section("Analyze")
         self.nav.add_item("plots", "Plot Workbench")
@@ -107,6 +109,7 @@ class MainWindow(QMainWindow):
             ("joint_matrix", JointMatrixPage(self.service)),
             ("servo_calibration", ServoCalibrationPage(self.service)),
             ("servo_config", ServoConfigPage(self.service)),
+            ("openlog_config", OpenLogConfigFilePage(self.service)),
             ("servo_tuning", ServoTuningPage(self.service)),
             ("plots", PlotWorkbenchPage(self.service)),
             ("model", ModelViewerPage(self.service)),

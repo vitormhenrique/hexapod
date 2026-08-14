@@ -41,6 +41,53 @@ void disableAdc() {
 }
 #endif  // ARDUINO_ARCH_SAMD
 
+#if defined(ARDUINO_TEENSY_MICROMOD)
+// --- Onboard WS2812 status pixel (carrier PWM1 -> pin 2) --------------------
+// Single-pixel bit-banged encoder using the DWT cycle counter (enabled by the
+// Teensy 4 core at startup). One 24-bit GRB frame takes ~30 us with
+// interrupts masked, which is well inside every UART FIFO budget. The encoder
+// only runs when the color actually changes, and enforces the >=300 us latch
+// gap between frames.
+constexpr uint32_t kWs2812LatchUs = 300;
+// Global brightness (0..255) applied before transmission: the pixel is an
+// indicator, not a headlight.
+constexpr uint8_t kRgbBrightness = 48;
+
+uint32_t g_lastGrb = 0;
+bool g_grbValid = false;
+uint32_t g_lastShowUs = 0;
+
+void ws2812Show(uint32_t grb) {
+  // Respect the reset/latch time so back-to-back updates cannot merge frames.
+  const uint32_t since_us = micros() - g_lastShowUs;
+  if (g_grbValid && since_us < kWs2812LatchUs) {
+    delayMicroseconds(kWs2812LatchUs - since_us);
+  }
+
+  const uint32_t cyc_period = F_CPU_ACTUAL / 800000u;   // 1.25 us bit slot
+  const uint32_t cyc_t0h = F_CPU_ACTUAL / 2500000u;     // 0.40 us high = 0
+  const uint32_t cyc_t1h = F_CPU_ACTUAL / 1250000u;     // 0.80 us high = 1
+
+  noInterrupts();
+  uint32_t start = ARM_DWT_CYCCNT;
+  for (uint32_t mask = 1u << 23; mask != 0; mask >>= 1) {
+    while (ARM_DWT_CYCCNT - start < cyc_period) {
+    }
+    start = ARM_DWT_CYCCNT;
+    digitalWriteFast(pins::kNeoPixel, HIGH);
+    const uint32_t high_cycles = (grb & mask) ? cyc_t1h : cyc_t0h;
+    while (ARM_DWT_CYCCNT - start < high_cycles) {
+    }
+    digitalWriteFast(pins::kNeoPixel, LOW);
+  }
+  interrupts();
+
+  g_lastShowUs = micros();
+  g_lastGrb = grb;
+  g_grbValid = true;
+}
+#endif  // ARDUINO_TEENSY_MICROMOD
+
 }  // namespace
 
 void init() {
@@ -59,6 +106,15 @@ void init() {
   pinMode(pins::kUserLed, OUTPUT);
   digitalWrite(pins::kUserLed, LOW);
   g_userLedOn = false;
+
+#if defined(ARDUINO_TEENSY_MICROMOD)
+  // --- RGB status pixel: output low, then latch an explicit black frame so
+  // whatever color survived a warm reset is cleared before tasks start.
+  pinMode(pins::kNeoPixel, OUTPUT);
+  digitalWrite(pins::kNeoPixel, LOW);
+  g_grbValid = false;
+  ws2812Show(0);
+#endif
 
   // --- Battery ADC. -------------------------------------------------------
 #if defined(ARDUINO_ARCH_SAMD)
@@ -85,6 +141,23 @@ void toggleUserLed() { setUserLed(!g_userLedOn); }
 bool userLedOn() { return g_userLedOn; }
 
 uint8_t pinUserLed() { return pins::kUserLed; }
+
+#if defined(ARDUINO_TEENSY_MICROMOD)
+bool hasRgbStatusLed() { return true; }
+
+void setRgbStatusLed(uint8_t r, uint8_t g, uint8_t b) {
+  const uint32_t scale = kRgbBrightness;
+  const uint32_t grb = ((g * scale / 255u) << 16) |
+                       ((r * scale / 255u) << 8) |
+                       (b * scale / 255u);
+  if (g_grbValid && grb == g_lastGrb) return;  // no bus traffic when static
+  ws2812Show(grb);
+}
+#else
+bool hasRgbStatusLed() { return false; }
+
+void setRgbStatusLed(uint8_t, uint8_t, uint8_t) {}
+#endif
 
 bool hasDxlPowerControl() { return pins::kHasDxlPowerControl; }
 

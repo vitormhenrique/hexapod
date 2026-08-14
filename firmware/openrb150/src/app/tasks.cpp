@@ -3954,6 +3954,13 @@ void healthTask(void*) {
     led.all_servo_poses_known = g_poseKnownMask == kAllServoPosesKnown;
     led.watchdog_stalled = watchdog::criticalStalled();
     board::setUserLed(status_led::ledOn(led, now_ms));
+    if (board::hasRgbStatusLed()) {
+      // Same pattern/blink source as the USER LED, plus a state/mode color
+      // (fault=red, disarmed=blue, arming=yellow, armed=green, terrain=
+      // chartreuse, Jetson=violet, maintenance=magenta, passive=cyan).
+      const status_led::Rgb c = status_led::rgbFrame(led, now_ms);
+      board::setRgbStatusLed(c.r, c.g, c.b);
+    }
 
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }

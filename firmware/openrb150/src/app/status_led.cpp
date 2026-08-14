@@ -82,5 +82,38 @@ bool ledOn(const Inputs& inputs, uint32_t now_ms) {
   return false;
 }
 
+Rgb colorFor(const Inputs& inputs) {
+  switch (patternFor(inputs)) {
+    case Pattern::FaultCode:
+      return Rgb{255, 0, 0};  // red: fault / estop / watchdog stall
+    case Pattern::BootFast:
+      return Rgb{255, 255, 255};  // white: boot, config load, final checks
+    case Pattern::DisarmedHeartbeat:
+      return Rgb{0, 0, 255};  // blue: disarmed, waiting for arming
+    case Pattern::ArmingDiscoverIds:
+      return Rgb{255, 180, 0};  // yellow: discovering configured servo IDs
+    case Pattern::ArmingReadPoses:
+      return Rgb{255, 64, 0};  // amber: waiting for all present poses
+    case Pattern::MaintenanceDouble:
+      return Rgb{255, 0, 255};  // magenta: host maintenance lock
+    case Pattern::PassiveSlow:
+      return Rgb{0, 255, 255};  // cyan: torque-off passive pose stream
+    case Pattern::ArmedSolid:
+      break;  // armed sub-modes get distinct colors below
+  }
+  // Armed: differentiate the active control mode by hue.
+  if (inputs.state == safety::State::ContactTerrain) {
+    return Rgb{128, 255, 0};  // chartreuse: contact-aware terrain gait
+  }
+  if (inputs.state == safety::State::JetsonAssisted) {
+    return Rgb{128, 0, 255};  // violet: Jetson autonomy authorized
+  }
+  return Rgb{0, 255, 0};  // green: stand-ready / RC manual
+}
+
+Rgb rgbFrame(const Inputs& inputs, uint32_t now_ms) {
+  return ledOn(inputs, now_ms) ? colorFor(inputs) : Rgb{};
+}
+
 }  // namespace status_led
 }  // namespace app

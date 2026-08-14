@@ -31,7 +31,7 @@ def test_app_shell_launches_with_estop_on_all_pages(qtbot) -> None:
     window.show()
 
     # All registered pages are present in the stack.
-    assert window.stack.count() == 17
+    assert window.stack.count() == 18
     assert set(window._pages) == {
         "connect",
         "overview",
@@ -43,6 +43,7 @@ def test_app_shell_launches_with_estop_on_all_pages(qtbot) -> None:
         "joint_matrix",
         "servo_calibration",
         "servo_config",
+        "openlog_config",
         "servo_tuning",
         "plots",
         "model",

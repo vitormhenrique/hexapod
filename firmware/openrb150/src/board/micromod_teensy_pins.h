@@ -47,5 +47,10 @@ constexpr bool kHasDxlPowerControl = true;
 // Low: receive / default-safe state. Passed to Dynamixel2Arduino as dir_pin.
 constexpr int16_t kDxlDirPin = 42;
 
+// --- Onboard RGB status NeoPixel ----------------------------------------------
+// Carrier PWM1 (contact 47) -> Teensy pin 2 feeds the single WS2812-class
+// pixel through 33 ohms. Driven only by the board HAL's bit-banged encoder.
+constexpr uint8_t kNeoPixel = 2;
+
 }  // namespace pins
 }  // namespace board
