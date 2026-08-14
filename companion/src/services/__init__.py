@@ -892,6 +892,16 @@ class ConnectionService(QObject):
     def maint_lock_held(self) -> bool:
         return self._maint_token != 0
 
+    @property
+    def maintenance_setup_busy(self) -> bool:
+        """True while enter_maintenance's lock/power/scan worker is running."""
+        return self._maint_setup_busy
+
+    @property
+    def maintenance_setup_ready(self) -> bool:
+        """True once maintenance is entered with a powered, scanned DXL bus."""
+        return self._maint_setup_ready
+
     def _start_maint_heartbeat(self, client: ProtocolClient, token: int) -> None:
         """Beat the maintenance lock every 0.25 s (firmware TTL is 1 s).
 

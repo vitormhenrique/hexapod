@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
-from hexapod_protocol import config as cfg
+from hexapod_protocol import api, config as cfg
 from hexapod_protocol import telemetry as tlm
 
 pytest.importorskip("PySide6")
@@ -78,6 +78,13 @@ def test_page_defaults_to_leg1_center_fixture(qtbot) -> None:
     assert not page.next_btn.isEnabled()
     assert not page.prev_btn.isEnabled()
     assert all(not b.isEnabled() for b in page._send_btns.values())
+
+
+def test_page_has_no_persisted_leg_default_control(qtbot) -> None:
+    """Leg calibration defaults belong to OpenLog config, not this page."""
+    _service, page = _make_page(qtbot)
+    assert not hasattr(page, "known_defaults_btn")
+    assert not hasattr(page, "KNOWN_LEG_DEFAULTS")
 
 
 def test_command_pose_requires_center_all_first(qtbot, monkeypatch) -> None:
@@ -162,7 +169,13 @@ def test_capture_advances_fixture_then_fits_leg(qtbot, monkeypatch) -> None:
     assert page._fixture_deg == 225
     _capture_at(225, g225, g225, g225)
 
-    # Leg 0 fitted and advanced to leg 1 / 180°; no auto-command was sent.
+    # A finished leg returns to raw tick 2048 before it can advance.
+    assert calls[-1] == ("pose", 0, 2048, 2048, 2048)
+    assert page._leg == 0
+    assert page._busy
+    service.joint_target_result.emit(_ok_result())
+
+    # Leg 0 centered, then advances to leg 1 / 180°.
     assert page._leg == 1
     assert page._fixture_deg == 180
     assert not page._pose_commanded
@@ -203,6 +216,57 @@ def test_apply_stages_fitted_sign_trim(qtbot, monkeypatch) -> None:
     assert servo.trim_ticks == 12
 
 
+def test_center_failure_keeps_completed_leg_active(qtbot, monkeypatch) -> None:
+    service, page, _calls = _make_centered_page(qtbot, monkeypatch)
+    page._center_completed_leg()
+    assert page._busy
+    service.joint_target_result.emit(SimpleNamespace(ok=False, result=7))
+
+    assert page._leg == 0
+    assert not page._busy
+    assert "not advancing" in page.pose_status.text()
+
+
+def test_validated_calibration_turns_torque_off_before_commit(qtbot, monkeypatch) -> None:
+    service, page = _make_ready_page(qtbot)
+    torque_calls = []
+    commit_calls = []
+    monkeypatch.setattr(service, "dxl_torque", lambda enabled: torque_calls.append(enabled))
+    monkeypatch.setattr(service, "commit_config", lambda: commit_calls.append(True))
+    page._set_busy(True)
+
+    service.config_result.emit("validate", api.CfgResult(api.CFG_OK))
+    assert torque_calls == [False]
+    assert not commit_calls
+
+    service.dxl_result.emit(
+        "torque",
+        SimpleNamespace(done=True, code=api.DXL_CODE_OK),
+    )
+    qtbot.wait(page.COMMIT_TORQUE_SETTLE_MS + 25)
+    assert commit_calls == [True]
+
+
+def test_torque_off_failure_does_not_commit_calibration(qtbot, monkeypatch) -> None:
+    service, page = _make_ready_page(qtbot)
+    torque_calls = []
+    commit_calls = []
+    monkeypatch.setattr(service, "dxl_torque", lambda enabled: torque_calls.append(enabled))
+    monkeypatch.setattr(service, "commit_config", lambda: commit_calls.append(True))
+    page._set_busy(True)
+
+    service.config_result.emit("validate", api.CfgResult(api.CFG_OK))
+    service.dxl_result.emit(
+        "torque",
+        SimpleNamespace(done=True, code=api.DXL_CODE_BUS_ERROR),
+    )
+
+    assert torque_calls == [False]
+    assert not commit_calls
+    assert not page._busy
+    assert "torque-off failed" in page.pose_status.text()
+
+
 def test_present_telemetry_fills_use_present(qtbot) -> None:
     service, page = _make_ready_page(qtbot)
     service.telemetry.emit(
@@ -214,3 +278,60 @@ def test_present_telemetry_fills_use_present(qtbot) -> None:
     assert page._present_lbls[0].text() == "2001"
     page._use_present(0)
     assert page._tick_spins[0].value() == 2001
+
+
+def test_tick_spin_step_is_at_least_one_degree(qtbot) -> None:
+    """Arrow clicks move by >= 1 physical degree, not one raw tick."""
+    import math
+
+    _service, page = _make_page(qtbot)
+    expected = max(1, math.ceil(cfg.TICKS_PER_DEG))
+    assert expected * 360.0 / 4096.0 >= 1.0
+    for spin in page._tick_spins.values():
+        assert spin.singleStep() == expected
+    spin = page._tick_spins[0]
+    spin.setValue(2048)
+    spin.stepUp()
+    assert spin.value() == 2048 + expected
+
+
+def test_page_adopts_existing_maintenance_session(qtbot) -> None:
+    """A page built after maintenance is ready must not start dead."""
+    from services import ConnectionService
+    from ui.pages import ServoCalibrationPage
+
+    service = ConnectionService()
+    service._client = SimpleNamespace(connected=True)
+    service._robot_state = int(tlm.SafetyState.MAC_MAINTENANCE)
+    service._maint_token = 7
+    service._maint_setup_ready = True
+    page = ServoCalibrationPage(service)
+    qtbot.addWidget(page)
+    assert page._connected and page._lock_held and page._setup_ready
+    assert page.center_all_btn.isEnabled()
+    service._client = None  # detach the fake before service teardown
+
+
+def test_service_error_unfreezes_in_flight_command(qtbot, monkeypatch) -> None:
+    """An error-only failure path must re-enable the page controls."""
+    service, page, _calls = _make_centered_page(qtbot, monkeypatch)
+    assert page.next_btn.isEnabled()
+    page.next_btn.click()  # move leg to pose -> busy
+    assert page._busy
+    assert not page.next_btn.isEnabled()
+    service.error.emit("calib ticks: failed to read active config")
+    assert not page._busy
+    assert page.next_btn.isEnabled()
+    assert "failed to read active config" in page.pose_status.text()
+
+
+def test_busy_watchdog_reenables_controls(qtbot, monkeypatch) -> None:
+    """A lost result (no signal at all) must not brick the page forever."""
+    _service, page, _calls = _make_centered_page(qtbot, monkeypatch)
+    page.next_btn.click()  # move leg to pose -> busy
+    assert page._busy
+    assert page._busy_timer.isActive()
+    page._on_busy_timeout()  # fire the watchdog directly
+    assert not page._busy
+    assert page.next_btn.isEnabled()
+    assert "re-enabled" in page.pose_status.text()

@@ -8,7 +8,8 @@ Linear Next/Previous workflow (18 poses = 6 legs × 3 fixture angles):
        "Capture & Next"     stores the corrected ticks and advances.
      Editing a tick never moves a servo; per-joint Send applies fine
      adjustments. "Previous pose" steps back at any time.
-  4. Completing a leg's three fixtures fits sign + trim for its servos.
+  4. Completing a leg's three fixtures fits sign + trim, then returns that
+      leg to raw tick 2048 before moving to the next leg.
   5. When legs are done, stage + validate + commit the config.
 
 Raw ticks are inverted through the LIVE servo map before sending, because the
@@ -18,7 +19,9 @@ firmware maps SET_JOINT_TARGET angles through the configured sign/trim.
 from __future__ import annotations
 
 import copy
+import math
 
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QFormLayout,
     QGridLayout,
@@ -32,7 +35,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hexapod_protocol import telemetry as tlm
+from hexapod_protocol import api, telemetry as tlm
 from theme import DRACULA
 
 # BasePage lives in ui.pages.__init__. Importing the package here is safe when
@@ -61,10 +64,18 @@ class ServoCalibrationPage(BasePage):
     # that resolve direction (sign).
     FIXTURES = (180, 135, 225)
 
+    # A stuck in-flight command must never brick the page: if no result
+    # arrives within this window, re-enable the controls.
+    BUSY_TIMEOUT_MS = 10_000
+    COMMIT_TORQUE_SETTLE_MS = 150
+
     def build(self) -> None:
         from hexapod_protocol import config as cfg
 
         self._cfg = cfg
+        # Spin-arrow step: at least one physical degree per click (~12 ticks
+        # on the 4096-tick MX-28 wheel), not one tick.
+        self._tick_step = max(1, math.ceil(cfg.TICKS_PER_DEG))
         self._robot_config = cfg.default_robot_config()
         self._servo_map = cfg.ServoMap(self._robot_config)
         self._connected = False
@@ -73,6 +84,12 @@ class ServoCalibrationPage(BasePage):
         self._setup_ready = False
         self._state = -1
         self._busy = False
+        self._commit_waiting_for_torque_off = False
+        self._centering_completed_leg: int | None = None
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setSingleShot(True)
+        self._busy_timer.setInterval(self.BUSY_TIMEOUT_MS)
+        self._busy_timer.timeout.connect(self._on_busy_timeout)
         self._centered = False  # center-all completed this session
         self._pose_commanded = False  # active fixture pose sent at least once
         self._present_ticks: dict[int, int] = {}  # servo id -> present tick
@@ -116,6 +133,21 @@ class ServoCalibrationPage(BasePage):
         self.service.joint_target_result.connect(self._on_joint_result)
         self.service.dxl_result.connect(self._on_dxl_result)
         self.service.telemetry.connect(self._on_telemetry)
+        self.service.error.connect(self._on_service_error)
+
+        # Adopt the service's current session state: maintenance may already
+        # be held/ready (entered from another page or before this page was
+        # shown), and missing that leaves every control here dead.
+        self._connected = self.service.is_connected
+        self._state = self.service.robot_state
+        self._lock_held = self.service.maint_lock_held
+        self._setup_busy = self.service.maintenance_setup_busy
+        self._setup_ready = self.service.maintenance_setup_ready
+        if self._lock_held:
+            self.maintenance_lbl.setText("Maintenance lock: held")
+        if self._setup_ready:
+            self.enter_maint_btn.setText("Maintenance ready")
+
         self._refresh_pose_ui()
         self._apply_gates()
 
@@ -221,7 +253,11 @@ class ServoCalibrationPage(BasePage):
             grid.addWidget(guess, row, 1)
             spin = QSpinBox()
             spin.setRange(0, 4095)
-            spin.setSingleStep(1)
+            spin.setSingleStep(self._tick_step)
+            spin.setToolTip(
+                f"Arrow step is {self._tick_step} ticks (\u2265 1\u00b0). "
+                "Type any exact tick value directly."
+            )
             spin.setAccelerated(True)
             spin.setValue(2048)
             # Never react to per-keystroke edits: the value is only read when
@@ -403,7 +439,7 @@ class ServoCalibrationPage(BasePage):
         if not self._bench_ready(ignore_centered=True):
             self.pose_status.setText("not ready: enter maintenance and scan first")
             return
-        self._busy = True
+        self._set_busy(True)
         self._centered = True
         self._pose_commanded = False
         self.pose_status.setText("centering all 18 servos at 180\u00b0...")
@@ -448,7 +484,7 @@ class ServoCalibrationPage(BasePage):
                 )
             return
         ticks = [self._tick_spins[j].value() for _n, j in self.JOINTS]
-        self._busy = True
+        self._set_busy(True)
         self._pose_commanded = True
         self.pose_status.setText(
             f"commanding leg {self._leg + 1} @ {self._fixture_deg}\u00b0 "
@@ -497,14 +533,7 @@ class ServoCalibrationPage(BasePage):
         existing = self.results.toPlainText().strip()
         self.results.setPlainText((existing + "\n\n" if existing else "") + block)
         if ok_all and leg + 1 < self._cfg.NUM_LEGS:
-            self._leg += 1
-            self._fixture_index = 0
-            self._pose_commanded = False
-            self.pose_status.setText(
-                f"leg {leg + 1} fitted \u2014 advancing to leg {self._leg + 1}"
-            )
-            self._refresh_pose_ui()
-            self._apply_gates()
+            self._center_completed_leg()
             return
         elif ok_all:
             self.pose_status.setText(
@@ -515,6 +544,38 @@ class ServoCalibrationPage(BasePage):
                 f"leg {leg + 1} fit had errors — adjust captures and re-capture "
                 "the last fixture, or Skip leg"
             )
+        self._refresh_pose_ui()
+        self._apply_gates()
+
+    def _center_completed_leg(self) -> None:
+        """Return the completed leg to the physical center before advancing."""
+        leg = self._leg
+        self._centering_completed_leg = leg
+        self._set_busy(True)
+        self._pose_commanded = False
+        self.pose_status.setText(
+            f"leg {leg + 1} fitted; returning it to center before advancing..."
+        )
+        center_tick = self._cfg.SERVO_CENTER_TICK
+        self.service.set_leg_fixture_pose_raw(
+            leg,
+            center_tick,
+            center_tick,
+            center_tick,
+            robot_config=self._robot_config,
+        )
+        self._apply_gates()
+
+    def _advance_after_leg_center(self, leg: int) -> None:
+        """Advance only after the completed leg is confirmed at center."""
+        if leg != self._leg or leg + 1 >= self._cfg.NUM_LEGS:
+            return
+        self._leg += 1
+        self._fixture_index = 0
+        self._pose_commanded = False
+        self.pose_status.setText(
+            f"leg {leg + 1} centered; advancing to leg {self._leg + 1}"
+        )
         self._refresh_pose_ui()
         self._apply_gates()
 
@@ -587,7 +648,7 @@ class ServoCalibrationPage(BasePage):
         if applied == 0:
             self.pose_status.setText("no successful fits to write")
             return
-        self._busy = True
+        self._set_busy(True)
         self.pose_status.setText(f"staging {applied} servo sign/trim update(s)...")
         self.service.stage_config(edited)
         self._apply_gates()
@@ -597,6 +658,34 @@ class ServoCalibrationPage(BasePage):
             any(getattr(fit, "ok", False) for fit in joints.values())
             for joints in self._fits.values()
         )
+
+    def _set_busy(self, busy: bool) -> None:
+        """Track an in-flight command with a watchdog so a lost result can
+        never leave the whole page disabled."""
+        self._busy = busy
+        if busy:
+            self._busy_timer.start()
+        else:
+            self._commit_waiting_for_torque_off = False
+            self._centering_completed_leg = None
+            self._busy_timer.stop()
+
+    def _on_busy_timeout(self) -> None:
+        if not self._busy:
+            return
+        self._set_busy(False)
+        self.pose_status.setText(
+            "no response to the last command \u2014 controls re-enabled"
+        )
+        self._apply_gates()
+
+    def _on_service_error(self, message: str) -> None:
+        """A service worker failed without a typed result: unfreeze."""
+        if not self._busy:
+            return
+        self._set_busy(False)
+        self.pose_status.setText(str(message))
+        self._apply_gates()
 
     def _bench_ready(self, ignore_centered: bool = False) -> bool:
         return (
@@ -622,7 +711,7 @@ class ServoCalibrationPage(BasePage):
             self._setup_ready = False
             self._state = -1
             self._present_ticks.clear()
-            self._busy = False
+            self._set_busy(False)
             self._centered = False
             self._pose_commanded = False
         self._apply_gates()
@@ -676,35 +765,61 @@ class ServoCalibrationPage(BasePage):
 
     def _on_config_staged(self, ok: bool) -> None:
         if not ok:
-            self._busy = False
+            self._set_busy(False)
             self.pose_status.setText("config stage failed")
             self._apply_gates()
             return
+        self._busy_timer.start()  # re-arm for the validate leg
         self.pose_status.setText("staged — validating...")
         self.service.validate_config()
 
     def _on_config_result(self, kind: str, res) -> None:
         if kind == "validate":
             if res is not None and res.ok:
-                self.pose_status.setText("validated — committing to OpenLog...")
-                self.service.commit_config()
+                # ConfigApi permits committing geometry/servo changes only
+                # after every servo torque state is confirmed off. Fixture
+                # calibration necessarily turned torque on, so sequence that
+                # required safety transition before issuing CFG_COMMIT.
+                self._commit_waiting_for_torque_off = True
+                self._busy_timer.start()
+                self.pose_status.setText("validated — disabling servo torque...")
+                self.service.dxl_torque(False)
             else:
-                self._busy = False
+                self._set_busy(False)
                 code = getattr(res, "result", "?")
                 self.pose_status.setText(f"validate failed ({code})")
                 self._apply_gates()
         elif kind == "commit":
-            self._busy = False
+            self._set_busy(False)
             if res is not None and res.ok:
                 self.pose_status.setText("commit ok — reloading config")
                 self.service.load_config()
             else:
                 code = getattr(res, "result", "?")
-                self.pose_status.setText(f"commit failed ({code})")
+                reasons = {
+                    api.CFG_VOLATILE: "OpenLog storage is unavailable",
+                    api.CFG_COMMIT_FAILED: "OpenLog write failed",
+                    api.CFG_REJECTED: (
+                        "maintenance lock was lost or servo torque is still on"
+                    ),
+                }
+                self.pose_status.setText(
+                    f"commit failed ({code}): {reasons.get(code, 'unknown error')}"
+                )
             self._apply_gates()
 
     def _on_joint_result(self, res) -> None:
-        self._busy = False
+        centering_leg = self._centering_completed_leg
+        self._set_busy(False)
+        if centering_leg is not None:
+            if res is not None and getattr(res, "ok", False):
+                self._advance_after_leg_center(centering_leg)
+                return
+            self.pose_status.setText(
+                f"leg {centering_leg + 1} center command failed; not advancing"
+            )
+            self._apply_gates()
+            return
         if res is None:
             self.pose_status.setText("joint command: no response")
         elif getattr(res, "ok", False):
@@ -720,6 +835,27 @@ class ServoCalibrationPage(BasePage):
         self._apply_gates()
 
     def _on_dxl_result(self, kind: str, res) -> None:
+        if kind == "torque" and self._commit_waiting_for_torque_off:
+            self._commit_waiting_for_torque_off = False
+            torque_off = bool(
+                res is not None
+                and getattr(res, "done", False)
+                and getattr(res, "code", None) == api.DXL_CODE_OK
+            )
+            if not torque_off:
+                code = getattr(res, "code", "?")
+                self._set_busy(False)
+                self.pose_status.setText(
+                    f"torque-off failed ({code}); config remains staged"
+                )
+                self._apply_gates()
+                return
+            self.pose_status.setText("torque off — committing to OpenLog...")
+            self._busy_timer.start()
+            QTimer.singleShot(
+                self.COMMIT_TORQUE_SETTLE_MS, self._commit_after_torque_off
+            )
+            return
         if kind != "scan":
             return
         count = len(res.servos()) if res is not None and res.done else 0
@@ -728,6 +864,13 @@ class ServoCalibrationPage(BasePage):
             self._setup_ready = True
             self.enter_maint_btn.setText("Maintenance ready")
             self._apply_gates()
+
+    def _commit_after_torque_off(self) -> None:
+        """Let the firmware publish confirmed torque-off before CFG_COMMIT."""
+        if not self._busy:
+            return
+        self._busy_timer.start()
+        self.service.commit_config()
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id != int(tlm.StreamId.SERVO_STATUS):
@@ -743,10 +886,13 @@ class ServoCalibrationPage(BasePage):
     def _apply_gates(self) -> None:
         ready = self._bench_ready()
         setup_ok = self._bench_ready(ignore_centered=True)
+        # Retry stays available unless the bench is genuinely ready (setup
+        # done AND lock held); a stale ready flag without the lock must not
+        # dead-end the page.
         self.enter_maint_btn.setEnabled(
             self._connected
             and not self._setup_busy
-            and not self._setup_ready
+            and not (self._setup_ready and self._lock_held)
             and self._state != tlm.SafetyState.PASSIVE_POSE_STREAM
         )
         self.exit_maint_btn.setEnabled(
@@ -770,7 +916,9 @@ class ServoCalibrationPage(BasePage):
         self.prev_btn.setEnabled(
             not self._busy and self._centered and self._step > 0
         )
-        self.reset_guess_btn.setEnabled(ready)
+        # Editing ticks never moves a servo; allow resetting them whenever
+        # the spin boxes themselves are editable.
+        self.reset_guess_btn.setEnabled(ready or self._connected)
         for btn in self._send_btns.values():
             btn.setEnabled(ready and self._pose_commanded)
         self.skip_leg_btn.setEnabled(not self._busy and self._centered)
