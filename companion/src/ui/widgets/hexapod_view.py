@@ -6,8 +6,8 @@ rate by an internal timer (default ~30 FPS) that only repaints when new pose
 data has arrived, so the GUI thread is never flooded or blocked.
 
 Coordinate frames (body frame B, mm):
-* top-down view -> X (forward) right, Y (left) up
-* side view     -> X (forward) right, Z (up) up
+* top-down view -> X (right) right, Y (forward) up
+* side view     -> Y (forward) right, Z (up) up
 """
 
 from __future__ import annotations
@@ -44,8 +44,8 @@ class HexapodView(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(10)
 
-        self._top = self._make_plot("Top-down (X fwd, Y left)", locked=True)
-        self._side = self._make_plot("Side (X fwd, Z up)", locked=True)
+        self._top = self._make_plot("Top-down (X right, Y forward)", locked=True)
+        self._side = self._make_plot("Side projection (X right, Z up)", locked=True)
         lay.addWidget(self._top, 1)
         lay.addWidget(self._side, 1)
 

@@ -92,13 +92,30 @@ uv run hexapod-cli status \
   --port 'tcp://<jetson-host>:5555?token=<relay-token>'
 ```
 
-Enter the same endpoint in the editable connection field in **Connect & Setup**
+Enter the same endpoint in the editable field under **Dashboard > Connection**
 for the desktop app. Start the relay and review its single-client and
 trusted-network constraints in the [Jetson bridge guide](../jetson/README.md#mac-tcp-relay).
 
+## Desktop workflows
+
+The desktop app groups tools by operator task instead of exposing every
+implementation page in the navigation rail:
+
+- **Dashboard**: connection, robot readiness, safety, and authority.
+- **Operate**: gait testing, contact/leveling, and torque-off passive posing.
+- **Configure**: Foot IK, Bench Joints, fixture calibration, Robot Config, and
+  verified DXL settings.
+- **Analyze**: live/replay trends and one Pose screen with 2D and 3D modes.
+- **Diagnose**: foot-sensor hardware, radio/link health, protocol faults, and
+  offline OpenLog card recovery.
+
+The global bar keeps DXL power, mode, authority, RC, battery, and emergency
+stop visible in every workflow. Prepare Maintenance once in a Configure screen;
+the app acquires the lock, powers the bus, and scans servos automatically.
+
 ## Session exports
 
-Open a recorded session in **Plot Workbench** replay mode, check the signals to
+Open a recorded session in **Analyze > Trends** replay mode, check the signals to
 export, then use **Export selected CSV**. The CSV preserves the host and robot
 timestamps and leaves unrelated stream columns blank rather than interpolating
 between different telemetry rates. **Export session report** writes a text
@@ -111,24 +128,27 @@ The same artifacts are available without Qt through `export-csv` and
 
 ## Calibration workflow
 
-Use **Robot Calibration & Config** for all persistent calibration data. It
-loads the complete EEPROM-backed `RobotConfig`, so servo and geometry changes
-share one staged diff, firmware validation, commit, and JSON export path.
+Use **Configure > Robot Config** for persistent calibration data. It loads the
+complete OpenLog-backed `RobotConfig`, so servo, geometry, and foot-sensor
+changes share one candidate diff, validated save, read-back verification, and
+JSON export path.
 
-1. Enter maintenance and confirm servo torque is off before changing servo
-  zero trims, signs, travel limits, or geometry.
+1. Select **Prepare Maintenance**. The app acquires the lock, powers the DXL
+  bus, and scans servos before enabling maintenance actions.
 2. Load the config, edit the servo map and leg geometry in their displayed
   units, then use **Diff vs loaded** to inspect the fixed-point values that
   will be stored.
 3. With each foot unloaded and raw sensor telemetry current, use **Copy live
   pressure baselines**. Set nonzero near/touch/load thresholds, keep `load >=
   touch`, and enable only calibrated feet.
-4. Use **Stage to robot**, **Validate staged**, and **Commit to EEPROM** in
-  that order. Export JSON after staging to archive the complete calibration.
+4. Use **Save & verify**. The app stages and validates the candidate, verifies
+  torque off for every configured servo, commits to OpenLog, reloads the
+  config, and compares the complete encoded payload before reporting success.
+  Export JSON to archive the complete calibration.
 
-The Foot Contact page can apply thresholds and re-zero an estimator at runtime
+The **Operate > Contact** page can apply thresholds and re-zero an estimator at runtime
 for bench tuning. Those runtime commands are not persistent; copy the chosen
-values into Robot Calibration & Config and commit them to retain the result
+values into Robot Config and save them to retain the result
 over a power cycle.
 
 ## Test / lint
@@ -154,8 +174,7 @@ src/
   services/         Qt bridge over the protocol client (signals)
   ui/widgets/       nav rail, safety bar, event strip, emergency stop,
                     status badges, servo table/detail, hexapod view
-  ui/pages/         connect, overview, mode & safety, foot contact,
-                    passive pose, servo tuning, model viewer, diagnostics
+  ui/pages/         Dashboard, Operate, Configure, Analyze, and Diagnose tools
   app.py            PySide6 entry point  (hexapod-companion)
   main_window.py    nav rail + safety bar + pages + event strip shell
   cli.py            Typer CLI            (hexapod-cli)

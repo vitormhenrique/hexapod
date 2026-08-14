@@ -7,13 +7,12 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import telemetry as tlm
 
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from .replay_fixtures import build_sample_session  # noqa: E402
+from .replay_fixtures import build_sample_session
 
 
 def _make_page(qtbot):
@@ -60,13 +59,29 @@ def test_live_ignores_unselected_streams(qtbot) -> None:
 
 def test_subscribes_to_needed_streams_on_connect(qtbot) -> None:
     page, service = _make_page(qtbot)
-    calls: list[tuple[int, int]] = []
-    service.subscribe = lambda sid, rate: calls.append((sid, rate))  # type: ignore
+    calls: list[tuple[object, int, int]] = []
+    service.acquire_stream = lambda owner, sid, rate: calls.append((owner, sid, rate))  # type: ignore
     page.select_signals(["servo.1.position", "rc.gait_index"])
     service.connected.emit(True)
-    subscribed = {sid for sid, _ in calls}
+    subscribed = {sid for owner, sid, _ in calls if owner is page}
     assert int(tlm.StreamId.SERVO_STATUS) in subscribed
     assert int(tlm.StreamId.RC_INPUT) in subscribed
+
+
+def test_deselection_and_replay_release_live_streams(qtbot, monkeypatch) -> None:
+    page, service = _make_page(qtbot)
+    released = []
+    monkeypatch.setattr(
+        service,
+        "release_stream",
+        lambda owner, stream_id: released.append((owner, stream_id)),
+    )
+    page.select_signals(["servo.1.position", "rc.gait_index"])
+    page.select_signals(["servo.1.position"])
+    assert (page, int(tlm.StreamId.RC_INPUT)) in released
+
+    page.set_mode("replay")
+    assert (page, int(tlm.StreamId.SERVO_STATUS)) in released
 
 
 def test_replay_mode_plots_recorded_session(qtbot, tmp_path) -> None:
@@ -76,7 +91,7 @@ def test_replay_mode_plots_recorded_session(qtbot, tmp_path) -> None:
     page.load_session(replay.dir)
     assert page._mode == "replay"
     # The servo curve holds the 4 recorded samples.
-    xs, ys = page._curves["servo.1.position"].getData()
+    xs, _ys = page._curves["servo.1.position"].getData()
     assert len(xs) == 4
     assert "Replay:" in page._status.text()
 

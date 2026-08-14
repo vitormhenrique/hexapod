@@ -11,7 +11,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -40,12 +39,31 @@ def test_connect_page_builds_and_shows_firmware(qtbot) -> None:
 
     caps = api.Capabilities(0, 1, 0, 2, 3, 0x7, "HexNav")
     service.capabilities_received.emit(caps)
-    assert page.caps_lbl.text() == "0x00000007"
+    assert page.caps_lbl.text() == "foot_contact, terrain_leveling, sensor_polling"
 
     # Connected toggles the button enablement.
     service.connected.emit(True)
     assert not page.connect_btn.isEnabled()
     assert page.disconnect_btn.isEnabled()
+
+
+def test_connect_page_allows_cancel_and_shows_failure(qtbot, monkeypatch) -> None:
+    from ui.pages import ConnectPage
+
+    service = _service()
+    page = ConnectPage(service)
+    qtbot.addWidget(page)
+    cancelled = []
+    monkeypatch.setattr(service, "disconnect", lambda: cancelled.append(True))
+
+    service.connecting.emit(True)
+    assert page.disconnect_btn.text() == "Cancel"
+    assert page.disconnect_btn.isEnabled()
+    page.disconnect_btn.click()
+    assert cancelled == [True]
+
+    service.error.emit("Connection to /dev/fake failed: no HELLO response")
+    assert "Connection failed" in page.connection_status.text()
 
 
 def test_connect_page_prefers_openrb_cu_port(qtbot, monkeypatch) -> None:
@@ -82,10 +100,8 @@ def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
         watchdog_missed=0,
     )
     service.status_received.emit(st)
-    assert "11800 mV" in page.badges["battery"]._value.text()
     assert page.badges["uptime"]._value.text() == "5 s"
-    # DXL bus health derives from the status power flag + watchdog misses.
-    assert page.badges["dxl"]._value.text() == "power on"
+    assert page.badges["watchdog"]._value.text() == "0"
 
     cs = tlm.ControlStateTelemetry(
         command_source=1,
@@ -96,8 +112,7 @@ def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
         motion_gate=True,
     )
     service.telemetry.emit(int(tlm.StreamId.CONTROL_STATE), cs)
-    assert page.badges["source"]._value.text() == "RC"
-    assert page.badges["gate"]._value.text() == "OPEN"
+    assert page.badges["fault"]._value.text() == "NONE"
 
     # DXL/I2C health badges populate from live servo + sensor telemetry.
     servos = tlm.ServoStatusTelemetry(
@@ -114,11 +129,12 @@ def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
         ]
     )
     service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), servos)
-    assert page.badges["dxl"]._value.text() == "1 servos"
+    assert page.badges["dxl"]._value.text() == "1/18"
+    assert page.badges["servo_faults"]._value.text() == "0"
 
     i2c = tlm.I2cSensorsRawTelemetry(feet=[tlm.FootRaw(proximity=10, pressure_raw=100)])
     service.telemetry.emit(int(tlm.StreamId.I2C_SENSORS_RAW), i2c)
-    assert page.badges["i2c"]._value.text() == "1 sensors"
+    assert page.badges["i2c"]._value.text() == "1/6"
 
 
 def test_overview_page_dxl_badge_reflects_power_off(qtbot) -> None:
@@ -137,7 +153,7 @@ def test_overview_page_dxl_badge_reflects_power_off(qtbot) -> None:
         watchdog_missed=0,
     )
     service.status_received.emit(st)
-    assert page.badges["dxl"]._value.text() == "power off"
+    assert page.badges["dxl"]._value.text() == "bus off"
 
 
 def test_mode_safety_page_constructs(qtbot) -> None:
@@ -160,8 +176,6 @@ def test_mode_safety_disables_hardware_controls_in_simulation(qtbot) -> None:
     service.connected.emit(True)
 
     assert not page.enter_maint_btn.isEnabled()
-    assert not page.enter_passive_btn.isEnabled()
-    assert not any(button.isEnabled() for button in page._bench_buttons)
 
 
 def test_diagnostics_page_shows_telemetry(qtbot) -> None:

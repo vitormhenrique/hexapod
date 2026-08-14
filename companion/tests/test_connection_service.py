@@ -14,8 +14,9 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
-from hexapod_protocol import api, config as cfg, telemetry as tlm
+from hexapod_protocol import api
+from hexapod_protocol import config as cfg
+from hexapod_protocol import telemetry as tlm
 
 pytest.importorskip("PySide6")
 
@@ -85,6 +86,121 @@ def test_command_when_disconnected_emits_error(qtbot) -> None:
     assert "not connected" in msg
 
 
+def test_stream_leases_arbitrate_max_rate_and_last_owner(monkeypatch) -> None:
+    from services import ConnectionService
+
+    service = ConnectionService()
+    sent = []
+    monkeypatch.setattr(
+        service,
+        "_send_subscribe",
+        lambda stream_id, rate_hz: sent.append(("subscribe", stream_id, rate_hz)),
+    )
+    monkeypatch.setattr(
+        service,
+        "_send_unsubscribe",
+        lambda stream_id: sent.append(("unsubscribe", stream_id)),
+    )
+    stream_id = int(tlm.StreamId.SERVO_STATUS)
+    overview = object()
+    tuning = object()
+
+    service.acquire_stream(overview, stream_id, 5)
+    service.acquire_stream(tuning, stream_id, 20)
+    service.set_stream_owner_active(tuning, False)
+    service.release_streams(overview)
+    service.set_stream_owner_active(tuning, True)
+    service.release_streams(tuning)
+
+    assert sent == [
+        ("subscribe", stream_id, 5),
+        ("subscribe", stream_id, 20),
+        ("subscribe", stream_id, 5),
+        ("unsubscribe", stream_id),
+        ("subscribe", stream_id, 20),
+        ("unsubscribe", stream_id),
+    ]
+
+
+def test_save_config_orders_safety_steps_and_verifies_readback(
+    qtbot, monkeypatch
+) -> None:
+    import services as services_mod
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+            self.config = cfg.default_robot_config()
+
+        def write_config(self, config):
+            self.calls.append("stage")
+            self.config = config
+            return True
+
+        def cfg_validate(self):
+            self.calls.append("validate")
+            return api.CfgResult(api.CFG_OK)
+
+        def dxl_torque(self, enabled):
+            self.calls.append(("torque", enabled))
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([0, 18])
+            )
+
+        def cfg_commit(self):
+            self.calls.append("commit")
+            return api.CfgResult(api.CFG_OK)
+
+        def read_config(self):
+            self.calls.append("readback")
+            return self.config
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    monkeypatch.setattr(services_mod.time, "sleep", lambda _seconds: None)
+    updates = []
+    service.config_save_changed.connect(
+        lambda busy, detail, readback: updates.append((busy, detail, readback))
+    )
+
+    service.save_config(client.config)
+    qtbot.waitUntil(
+        lambda: bool(updates) and updates[-1][0] is False,
+        timeout=2000,
+    )
+
+    assert client.calls == [
+        "stage",
+        "validate",
+        ("torque", False),
+        "commit",
+        "readback",
+    ]
+    assert updates[-1][1] == "saved and verified"
+    assert updates[-1][2] is client.config
+
+
+def test_rejected_maintenance_exit_clears_stale_local_lock(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def exit_maintenance(self, token):
+            return api.MaintResultMsg(api.MAINT_REJECTED, 2, token)
+
+    service = ConnectionService()
+    service._client = FakeClient()  # type: ignore[assignment]
+    service._maint_token = 77
+    service._stop_maint_heartbeat = lambda: None  # type: ignore[method-assign]
+
+    with qtbot.waitSignal(service.maint_result, timeout=2000):
+        service.exit_maintenance()
+
+    assert not service.maint_lock_held
+    assert not service.maintenance_setup_ready
+
+
 def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
     from services import ConnectionService
 
@@ -143,8 +259,8 @@ def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
 
 
 def test_enter_maintenance_one_call_retries_gate_then_scans(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     class FakeClient:
         def __init__(self) -> None:
@@ -199,8 +315,8 @@ def test_enter_maintenance_one_call_retries_gate_then_scans(qtbot, monkeypatch) 
 
 
 def test_released_joint_stages_goal_before_enabling_torque(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     class FakeClient:
         def __init__(self) -> None:
@@ -230,8 +346,8 @@ def test_released_joint_stages_goal_before_enabling_torque(qtbot, monkeypatch) -
 
 
 def test_gait_test_session_sets_up_and_unwinds_without_rc(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     class FakeClient:
         def __init__(self) -> None:
@@ -305,6 +421,37 @@ def test_gait_test_session_sets_up_and_unwinds_without_rc(qtbot, monkeypatch) ->
     assert ("mode", api.MAINT_CONTROL_JOINT_TARGETS) in client.calls
     assert ("power", False) in client.calls
     assert released == [True]
+
+
+def test_command_walk_sends_gait_before_twist(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def set_gait(self, gait):
+            self.calls.append(("gait", gait))
+            return api.MotionResultMsg(api.MOTION_OK, 8, True)
+
+        def set_body_twist(self, vx, vy, wz):
+            self.calls.append(("twist", vx, vy, wz))
+            return api.MotionResultMsg(api.MOTION_OK, 8, True)
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+
+    results = []
+    service.motion_result.connect(lambda kind, _res: results.append(kind))
+    service.command_walk(api.GAIT_RIPPLE, 0.5, 0.0, 0.0)
+    qtbot.waitUntil(lambda: len(results) == 2, timeout=2000)
+
+    assert client.calls == [
+        ("gait", api.GAIT_RIPPLE),
+        ("twist", 0.5, 0.0, 0.0),
+    ]
+    assert results == ["set_gait", "set_body_twist"]
 
 
 def test_gait_test_stop_requires_all_torque_off_acknowledgements(qtbot) -> None:
@@ -421,8 +568,8 @@ def test_simulation_suppresses_hardware_background_requests(qtbot) -> None:
 def test_passive_enter_requires_all_torque_off_acknowledgements(
     qtbot, monkeypatch
 ) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     class FakeClient:
         def __init__(self) -> None:
@@ -476,9 +623,6 @@ def test_passive_enter_refreshes_idempotently_when_already_active(qtbot) -> None
             self.calls.append(("enter",))
             return api.PassiveResult(api.PASSIVE_OK, 9)
 
-        def subscribe(self, stream_id, rate):
-            self.calls.append(("subscribe", stream_id, rate))
-
     service = ConnectionService()
     client = FakeClient()
     service._client = client  # type: ignore[assignment]
@@ -486,11 +630,8 @@ def test_passive_enter_refreshes_idempotently_when_already_active(qtbot) -> None
 
     with qtbot.waitSignal(service.passive_result, timeout=2000):
         service.passive_enter()
-    qtbot.waitUntil(lambda: len(client.calls) == 2, timeout=2000)
-    assert client.calls == [
-        ("enter",),
-        ("subscribe", int(tlm.StreamId.JOINT_STATE), 50),
-    ]
+    qtbot.waitUntil(lambda: not service.passive_busy, timeout=2000)
+    assert client.calls == [("enter",)]
 
 
 def test_dxl_get_param_emits_decoded_result(qtbot) -> None:
@@ -545,8 +686,8 @@ def _handshake_handlers():
 
 
 def test_connect_disconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     stream = RespondingStream(_handshake_handlers())
     monkeypatch.setattr(services_mod, "open_serial", lambda port, baud=115200: stream)
@@ -567,8 +708,8 @@ def test_connect_disconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None
 
 
 def test_connect_tcp_proxy_endpoint_uses_proxy_opener(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     stream = RespondingStream(_handshake_handlers())
     opened: list[str] = []
@@ -591,8 +732,8 @@ def test_connect_tcp_proxy_endpoint_uses_proxy_opener(qtbot, monkeypatch) -> Non
 def test_connect_version_mismatch_emits_event(qtbot, monkeypatch) -> None:
     # 4sa.5: a handshake against firmware on an incompatible MAJOR protocol
     # version must surface a diagnostic event rather than silently connecting.
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     handlers = _handshake_handlers()
     name = b"HexNav".ljust(api.DEVICE_NAME_LEN, b"\x00")
@@ -622,8 +763,8 @@ def test_connect_version_mismatch_emits_event(qtbot, monkeypatch) -> None:
 
 
 def test_connect_open_failure_emits_error(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     monkeypatch.setattr(services_mod, "open_serial", lambda port, baud=115200: None)
 
@@ -637,8 +778,8 @@ def test_connect_open_failure_emits_error(qtbot, monkeypatch) -> None:
 
 
 def test_connect_write_failure_does_not_report_connected(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     class FailingWriteStream(RespondingStream):
         def write(self, data: bytes) -> int:
@@ -663,8 +804,8 @@ def test_connect_write_failure_does_not_report_connected(qtbot, monkeypatch) -> 
 
 
 def test_connect_retries_after_startup_serial_failure(qtbot, monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     class FailingWriteStream(RespondingStream):
         def write(self, data: bytes) -> int:
@@ -697,8 +838,8 @@ def test_connect_retries_after_startup_serial_failure(qtbot, monkeypatch) -> Non
 
 
 def test_available_ports_discovers_without_hardware(monkeypatch) -> None:
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
     from transport import PortInfo
 
     ports = [PortInfo("/dev/cu.usbmodem1", "OpenRB-150", "hwid-1")]
@@ -711,8 +852,8 @@ def test_available_ports_discovers_without_hardware(monkeypatch) -> None:
 
 def test_reconnect_cycle_against_fakestream(qtbot, monkeypatch) -> None:
     """connect -> disconnect -> connect again re-handshakes on a fresh link."""
-    from services import ConnectionService
     import services as services_mod
+    from services import ConnectionService
 
     streams: list[RespondingStream] = []
 

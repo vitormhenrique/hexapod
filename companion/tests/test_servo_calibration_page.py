@@ -8,8 +8,7 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
-from hexapod_protocol import api, config as cfg
+from hexapod_protocol import config as cfg
 from hexapod_protocol import telemetry as tlm
 
 pytest.importorskip("PySide6")
@@ -179,7 +178,7 @@ def test_capture_advances_fixture_then_fits_leg(qtbot, monkeypatch) -> None:
     assert page._leg == 1
     assert page._fixture_deg == 180
     assert not page._pose_commanded
-    assert 0 in page._fits and page._fits[0]
+    assert page._fits.get(0)
     fit = page._fits[0][0]
     assert fit.ok and fit.sign == 1 and fit.trim_ticks == 0
     assert "Leg 1" in page.results.toPlainText()
@@ -199,19 +198,24 @@ def test_previous_pose_steps_back_without_moving(qtbot, monkeypatch) -> None:
     assert not page.prev_btn.isEnabled()  # first pose
 
 
-def test_apply_stages_fitted_sign_trim(qtbot, monkeypatch) -> None:
+def test_apply_requires_complete_calibration_and_saves_verified(qtbot, monkeypatch) -> None:
     service, page = _make_ready_page(qtbot)
-    # Inject a finished fit for leg 0 coxa without walking the UI.
+    fit = cfg.ServoCalibrationFit(
+        sign=1, trim_ticks=0, residual_ticks_rms=0.0, ok=True, detail="ok"
+    )
+    for leg in range(cfg.NUM_LEGS):
+        for joint in range(cfg.JOINTS_PER_LEG):
+            page._fits[leg][joint] = fit
     page._fits[0][0] = cfg.ServoCalibrationFit(
         sign=-1, trim_ticks=12, residual_ticks_rms=0.0, ok=True, detail="ok"
     )
     page._apply_gates()
     assert page.apply_btn.isEnabled()
-    staged = []
-    monkeypatch.setattr(service, "stage_config", lambda config: staged.append(config))
+    saved = []
+    monkeypatch.setattr(service, "save_config", lambda config: saved.append(config))
     page.apply_btn.click()
-    assert len(staged) == 1
-    servo = next(s for s in staged[0].servos if s.leg == 0 and s.joint == 0)
+    assert len(saved) == 1
+    servo = next(s for s in saved[0].servos if s.leg == 0 and s.joint == 0)
     assert servo.sign == -1
     assert servo.trim_ticks == 12
 
@@ -227,44 +231,42 @@ def test_center_failure_keeps_completed_leg_active(qtbot, monkeypatch) -> None:
     assert "not advancing" in page.pose_status.text()
 
 
-def test_validated_calibration_turns_torque_off_before_commit(qtbot, monkeypatch) -> None:
+def test_partial_fit_cannot_be_saved(qtbot) -> None:
+    _service, page = _make_ready_page(qtbot)
+    page._fits[0][0] = cfg.ServoCalibrationFit(
+        sign=1, trim_ticks=0, residual_ticks_rms=0.0, ok=True, detail="ok"
+    )
+    page._apply_gates()
+    assert not page.apply_btn.isEnabled()
+
+
+def test_verified_save_failure_unfreezes_calibration(qtbot) -> None:
     service, page = _make_ready_page(qtbot)
-    torque_calls = []
-    commit_calls = []
-    monkeypatch.setattr(service, "dxl_torque", lambda enabled: torque_calls.append(enabled))
-    monkeypatch.setattr(service, "commit_config", lambda: commit_calls.append(True))
+    page._save_pending = True
     page._set_busy(True)
 
-    service.config_result.emit("validate", api.CfgResult(api.CFG_OK))
-    assert torque_calls == [False]
-    assert not commit_calls
-
-    service.dxl_result.emit(
-        "torque",
-        SimpleNamespace(done=True, code=api.DXL_CODE_OK),
-    )
-    qtbot.wait(page.COMMIT_TORQUE_SETTLE_MS + 25)
-    assert commit_calls == [True]
-
-
-def test_torque_off_failure_does_not_commit_calibration(qtbot, monkeypatch) -> None:
-    service, page = _make_ready_page(qtbot)
-    torque_calls = []
-    commit_calls = []
-    monkeypatch.setattr(service, "dxl_torque", lambda enabled: torque_calls.append(enabled))
-    monkeypatch.setattr(service, "commit_config", lambda: commit_calls.append(True))
-    page._set_busy(True)
-
-    service.config_result.emit("validate", api.CfgResult(api.CFG_OK))
-    service.dxl_result.emit(
-        "torque",
-        SimpleNamespace(done=True, code=api.DXL_CODE_BUS_ERROR),
+    service.config_save_changed.emit(
+        False,
+        "torque off was not verified for every servo",
+        None,
     )
 
-    assert torque_calls == [False]
-    assert not commit_calls
     assert not page._busy
-    assert "torque-off failed" in page.pose_status.text()
+    assert "not verified" in page.pose_status.text()
+
+
+def test_unrelated_joint_result_does_not_complete_centering(qtbot, monkeypatch) -> None:
+    service, page = _make_ready_page(qtbot)
+    service.joint_target_result.emit(_ok_result())
+    assert not page._centered
+    assert not page._busy
+
+    monkeypatch.setattr(service, "center_all_joints", lambda: None)
+    page.center_all_btn.click()
+    assert page._pending_joint_action == "center_all"
+    service.joint_target_result.emit(SimpleNamespace(ok=False, result=7))
+    assert not page._centered
+    assert "remains locked" in page.pose_status.text()
 
 
 def test_present_telemetry_fills_use_present(qtbot) -> None:

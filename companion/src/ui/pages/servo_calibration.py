@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import math
 
+from hexapod_protocol import telemetry as tlm
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
     QFormLayout,
@@ -35,12 +36,11 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from hexapod_protocol import api, telemetry as tlm
 from theme import DRACULA
 
 # BasePage lives in ui.pages.__init__. Importing the package here is safe when
 # this module is loaded from the end of that file (BasePage already defined).
-from ui.pages import BasePage  # noqa: E402
+from ui.pages import BasePage
 
 
 class ServoCalibrationPage(BasePage):
@@ -67,8 +67,6 @@ class ServoCalibrationPage(BasePage):
     # A stuck in-flight command must never brick the page: if no result
     # arrives within this window, re-enable the controls.
     BUSY_TIMEOUT_MS = 10_000
-    COMMIT_TORQUE_SETTLE_MS = 150
-
     def build(self) -> None:
         from hexapod_protocol import config as cfg
 
@@ -84,7 +82,8 @@ class ServoCalibrationPage(BasePage):
         self._setup_ready = False
         self._state = -1
         self._busy = False
-        self._commit_waiting_for_torque_off = False
+        self._pending_joint_action: str | None = None
+        self._save_pending = False
         self._centering_completed_leg: int | None = None
         self._busy_timer = QTimer(self)
         self._busy_timer.setSingleShot(True)
@@ -128,8 +127,7 @@ class ServoCalibrationPage(BasePage):
         self.service.maint_result.connect(self._on_maint_result)
         self.service.maintenance_setup_changed.connect(self._on_setup_changed)
         self.service.config_loaded.connect(self._on_config_loaded)
-        self.service.config_staged.connect(self._on_config_staged)
-        self.service.config_result.connect(self._on_config_result)
+        self.service.config_save_changed.connect(self._on_config_save_changed)
         self.service.joint_target_result.connect(self._on_joint_result)
         self.service.dxl_result.connect(self._on_dxl_result)
         self.service.telemetry.connect(self._on_telemetry)
@@ -439,8 +437,9 @@ class ServoCalibrationPage(BasePage):
         if not self._bench_ready(ignore_centered=True):
             self.pose_status.setText("not ready: enter maintenance and scan first")
             return
+        self._pending_joint_action = "center_all"
         self._set_busy(True)
-        self._centered = True
+        self._centered = False
         self._pose_commanded = False
         self.pose_status.setText("centering all 18 servos at 180\u00b0...")
         self.service.center_all_joints()
@@ -460,6 +459,8 @@ class ServoCalibrationPage(BasePage):
         self.pose_status.setText(
             f"sending {self.JOINTS[joint][0].lower()} = {tick}..."
         )
+        self._pending_joint_action = "adjust_joint"
+        self._set_busy(True)
         # Setup (mode/torque) was done by Command pose; skip it for speed.
         self.service.set_joint_targets_raw_ticks(
             [(self._leg, joint, tick)],
@@ -484,8 +485,9 @@ class ServoCalibrationPage(BasePage):
                 )
             return
         ticks = [self._tick_spins[j].value() for _n, j in self.JOINTS]
+        self._pending_joint_action = "command_pose"
         self._set_busy(True)
-        self._pose_commanded = True
+        self._pose_commanded = False
         self.pose_status.setText(
             f"commanding leg {self._leg + 1} @ {self._fixture_deg}\u00b0 "
             f"ticks={ticks}..."
@@ -551,6 +553,7 @@ class ServoCalibrationPage(BasePage):
         """Return the completed leg to the physical center before advancing."""
         leg = self._leg
         self._centering_completed_leg = leg
+        self._pending_joint_action = "center_completed_leg"
         self._set_busy(True)
         self._pose_commanded = False
         self.pose_status.setText(
@@ -648,15 +651,19 @@ class ServoCalibrationPage(BasePage):
         if applied == 0:
             self.pose_status.setText("no successful fits to write")
             return
+        self._save_pending = True
         self._set_busy(True)
-        self.pose_status.setText(f"staging {applied} servo sign/trim update(s)...")
-        self.service.stage_config(edited)
+        self.pose_status.setText(
+            f"saving {applied} servo sign/trim update(s) with verification..."
+        )
+        self.service.save_config(edited)
         self._apply_gates()
 
     def _fits_ready(self) -> bool:
-        return any(
-            any(getattr(fit, "ok", False) for fit in joints.values())
-            for joints in self._fits.values()
+        return all(
+            getattr(self._fits[leg].get(joint), "ok", False)
+            for leg in range(self._cfg.NUM_LEGS)
+            for joint in range(self._cfg.JOINTS_PER_LEG)
         )
 
     def _set_busy(self, busy: bool) -> None:
@@ -666,14 +673,23 @@ class ServoCalibrationPage(BasePage):
         if busy:
             self._busy_timer.start()
         else:
-            self._commit_waiting_for_torque_off = False
-            self._centering_completed_leg = None
             self._busy_timer.stop()
+
+    def _cancel_pending_action(self) -> None:
+        action = self._pending_joint_action
+        self._pending_joint_action = None
+        self._centering_completed_leg = None
+        if action == "center_all":
+            self._centered = False
+        if action == "command_pose":
+            self._pose_commanded = False
+        self._save_pending = False
+        self._set_busy(False)
 
     def _on_busy_timeout(self) -> None:
         if not self._busy:
             return
-        self._set_busy(False)
+        self._cancel_pending_action()
         self.pose_status.setText(
             "no response to the last command \u2014 controls re-enabled"
         )
@@ -683,7 +699,7 @@ class ServoCalibrationPage(BasePage):
         """A service worker failed without a typed result: unfreeze."""
         if not self._busy:
             return
-        self._set_busy(False)
+        self._cancel_pending_action()
         self.pose_status.setText(str(message))
         self._apply_gates()
 
@@ -703,7 +719,7 @@ class ServoCalibrationPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         self._connected = connected
         if connected:
-            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 25)
+            self.request_stream(int(tlm.StreamId.SERVO_STATUS), 25)
             self.service.load_config()
         else:
             self._lock_held = False
@@ -763,55 +779,29 @@ class ServoCalibrationPage(BasePage):
             name = name.decode("utf-8", errors="ignore")
         self.pose_status.setText(f"config loaded ({str(name).strip() or 'robot'})")
 
-    def _on_config_staged(self, ok: bool) -> None:
-        if not ok:
-            self._set_busy(False)
-            self.pose_status.setText("config stage failed")
-            self._apply_gates()
+    def _on_config_save_changed(self, busy: bool, detail: str, readback) -> None:
+        if not self._save_pending:
             return
-        self._busy_timer.start()  # re-arm for the validate leg
-        self.pose_status.setText("staged — validating...")
-        self.service.validate_config()
-
-    def _on_config_result(self, kind: str, res) -> None:
-        if kind == "validate":
-            if res is not None and res.ok:
-                # ConfigApi permits committing geometry/servo changes only
-                # after every servo torque state is confirmed off. Fixture
-                # calibration necessarily turned torque on, so sequence that
-                # required safety transition before issuing CFG_COMMIT.
-                self._commit_waiting_for_torque_off = True
-                self._busy_timer.start()
-                self.pose_status.setText("validated — disabling servo torque...")
-                self.service.dxl_torque(False)
-            else:
-                self._set_busy(False)
-                code = getattr(res, "result", "?")
-                self.pose_status.setText(f"validate failed ({code})")
-                self._apply_gates()
-        elif kind == "commit":
-            self._set_busy(False)
-            if res is not None and res.ok:
-                self.pose_status.setText("commit ok — reloading config")
-                self.service.load_config()
-            else:
-                code = getattr(res, "result", "?")
-                reasons = {
-                    api.CFG_VOLATILE: "OpenLog storage is unavailable",
-                    api.CFG_COMMIT_FAILED: "OpenLog write failed",
-                    api.CFG_REJECTED: (
-                        "maintenance lock was lost or servo torque is still on"
-                    ),
-                }
-                self.pose_status.setText(
-                    f"commit failed ({code}): {reasons.get(code, 'unknown error')}"
-                )
-            self._apply_gates()
+        self.pose_status.setText(detail)
+        if busy:
+            self._busy_timer.start()
+            return
+        self._save_pending = False
+        self._set_busy(False)
+        if readback is not None:
+            self._robot_config = readback
+            self._servo_map = self._cfg.ServoMap(readback)
+        self._apply_gates()
 
     def _on_joint_result(self, res) -> None:
+        action = self._pending_joint_action
+        if action is None:
+            return
         centering_leg = self._centering_completed_leg
+        self._pending_joint_action = None
+        self._centering_completed_leg = None
         self._set_busy(False)
-        if centering_leg is not None:
+        if action == "center_completed_leg" and centering_leg is not None:
             if res is not None and getattr(res, "ok", False):
                 self._advance_after_leg_center(centering_leg)
                 return
@@ -820,6 +810,25 @@ class ServoCalibrationPage(BasePage):
             )
             self._apply_gates()
             return
+        if action == "center_all":
+            self._centered = bool(res is not None and getattr(res, "ok", False))
+            self._pose_commanded = False
+            self.pose_status.setText(
+                "all 18 servos centered"
+                if self._centered
+                else "center command failed; fixture motion remains locked"
+            )
+            self._refresh_pose_ui()
+            self._apply_gates()
+            return
+        if action == "command_pose":
+            self._pose_commanded = bool(
+                res is not None and getattr(res, "ok", False)
+            )
+            if not self._pose_commanded:
+                self.pose_status.setText("pose command failed; capture remains locked")
+                self._apply_gates()
+                return
         if res is None:
             self.pose_status.setText("joint command: no response")
         elif getattr(res, "ok", False):
@@ -835,27 +844,6 @@ class ServoCalibrationPage(BasePage):
         self._apply_gates()
 
     def _on_dxl_result(self, kind: str, res) -> None:
-        if kind == "torque" and self._commit_waiting_for_torque_off:
-            self._commit_waiting_for_torque_off = False
-            torque_off = bool(
-                res is not None
-                and getattr(res, "done", False)
-                and getattr(res, "code", None) == api.DXL_CODE_OK
-            )
-            if not torque_off:
-                code = getattr(res, "code", "?")
-                self._set_busy(False)
-                self.pose_status.setText(
-                    f"torque-off failed ({code}); config remains staged"
-                )
-                self._apply_gates()
-                return
-            self.pose_status.setText("torque off — committing to OpenLog...")
-            self._busy_timer.start()
-            QTimer.singleShot(
-                self.COMMIT_TORQUE_SETTLE_MS, self._commit_after_torque_off
-            )
-            return
         if kind != "scan":
             return
         count = len(res.servos()) if res is not None and res.done else 0
@@ -864,13 +852,6 @@ class ServoCalibrationPage(BasePage):
             self._setup_ready = True
             self.enter_maint_btn.setText("Maintenance ready")
             self._apply_gates()
-
-    def _commit_after_torque_off(self) -> None:
-        """Let the firmware publish confirmed torque-off before CFG_COMMIT."""
-        if not self._busy:
-            return
-        self._busy_timer.start()
-        self.service.commit_config()
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id != int(tlm.StreamId.SERVO_STATUS):

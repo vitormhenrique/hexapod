@@ -40,9 +40,19 @@ def test_safety_bar_has_all_badges_and_estop(qtbot) -> None:
     bar = SafetyBar()
     qtbot.addWidget(bar)
     assert bar.objectName() == "SafetyBar"
-    # Seven status badges are exposed for MainWindow wiring.
-    for attr in ("conn", "mode", "arming", "torque", "source", "rc", "battery"):
+    # Safety-critical status badges are exposed for MainWindow wiring.
+    for attr in (
+        "conn",
+        "mode",
+        "arming",
+        "dxl_power",
+        "source",
+        "lock",
+        "rc",
+        "battery",
+    ):
         assert hasattr(bar, attr)
+    assert bar.dxl_power._caption.text() == "DXL POWER"
     bar.set_connection(True)
     assert bar.conn._value.text() == "Connected"
 

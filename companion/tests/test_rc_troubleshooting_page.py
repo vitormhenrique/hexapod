@@ -7,7 +7,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import telemetry as tlm
 
 pytest.importorskip("PySide6")
@@ -23,18 +22,51 @@ def _make_page(qtbot):
     return service, page
 
 
-def test_connect_subscribes_only_to_controller_state(qtbot, monkeypatch) -> None:
+def test_connect_subscribes_to_controller_and_radio_health(qtbot, monkeypatch) -> None:
     service, page = _make_page(qtbot)
     subscriptions = []
     monkeypatch.setattr(
         service,
-        "subscribe",
-        lambda stream_id, rate_hz: subscriptions.append((stream_id, rate_hz)),
+        "acquire_stream",
+        lambda owner, stream_id, rate_hz: subscriptions.append(
+            (owner, stream_id, rate_hz)
+        ),
     )
 
     page._on_connected(True)
 
-    assert subscriptions == [(int(tlm.StreamId.CONTROLLER_STATE), 20)]
+    assert subscriptions == [
+        (page, int(tlm.StreamId.CONTROLLER_STATE), 20),
+        (page, int(tlm.StreamId.RC_INPUT), 20),
+        (page, int(tlm.StreamId.RC_DIAGNOSTICS), 10),
+    ]
+
+
+def test_radio_diagnostics_show_link_quality_and_correct_bindings(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    service.telemetry.emit(
+        int(tlm.StreamId.RC_DIAGNOSTICS),
+        tlm.RcDiagnosticsTelemetry(
+            ever_seen=True,
+            failsafe=False,
+            link_stats_valid=True,
+            frames_decoded=123,
+            crc_errors=2,
+            last_frame_age_ms=14,
+            link_stats=tlm.RcLinkStats(
+                up_rssi_ant1=67,
+                up_link_quality=92,
+            ),
+        ),
+    )
+
+    assert page.link["state"]._value.text() == "linked"
+    assert page.link["rssi"]._value.text() == "-67 dBm"
+    assert page.link["lq"]._value.text() == "92%"
+    assert page.link["age"]._value.text() == "14 ms"
+    assert page.link["crc"]._value.text() == "2"
+    assert page.raw_table.item(page.raw_rows["enc1"], 1).text() == "ENC1"
+    assert "capture" in page.raw_table.item(page.raw_rows["btn4"], 1).text()
 
 
 def test_controller_state_updates_bridge_intent_and_raw_inputs(qtbot) -> None:

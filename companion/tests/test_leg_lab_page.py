@@ -1,8 +1,7 @@
-"""Headless UI tests for the Leg Lab maintenance page.
+"""Headless UI tests for the Cartesian Foot IK maintenance page.
 
-The page is built off-screen with a disconnected :class:`ConnectionService`.
-Leg/joint target results and live ``leg_state`` telemetry are emitted directly
-as Qt signals so the page reactions can be exercised without hardware.
+Leg target results and live ``leg_state`` telemetry are emitted directly as Qt
+signals so the page reactions can be exercised without hardware.
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -50,33 +48,19 @@ def test_each_leg_defaults_to_configured_safe_home(qtbot) -> None:
         assert page.reach_badge._value.text() == "SAFE"
 
 
-def test_joint_defaults_to_180_and_sends_relative_centidegrees(
-    qtbot, monkeypatch
-) -> None:
-    service, page = _make_page(qtbot)
-    sent = []
-    monkeypatch.setattr(
-        service,
-        "set_joint_target",
-        lambda leg, joint, angle: sent.append((leg, joint, angle)),
-    )
-
-    assert page.joint_angle.minimum() == 90
-    assert page.joint_angle.maximum() == 270
-    assert page.joint_angle.value() == 180
-    assert "1024–3072 ticks" in page.joint_limit_hint.text()
-    page._send_joint_target()
-    assert sent[-1] == (0, 0, 0)
-
-    page.joint_angle.setValue(195)
-    page._send_joint_target()
-    assert sent[-1] == (0, 0, 1500)
+def test_individual_joint_editor_is_owned_by_joint_matrix(qtbot) -> None:
+    _service, page = _make_page(qtbot)
+    assert not hasattr(page, "joint_angle")
+    assert not hasattr(page, "send_joint_btn")
+    assert not hasattr(page, "joint_result")
 
 
 def test_unreachable_xyz_is_flagged_and_send_is_blocked(qtbot) -> None:
     service, page = _make_page(qtbot)
     service.connected.emit(True)
     service.maint_lock_changed.emit(True, 7)
+    assert not page.send_foot_btn.isEnabled()
+    service.maintenance_setup_changed.emit(False, True, "ready: 18 servos scanned")
     assert page.send_foot_btn.isEnabled()
 
     for spin in page._foot_spins.values():
@@ -130,34 +114,6 @@ def test_leg_target_failure_emits_message(qtbot) -> None:
     assert "failed" in page.foot_result.text()
 
 
-def test_joint_target_result_shows_tick_and_clamp(qtbot) -> None:
-    service, page = _make_page(qtbot)
-    res = api.JointTargetResult(
-        result=api.MAINT_TARGET_OK,
-        state=8,
-        clamped_low=True,
-        clamped_high=False,
-        tick=1234,
-    )
-    service.joint_target_result.emit(res)
-    text = page.joint_result.text()
-    assert "tick=1234" in text
-    assert "low" in text
-
-
-def test_joint_target_rejected(qtbot) -> None:
-    service, page = _make_page(qtbot)
-    res = api.JointTargetResult(
-        result=api.MAINT_TARGET_REJECTED,
-        state=2,
-        clamped_low=False,
-        clamped_high=False,
-        tick=0,
-    )
-    service.joint_target_result.emit(res)
-    assert "rejected" in page.joint_result.text()
-
-
 def test_maint_result_updates_lock_label(qtbot) -> None:
     service, page = _make_page(qtbot)
     # MaintResultMsg(result, state, token); a nonzero token means lock held.
@@ -190,6 +146,4 @@ def test_send_target_when_disconnected_is_safe(qtbot) -> None:
     errors = []
     service.error.connect(lambda m: errors.append(m))
     page._send_foot_target()
-    page._send_joint_target()
     assert any("leg target" in e for e in errors)
-    assert any("joint target" in e for e in errors)

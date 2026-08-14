@@ -12,7 +12,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -35,7 +34,7 @@ def _page(qtbot):
 
 
 def test_gait_lab_builds_with_all_gaits(qtbot) -> None:
-    service, page = _page(qtbot)
+    _service, page = _page(qtbot)
     assert set(page._gait_buttons) == {
         api.GAIT_STAND,
         api.GAIT_SIT,
@@ -121,15 +120,14 @@ def test_apply_params_sends_gait_params(qtbot) -> None:
 def test_pad_press_sends_walking_gait_then_scaled_twist(qtbot) -> None:
     service, page = _page(qtbot)
     calls = []
-    service.set_gait = lambda g: calls.append(("gait", g))  # type: ignore[method-assign]
+    service.command_walk = lambda *a: calls.append(("walk", *a))  # type: ignore[method-assign]
     service.set_body_twist = lambda *a: calls.append(("twist", *a))  # type: ignore[method-assign]
     page._gait_buttons[api.GAIT_RIPPLE].setChecked(True)
     page._walk_speed.setValue(50)
     page._pad_buttons["forward"].pressed.emit()
     page._pad_buttons["forward"].released.emit()
     assert calls == [
-        ("gait", api.GAIT_RIPPLE),
-        ("twist", 0.5, 0.0, 0.0),
+        ("walk", api.GAIT_RIPPLE, 0.5, 0.0, 0.0),
         ("twist", 0.0, 0.0, 0.0),
     ]
 
@@ -137,20 +135,18 @@ def test_pad_press_sends_walking_gait_then_scaled_twist(qtbot) -> None:
 def test_pad_press_auto_selects_tripod_when_posture_checked(qtbot) -> None:
     service, page = _page(qtbot)
     calls = []
-    service.set_gait = lambda g: calls.append(("gait", g))  # type: ignore[method-assign]
-    service.set_body_twist = lambda *a: calls.append(("twist", *a))  # type: ignore[method-assign]
+    service.command_walk = lambda *a: calls.append(("walk", *a))  # type: ignore[method-assign]
     page._gait_buttons[api.GAIT_STAND].setChecked(True)
     page._walk_speed.setValue(100)
     page._pad_buttons["left"].pressed.emit()
-    assert calls == [("gait", api.GAIT_TRIPOD), ("twist", 0.0, 1.0, 0.0)]
+    assert calls == [("walk", api.GAIT_TRIPOD, 0.0, 1.0, 0.0)]
     assert page._gait_buttons[api.GAIT_TRIPOD].isChecked()
 
 
 def test_pad_directions_cover_lateral_and_yaw(qtbot) -> None:
     service, page = _page(qtbot)
     calls = []
-    service.set_gait = lambda g: None  # type: ignore[method-assign]
-    service.set_body_twist = lambda *a: calls.append(a)  # type: ignore[method-assign]
+    service.command_walk = lambda _gait, *a: calls.append(a)  # type: ignore[method-assign]
     page._gait_buttons[api.GAIT_WAVE].setChecked(True)
     page._walk_speed.setValue(100)
     page._pad_buttons["left"].pressed.emit()

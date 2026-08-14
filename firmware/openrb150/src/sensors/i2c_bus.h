@@ -57,6 +57,13 @@ class I2cBus {
   bool writeRead(uint8_t addr, const uint8_t* write_data, uint8_t write_len,
                  uint8_t* read_data, uint8_t read_len);
 
+  // Clear stale master state (frozen FIFO commands / latched error flags)
+  // left behind by a prior NACKed transaction. write()/read() do this
+  // internally; call it explicitly before handing the bus to a library that
+  // talks to Wire directly (e.g. the SparkFun OLED driver). No-op on SAMD,
+  // whose register driver already resynchronizes per transaction.
+  void prepareForDirectWire();
+
   // Probe a 7-bit address on the currently selected bus/channel. Returns true
   // if the device ACKed (endTransmission() == 0).
   bool probe(uint8_t addr);

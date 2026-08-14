@@ -64,6 +64,9 @@ bool QwiicDebugOled::begin(uint8_t address) {
   (void)address;
   return false;
 #else
+  // The SparkFun driver talks to Wire directly; flush any master state a
+  // prior NACKed probe left behind (see I2cBus::prepareForDirectWire).
+  bus_.prepareForDirectWire();
   if (!oled_.begin(bus_.wire(), address)) return false;
   oled_.setFont(&QW_FONT_5X7);
   oled_.erase();
@@ -192,6 +195,7 @@ bool QwiicDebugOled::drawPage(uint8_t page,
   return false;
 #else
   if (!ready_ || page >= kPageCount) return false;
+  bus_.prepareForDirectWire();
   char line[22];
   formatLine(page, state, line);
   const uint8_t y = static_cast<uint8_t>(page * 8u);

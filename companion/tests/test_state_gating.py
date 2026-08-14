@@ -143,15 +143,12 @@ def _mode_safety_page(qtbot):
 
 
 def test_mode_safety_gates_disconnected(qtbot) -> None:
-    svc, page = _mode_safety_page(qtbot)
+    _svc, page = _mode_safety_page(qtbot)
     for btn in (
         page.arm_btn,
         page.disarm_btn,
         page.enter_maint_btn,
         page.exit_maint_btn,
-        page.enter_passive_btn,
-        page.exit_passive_btn,
-        *page._bench_buttons,
     ):
         assert not btn.isEnabled()
 
@@ -164,28 +161,23 @@ def test_mode_safety_gates_follow_state_and_lock(qtbot) -> None:
     assert page.arm_btn.isEnabled()
     assert page.enter_maint_btn.isEnabled()
     assert not page.exit_maint_btn.isEnabled()
-    assert not page.exit_passive_btn.isEnabled()
 
-    # Passive pose (9): exit passive available, arm/enter-maint not.
+    # Passive pose (9): authority controls remain unavailable here; the
+    # dedicated Passive Pose screen owns exit.
     svc.state_changed.emit(9)
-    assert page.exit_passive_btn.isEnabled()
     assert not page.arm_btn.isEnabled()
     assert not page.enter_maint_btn.isEnabled()
     assert page.enter_maint_btn.toolTip() != ""
 
-    # Maintenance lock held: bench + exit-maint open up.
+    # Maintenance lock held: exit-maint opens; bench tools live in Configure.
     svc.state_changed.emit(8)
     svc.maint_lock_changed.emit(True, 42)
     assert page.exit_maint_btn.isEnabled()
-    for btn in page._bench_buttons:
-        assert btn.isEnabled()
     assert not page.enter_maint_btn.isEnabled()
 
-    # Lock released in Disarmed: bench closes, enter reopens.
+    # Lock released in Disarmed: enter reopens.
     svc.maint_lock_changed.emit(False, 0)
     svc.state_changed.emit(2)
-    for btn in page._bench_buttons:
-        assert not btn.isEnabled()
     assert page.enter_maint_btn.isEnabled()
 
     # Disconnect closes everything again.
@@ -206,7 +198,7 @@ def test_mode_safety_clear_fault_gated_to_fault_states(qtbot) -> None:
 # --- Leg Lab gating -------------------------------------------------------
 
 
-def test_leg_lab_send_buttons_need_lock(qtbot) -> None:
+def test_foot_ik_send_requires_ready_maintenance(qtbot) -> None:
     from services import ConnectionService
     from ui.pages import LegLabPage
 
@@ -218,8 +210,9 @@ def test_leg_lab_send_buttons_need_lock(qtbot) -> None:
     svc.connected.emit(True)
     assert not page.send_foot_btn.isEnabled()  # still needs the lock
     svc.maint_lock_changed.emit(True, 7)
+    assert not page.send_foot_btn.isEnabled()  # lock alone is not enough
+    svc.maintenance_setup_changed.emit(False, True, "ready: 18 servos scanned")
     assert page.send_foot_btn.isEnabled()
-    assert page.send_joint_btn.isEnabled()
     assert page.exit_maint_btn.isEnabled()
     assert not page.enter_maint_btn.isEnabled()
     svc.maint_lock_changed.emit(False, 0)

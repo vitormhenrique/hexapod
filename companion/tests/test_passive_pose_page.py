@@ -12,7 +12,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -49,12 +48,15 @@ def test_joint_state_populates_table(qtbot) -> None:
     assert page.table.rowCount() == 2
 
 
-def test_passive_enter_result_sets_badge(qtbot) -> None:
+def test_passive_badge_requires_confirmed_state(qtbot) -> None:
     service, page = _make_page(qtbot)
     res = api.PassiveResult(api.PASSIVE_OK, 1)
     service.passive_result.emit("enter", res)
     assert "enter" in page.mode_result.text()
     assert "ok" in page.mode_result.text()
+    assert "torque off" not in page.mode_badge._value.text()
+
+    service.state_changed.emit(int(tlm.SafetyState.PASSIVE_POSE_STREAM))
     assert "torque off" in page.mode_badge._value.text()
 
 

@@ -13,7 +13,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 from hexapod_protocol.framing import MsgType
@@ -173,19 +172,55 @@ def test_capture_toggle_forwards_to_client(qtbot) -> None:
 
 def test_disconnect_resets_cards(qtbot) -> None:
     service, page = _make_page(qtbot)
+    fake = _FakeClient(
+        DiagnosticsSnapshot(
+            rx_frames=1,
+            tx_frames=1,
+            decode_errors=0,
+            raw_captured=0,
+            capture_enabled=False,
+        ),
+        [],
+    )
+    service._client = fake
     rec = tlm.HealthTelemetry(
         uptime_ms=5000, state=4, fault_reason=0, watchdog_missed=0, battery_mv=12000
     )
+    stats = tlm.ApiStatsTelemetry(
+        tx_backlog=0,
+        dropped_per_stream=[],
+        rx_frames=12,
+        rx_bad=2,
+        rx_overflow=1,
+    )
     service.telemetry.emit(int(tlm.StreamId.HEALTH), rec)
+    service.telemetry.emit(int(tlm.StreamId.API_STATS), stats)
     page._refresh_timing()
+    page._refresh_protocol()
+    page.raw_feed.setPlainText("stale frame")
+    page.capture_chk.setChecked(True)
     assert page.uptime_card._value.text() != "--"
+    assert page.fw_rx_card._value.text() == "12"
     page._on_connected(False)
     assert page.uptime_card._value.text() == "--"
+    assert page.fw_rx_card._value.text() == "--"
+    assert page.fw_bad_card._value.text() == "--"
+    assert page.fw_overflow_card._value.text() == "--"
     assert page.dxl_table.rowCount() == 0
+    assert page.raw_feed.toPlainText() == ""
+    assert not page.capture_chk.isChecked()
+    assert fake.capture is False
+
+
+def test_raw_inspector_is_expert_only_by_default(qtbot) -> None:
+    _service, page = _make_page(qtbot)
+    assert page.raw_body.isHidden()
+    page.raw_gate.setChecked(True)
+    assert not page.raw_body.isHidden()
 
 
 def test_refresh_safe_when_disconnected(qtbot) -> None:
-    service, page = _make_page(qtbot)
+    _service, page = _make_page(qtbot)
     # No client, no telemetry: a full refresh must not raise.
     page._refresh()
     assert page.rx_card._value.text() == "--"

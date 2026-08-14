@@ -8,15 +8,14 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import telemetry as tlm
 
 pytest.importorskip("PySide6")
 pytest.importorskip("pyqtgraph")
 
-from data.urdf_model import find_hexnav_description  # noqa: E402
+from data.urdf_model import find_hexnav_description
 
-from .replay_fixtures import build_sample_session  # noqa: E402
+from .replay_fixtures import build_sample_session
 
 # The viewer needs the HexNav description to render anything meaningful.
 pytestmark = pytest.mark.skipif(
@@ -65,10 +64,12 @@ def test_live_ignored_in_replay_mode(qtbot) -> None:
 
 def test_subscribes_on_connect(qtbot) -> None:
     page, service = _make_page(qtbot)
-    calls: list[tuple[int, int]] = []
-    service.subscribe = lambda sid, rate: calls.append((sid, rate))  # type: ignore
+    calls: list[tuple[object, int, int]] = []
+    service.acquire_stream = lambda owner, sid, rate: calls.append(  # type: ignore
+        (owner, sid, rate)
+    )
     service.connected.emit(True)
-    subscribed = {sid for sid, _ in calls}
+    subscribed = {sid for owner, sid, _ in calls if owner is page}
     assert int(tlm.StreamId.JOINT_STATE) in subscribed
     assert int(tlm.StreamId.SERVO_STATUS) in subscribed
 

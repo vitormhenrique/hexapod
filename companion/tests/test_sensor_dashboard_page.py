@@ -1,7 +1,7 @@
-"""Headless UI tests for the Sensor Dashboard & I2C page.
+"""Headless UI tests for the foot-sensor hardware page.
 
-Topology, sensor-status, rate, and calibrate results are emitted directly as Qt
-signals; the live foot table is driven by telemetry emissions. No hardware.
+Topology, sensor-status, and rate results are emitted directly as Qt signals;
+the raw foot table is driven by telemetry emissions. No hardware.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -69,18 +68,8 @@ def test_live_raw_telemetry_fills_table(qtbot) -> None:
     service.telemetry.emit(
         int(tlm.StreamId.I2C_SENSORS_RAW), tlm.I2cSensorsRawTelemetry(feet)
     )
-    assert page.live_table.item(0, 4).text() == "100"
-    assert page.live_table.item(5, 5).text() == "205"
-
-
-def test_live_contact_telemetry_fills_state(qtbot) -> None:
-    service, page = _make_page(qtbot)
-    feet = [tlm.FootContact(state=3, confidence=180, pressure_delta=40) for _ in range(6)]
-    service.telemetry.emit(
-        int(tlm.StreamId.CONTACT_STATE), tlm.ContactStateTelemetry(feet)
-    )
-    assert page.live_table.item(0, 2).text() == "LOADED"
-    assert page.live_table.item(0, 3).text() == "180"
+    assert page.live_table.item(0, 2).text() == "100"
+    assert page.live_table.item(5, 3).text() == "205"
 
 
 def test_sensor_status_updates_present_and_polling(qtbot) -> None:
@@ -94,8 +83,9 @@ def test_sensor_status_updates_present_and_polling(qtbot) -> None:
     )
     assert page.live_table.item(0, 1).text() == "yes"
     assert page.live_table.item(1, 1).text() == "no"
-    assert page.live_table.item(0, 2).text() == "LOADED"
-    assert "polling=on" in page.live_status.text()
+    assert page.live_table.item(0, 2).text() == "1234"
+    assert "1/6 sensors detected" in page.live_status.text()
+    assert "polling on" in page.live_status.text()
 
 
 def test_sensor_status_none_is_handled(qtbot) -> None:
@@ -112,12 +102,6 @@ def test_rate_result_message(qtbot) -> None:
     assert "rejected" in page.rate_result.text()
 
 
-def test_calibrate_result_message(qtbot) -> None:
-    service, page = _make_page(qtbot)
-    service.sensor_calibrate_result.emit(api.SensorCalibrateResult(api.SENSOR_OK, 0x3F))
-    assert "0x3F" in page.cal_result.text()
-
-
 def test_disconnect_clears_tables(qtbot) -> None:
     service, page = _make_page(qtbot)
     service.i2c_topology.emit(_topology())
@@ -127,12 +111,12 @@ def test_disconnect_clears_tables(qtbot) -> None:
     )
     page._on_connected(False)
     assert page.topo_table.rowCount() == 0
-    assert page.live_table.item(0, 4).text() == "--"
+    assert page.live_table.item(0, 2).text() == "--"
     assert "disconnected" in page.mux_badge._value.text()
 
 
 def test_actions_safe_when_disconnected(qtbot) -> None:
-    service, page = _make_page(qtbot)
+    service, _page = _make_page(qtbot)
     errors = []
     service.error.connect(lambda m: errors.append(m))
     service.refresh_i2c_topology()

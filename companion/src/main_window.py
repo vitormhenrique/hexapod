@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from hexapod_protocol import telemetry as tlm
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QMainWindow,
     QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -19,21 +21,82 @@ from ui.pages import (
     JointMatrixPage,
     LegLabPage,
     ModeSafetyPage,
-    ModelViewerPage,
+    OpenLogConfigFilePage,
     OverviewPage,
     PassivePosePage,
     PlotWorkbenchPage,
+    PoseViewerPage,
     RcTroubleshootingPage,
+    SensorDashboardPage,
     ServoCalibrationPage,
     ServoConfigPage,
     ServoTuningPage,
-    SensorDashboardPage,
-    OpenLogConfigFilePage,
-    UrdfViewerPage,
 )
 from ui.widgets import EventStrip, NavRail, SafetyBar
 
-from hexapod_protocol import telemetry as tlm
+WORKSPACES = (
+    (
+        "dashboard",
+        "Dashboard",
+        (
+            ("connect", "Connection", ConnectPage),
+            ("overview", "Overview", OverviewPage),
+            ("mode_safety", "Safety", ModeSafetyPage),
+        ),
+    ),
+    (
+        "motion",
+        "Operate",
+        (
+            ("gait_lab", "Gait", GaitLabPage),
+            ("foot_contact", "Contact", FootContactPage),
+            ("passive_pose", "Passive Pose", PassivePosePage),
+        ),
+    ),
+    (
+        "servos",
+        "Configure",
+        (
+            ("leg_lab", "Foot IK", LegLabPage),
+            ("joint_matrix", "Bench Joints", JointMatrixPage),
+            ("servo_calibration", "Fixture Calibration", ServoCalibrationPage),
+            ("servo_config", "Robot Config", ServoConfigPage),
+            ("servo_tuning", "DXL Settings", ServoTuningPage),
+        ),
+    ),
+    (
+        "analyze",
+        "Analyze",
+        (
+            ("plots", "Trends", PlotWorkbenchPage),
+            ("pose", "Pose", PoseViewerPage),
+        ),
+    ),
+    (
+        "diagnose",
+        "Diagnose",
+        (
+            ("sensors", "Sensors", SensorDashboardPage),
+            ("rc_troubleshooting", "Radio", RcTroubleshootingPage),
+            ("diagnostics", "Protocol", DiagnosticsPage),
+            ("openlog_config", "Card Recovery", OpenLogConfigFilePage),
+        ),
+    ),
+)
+
+HARDWARE_ONLY_PAGES = frozenset(
+    {
+        "foot_contact",
+        "passive_pose",
+        "leg_lab",
+        "joint_matrix",
+        "servo_calibration",
+        "servo_config",
+        "servo_tuning",
+        "sensors",
+        "rc_troubleshooting",
+    }
+)
 
 
 class MainWindow(QMainWindow):
@@ -49,31 +112,11 @@ class MainWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # Navigation rail.
+        # Navigation exposes operator workflows; related tools live in tabs.
         self.nav = NavRail()
-        self.nav.add_section("Operate")
-        self.nav.add_item("connect", "Connect")
-        self.nav.add_item("overview", "Overview")
-        self.nav.add_item("mode_safety", "Mode && Safety")
-        self.nav.add_item("gait_lab", "Gait Lab")
-        self.nav.add_item("foot_contact", "Foot Contact")
-        self.nav.add_item("passive_pose", "Passive Pose")
-        self.nav.add_section("Tune")
-        self.nav.add_item("leg_lab", "Leg Lab")
-        self.nav.add_item("joint_matrix", "Joint Matrix")
-        self.nav.add_item("servo_calibration", "Servo Calibration")
-        self.nav.add_item("servo_config", "Servo Config")
-        self.nav.add_item("openlog_config", "OpenLog File")
-        self.nav.add_item("servo_tuning", "Servo && DXL")
-        self.nav.add_section("Analyze")
-        self.nav.add_item("plots", "Plot Workbench")
-        self.nav.add_section("Visualize")
-        self.nav.add_item("model", "Model Viewer")
-        self.nav.add_item("urdf", "URDF Viewer")
-        self.nav.add_section("Diagnose")
-        self.nav.add_item("sensors", "Sensor Dashboard")
-        self.nav.add_item("rc_troubleshooting", "RC Troubleshooting")
-        self.nav.add_item("diagnostics", "Diagnostics")
+        self.nav.add_section("Workflows")
+        for workspace_key, label, _pages in WORKSPACES:
+            self.nav.add_item(workspace_key, label)
         self.nav.finish()
         self.nav.navigated.connect(self._navigate)
         outer.addWidget(self.nav)
@@ -96,29 +139,27 @@ class MainWindow(QMainWindow):
         self.event_strip = EventStrip()
         right.addWidget(self.event_strip)
 
-        # Pages.
-        self._pages: dict[str, int] = {}
-        for key, page in (
-            ("connect", ConnectPage(self.service)),
-            ("overview", OverviewPage(self.service)),
-            ("mode_safety", ModeSafetyPage(self.service)),
-            ("gait_lab", GaitLabPage(self.service)),
-            ("foot_contact", FootContactPage(self.service)),
-            ("passive_pose", PassivePosePage(self.service)),
-            ("leg_lab", LegLabPage(self.service)),
-            ("joint_matrix", JointMatrixPage(self.service)),
-            ("servo_calibration", ServoCalibrationPage(self.service)),
-            ("servo_config", ServoConfigPage(self.service)),
-            ("openlog_config", OpenLogConfigFilePage(self.service)),
-            ("servo_tuning", ServoTuningPage(self.service)),
-            ("plots", PlotWorkbenchPage(self.service)),
-            ("model", ModelViewerPage(self.service)),
-            ("urdf", UrdfViewerPage(self.service)),
-            ("sensors", SensorDashboardPage(self.service)),
-            ("rc_troubleshooting", RcTroubleshootingPage(self.service)),
-            ("diagnostics", DiagnosticsPage(self.service)),
-        ):
-            self._pages[key] = self.stack.addWidget(page)
+        self._workspaces: dict[str, int] = {}
+        self._workspace_tabs: dict[str, QTabWidget] = {}
+        self._page_widgets: dict[str, QWidget] = {}
+        self._page_locations: dict[str, tuple[str, int]] = {}
+        self._active_page: QWidget | None = None
+        for workspace_key, _label, page_specs in WORKSPACES:
+            tabs = QTabWidget()
+            tabs.setObjectName("WorkspaceTabs")
+            tabs.setDocumentMode(True)
+            tabs.setUsesScrollButtons(True)
+            for page_key, tab_label, page_class in page_specs:
+                page = page_class(self.service)
+                page.set_page_active(False)
+                tab_index = tabs.addTab(page, tab_label)
+                self._page_widgets[page_key] = page
+                self._page_locations[page_key] = (workspace_key, tab_index)
+            self._workspace_tabs[workspace_key] = tabs
+            self._workspaces[workspace_key] = self.stack.addWidget(tabs)
+            tabs.currentChanged.connect(
+                lambda index, key=workspace_key: self._on_tab_changed(key, index)
+            )
 
         # Wire global chrome to the service.
         self.service.connected.connect(self.safety_bar.set_connection)
@@ -139,20 +180,59 @@ class MainWindow(QMainWindow):
 
         self._last_fault_reason = 0
 
-        self.nav.select("connect")
+        self.navigate_to("connect")
 
     def connect_endpoint(self, endpoint: str) -> None:
         """Select the Connect page and begin an application-startup connection."""
-        self._navigate("connect")
-        page = self.stack.widget(self._pages["connect"])
+        self.navigate_to("connect")
+        page = self._page_widgets["connect"]
         if hasattr(page, "port_combo"):
             page.port_combo.setCurrentText(endpoint)
         self.service.connect_to(endpoint)
 
     def _navigate(self, key: str) -> None:
-        idx = self._pages.get(key)
+        idx = self._workspaces.get(key)
         if idx is not None:
             self.stack.setCurrentIndex(idx)
+            self._activate_page(self._workspace_tabs[key].currentWidget())
+
+    def navigate_to(self, page_key: str) -> None:
+        """Open a capability in its owning workflow and select its tab."""
+        location = self._page_locations.get(page_key)
+        if location is None:
+            return
+        workspace_key, tab_index = location
+        tabs = self._workspace_tabs[workspace_key]
+        if not tabs.isTabEnabled(tab_index):
+            return
+        self.nav.select(workspace_key)
+        tabs.setCurrentIndex(tab_index)
+        self._activate_page(tabs.currentWidget())
+
+    def _on_tab_changed(self, workspace_key: str, tab_index: int) -> None:
+        if self.stack.currentIndex() != self._workspaces[workspace_key]:
+            return
+        self._activate_page(self._workspace_tabs[workspace_key].widget(tab_index))
+
+    def _activate_page(self, page: QWidget | None) -> None:
+        if page is self._active_page:
+            return
+        if self._active_page is not None:
+            self._active_page.set_page_active(False)
+        self._active_page = page
+        if page is not None:
+            page.set_page_active(True)
+
+    def _set_page_enabled(self, page_key: str, enabled: bool, tooltip: str) -> None:
+        workspace_key, tab_index = self._page_locations[page_key]
+        tabs = self._workspace_tabs[workspace_key]
+        tabs.setTabEnabled(tab_index, enabled)
+        tabs.setTabToolTip(tab_index, "" if enabled else tooltip)
+
+    def is_page_enabled(self, page_key: str) -> bool:
+        """Return whether a capability can currently be opened."""
+        workspace_key, tab_index = self._page_locations[page_key]
+        return self._workspace_tabs[workspace_key].isTabEnabled(tab_index)
 
     def _on_status(self, st) -> None:
         self.safety_bar.mode.set(
@@ -163,7 +243,7 @@ class MainWindow(QMainWindow):
             f"{st.battery_mv / 1000:.1f} V",
             "ok" if st.battery_mv > 10000 else "warn",
         )
-        self.safety_bar.torque.set(
+        self.safety_bar.dxl_power.set(
             "OFF" if not st.dxl_power else "ON", "idle" if not st.dxl_power else "warn"
         )
 
@@ -193,24 +273,13 @@ class MainWindow(QMainWindow):
             )
 
     def _on_simulation_mode(self, enabled: bool) -> None:
-        hardware_pages = (
-            "foot_contact",
-            "passive_pose",
-            "leg_lab",
-            "joint_matrix",
-            "servo_calibration",
-            "servo_config",
-            "servo_tuning",
-            "sensors",
-            "rc_troubleshooting",
-        )
         tooltip = "Unavailable in the ROS simulated firmware."
-        for key in hardware_pages:
-            self.nav.set_item_enabled(key, not enabled, tooltip)
+        for key in HARDWARE_ONLY_PAGES:
+            self._set_page_enabled(key, not enabled, tooltip)
         if enabled:
             self.event_strip.add("simulation", "ROS simulated firmware connected")
-            self._navigate("gait_lab")
+            self.navigate_to("gait_lab")
 
-    def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+    def closeEvent(self, event) -> None:
         self.service.disconnect()
         super().closeEvent(event)

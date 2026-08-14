@@ -1,5 +1,7 @@
 #include "config_store.h"
 
+#include <string.h>
+
 #include "../protocol/crc16.h"
 
 namespace config {
@@ -75,18 +77,33 @@ bool ConfigStore::scan(StoreStatus& status, RecordLocation* newest) {
   if (!file_.size(status.file_size)) return false;
 
   uint32_t offset = 0;
+  // Sliding header window for the byte-wise resync over a damaged or foreign
+  // prefix. Each 1-byte advance refills the window with a single FORWARD read.
+  // Re-reading the full header at offset+1 would be a backward read for the
+  // storage backend: QwiicOpenLog streams sequentially and reopens the file
+  // from offset zero on any rewind, which made damaged-prefix scans O(n^2)
+  // over I2C and stalled boot in CONFIG_LOAD for minutes to hours.
+  uint8_t raw[kHeaderSize];
+  bool window_valid = false;
   while (status.file_size - offset >= kHeaderSize + kTrailerSize) {
-    uint8_t raw[kHeaderSize];
-    if (!file_.read(offset, raw, sizeof(raw))) return false;
+    if (!window_valid) {
+      if (!file_.read(offset, raw, sizeof(raw))) return false;
+      window_valid = true;
+    }
     SlotHeader h;
     deserializeHeader(raw, h);
     const bool header_valid =
         h.magic == kConfigMagic && h.version == kConfigVersion &&
         h.length <= kMaxPayload && headerCrc(raw) == h.header_crc;
     if (!header_valid) {
+      memmove(raw, raw + 1, kHeaderSize - 1);
+      if (!file_.read(offset + kHeaderSize, &raw[kHeaderSize - 1], 1)) {
+        return false;
+      }
       ++offset;
       continue;
     }
+    window_valid = false;
 
     const uint32_t payload_offset = offset + kHeaderSize;
     const uint32_t trailer_offset = payload_offset + h.length;

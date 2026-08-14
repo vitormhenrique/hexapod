@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import time
+from typing import ClassVar
 
+from hexapod_protocol import api
+from hexapod_protocol import telemetry as tlm
+from hexapod_protocol.framing import MsgType
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QIntValidator
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QAbstractItemView,
     QFileDialog,
     QFormLayout,
     QGridLayout,
@@ -30,15 +34,12 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
-
-from hexapod_protocol import api
-from hexapod_protocol import telemetry as tlm
-from hexapod_protocol.framing import MsgType
 
 from services import ConnectionService
 from theme import DRACULA
@@ -60,6 +61,7 @@ class BasePage(QWidget):
     def __init__(self, service: ConnectionService, parent=None) -> None:
         super().__init__(parent)
         self.service = service
+        self._page_active = True
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -68,7 +70,7 @@ class BasePage(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         outer.addWidget(scroll)
 
         canvas = QWidget()
@@ -94,6 +96,17 @@ class BasePage(QWidget):
         if not self.fill:
             col.addStretch(1)
         self.build()
+
+    def set_page_active(self, active: bool) -> None:
+        """Enable telemetry leases only while this page is the selected tab."""
+        self._page_active = active
+        self.service.set_stream_owner_active(self, active)
+
+    def request_stream(self, stream_id: int, rate_hz: int) -> None:
+        self.service.acquire_stream(self, stream_id, rate_hz)
+
+    def stop_stream(self, stream_id: int) -> None:
+        self.service.release_stream(self, stream_id)
 
     def build(self) -> None:  # override
         ...
@@ -121,8 +134,8 @@ class BasePage(QWidget):
 
 
 class ConnectPage(BasePage):
-    title = "Connect && Setup"
-    subtitle = "Discover the USB port, handshake, and verify firmware capabilities."
+    title = "Connection"
+    subtitle = "Choose the controller endpoint; HexNav handles handshake and retries."
 
     def build(self) -> None:
         box = QGroupBox("Serial connection")
@@ -148,7 +161,7 @@ class ConnectPage(BasePage):
         self.connect_btn.setProperty("accent", True)
         self.connect_btn.clicked.connect(self._toggle)
         self.disconnect_btn = QPushButton("Disconnect")
-        self.disconnect_btn.clicked.connect(self.service.disconnect)
+        self.disconnect_btn.clicked.connect(self._disconnect)
         self.disconnect_btn.setEnabled(False)
         btnrow = QHBoxLayout()
         btnrow.setSpacing(10)
@@ -156,6 +169,10 @@ class ConnectPage(BasePage):
         btnrow.addWidget(self.disconnect_btn)
         btnrow.addStretch(1)
         form.addRow("", self._wrap(btnrow))
+        self.connection_status = QLabel("Ready to connect.")
+        self.connection_status.setObjectName("MonoLabel")
+        self.connection_status.setWordWrap(True)
+        form.addRow("Status", self.connection_status)
 
         info = QGroupBox("Firmware")
         ilay = QFormLayout(info)
@@ -171,7 +188,7 @@ class ConnectPage(BasePage):
         ilay.addRow("Device", self.device_lbl)
         ilay.addRow("Firmware", self.fw_lbl)
         ilay.addRow("Protocol", self.proto_lbl)
-        ilay.addRow("Feature bits", self.caps_lbl)
+        ilay.addRow("Available features", self.caps_lbl)
 
         # Place the two cards side by side so they use the horizontal space.
         row = QHBoxLayout()
@@ -184,6 +201,7 @@ class ConnectPage(BasePage):
         self.service.hello_received.connect(self._on_hello)
         self.service.capabilities_received.connect(self._on_caps)
         self.service.connecting.connect(self._on_connecting)
+        self.service.error.connect(self._on_error)
         self.refresh_ports()
 
     def _wrap(self, layout) -> QWidget:
@@ -222,23 +240,34 @@ class ConnectPage(BasePage):
         if endpoint and endpoint != "No ports found":
             self.service.connect_to(endpoint)
 
+    def _disconnect(self) -> None:
+        self.connection_status.setText("Cancelling..." if not self.service.is_connected else "Disconnecting...")
+        self.service.disconnect()
+
     def _on_connecting(self, busy: bool) -> None:
         if busy:
             self.connect_btn.setEnabled(False)
             self.connect_btn.setText("Connecting...")
-            self.disconnect_btn.setEnabled(False)
+            self.disconnect_btn.setText("Cancel")
+            self.disconnect_btn.setEnabled(True)
             self.refresh_btn.setEnabled(False)
             self.port_combo.setEnabled(False)
+            self.connection_status.setText("Opening link and verifying firmware...")
 
     def _on_connected(self, connected: bool) -> None:
         self.connect_btn.setText("Connect")
         self.connect_btn.setEnabled(not connected)
+        self.disconnect_btn.setText("Disconnect")
         self.disconnect_btn.setEnabled(connected)
         self.refresh_btn.setEnabled(not connected)
         self.port_combo.setEnabled(not connected)
         if not connected:
             for lbl in (self.device_lbl, self.fw_lbl, self.proto_lbl, self.caps_lbl):
                 lbl.setText("--")
+            if not self.connection_status.text().startswith("Connection failed"):
+                self.connection_status.setText("Ready to connect.")
+        else:
+            self.connection_status.setText("Connected and compatible.")
 
     def _on_hello(self, hello) -> None:
         self.device_lbl.setText(hello.device_name)
@@ -246,46 +275,47 @@ class ConnectPage(BasePage):
         self.proto_lbl.setText(f"{hello.proto_major}.{hello.proto_minor}")
 
     def _on_caps(self, caps) -> None:
-        self.caps_lbl.setText(f"0x{caps.feature_bits:08X}")
+        names = [
+            api.FEATURE_NAMES[feature]
+            for feature in api.capability_features(caps.feature_bits)
+        ]
+        self.caps_lbl.setText(", ".join(names) if names else "none available")
+
+    def _on_error(self, message: str) -> None:
+        if message.startswith("Connection to"):
+            self.connection_status.setText(f"Connection failed: {message}")
 
 
 class OverviewPage(BasePage):
-    title = "Overview"
-    subtitle = "Live robot state, battery, safety state, and command source."
+    title = "Robot Readiness"
+    subtitle = "A compact health summary; safety-critical live state remains in the global bar."
 
     def build(self) -> None:
-        grid_box = QGroupBox("Robot state")
+        grid_box = QGroupBox("System health")
         grid = QGridLayout(grid_box)
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(16)
         grid.setContentsMargins(6, 8, 6, 6)
         self.badges = {
-            "state": StatCard("Safety state"),
             "fault": StatCard("Fault"),
-            "source": StatCard("Command source"),
-            "gate": StatCard("Motion gate"),
-            "battery": StatCard("Battery"),
             "uptime": StatCard("Uptime"),
-            "dxl": StatCard("DXL bus"),
-            "i2c": StatCard("I2C sensors"),
+            "watchdog": StatCard("Watchdog misses"),
+            "dxl": StatCard("Responding servos"),
+            "servo_faults": StatCard("Servo faults"),
+            "i2c": StatCard("Foot sensors"),
         }
         for i, b in enumerate(self.badges.values()):
-            grid.addWidget(b, i // 4, i % 4)
-        for c in range(4):
+            grid.addWidget(b, i // 3, i % 3)
+        for c in range(3):
             grid.setColumnStretch(c, 1)
         self.content.addWidget(grid_box)
-
-        self.hint = QLabel(
-            "Subscribe on the Mode && Safety page or connect to see live data."
-        )
-        self.hint.setStyleSheet(f"color: {DRACULA.comment};")
-        self.content.addWidget(self.hint)
 
         self.banner = self.add_telemetry_banner(
             [
                 (tlm.StreamId.CONTROL_STATE, "control_state"),
                 (tlm.StreamId.HEALTH, "health"),
                 (tlm.StreamId.SERVO_STATUS, "servo_status"),
+                (tlm.StreamId.I2C_SENSORS_RAW, "foot sensor data"),
             ]
         )
 
@@ -297,42 +327,24 @@ class OverviewPage(BasePage):
         if connected:
             # Subscribe to the streams that drive the overview badges so the
             # page is self-sufficient (state/source plus DXL and I2C health).
-            self.service.subscribe(int(tlm.StreamId.CONTROL_STATE), 10)
-            self.service.subscribe(int(tlm.StreamId.HEALTH), 2)
-            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 5)
-            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 5)
+            self.request_stream(int(tlm.StreamId.CONTROL_STATE), 10)
+            self.request_stream(int(tlm.StreamId.HEALTH), 2)
+            self.request_stream(int(tlm.StreamId.SERVO_STATUS), 5)
+            self.request_stream(int(tlm.StreamId.I2C_SENSORS_RAW), 5)
         else:
             for b in self.badges.values():
                 b.set("--", "idle")
 
     def _on_status(self, st) -> None:
-        self.badges["state"].set(
-            tlm.SAFETY_STATE_NAMES.get(st.state, str(st.state)),
-            "ok" if st.state in tlm.NOMINAL_SAFETY_STATES else "warn",
-        )
-        self.badges["battery"].set(
-            f"{st.battery_mv} mV", "ok" if st.battery_mv > 10000 else "warn"
-        )
         self.badges["uptime"].set(f"{st.uptime_ms // 1000} s", "info")
-        # DXL bus health: power state + watchdog misses from the status frame.
+        self.badges["watchdog"].set(
+            str(st.watchdog_missed), "warn" if st.watchdog_missed else "ok"
+        )
         if not st.dxl_power:
-            self.badges["dxl"].set("power off", "idle")
-        elif st.watchdog_missed:
-            self.badges["dxl"].set(f"wd miss {st.watchdog_missed}", "warn")
-        else:
-            self.badges["dxl"].set("power on", "ok")
+            self.badges["dxl"].set("bus off", "idle")
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id == int(tlm.StreamId.CONTROL_STATE):
-            self.badges["source"].set(record.source_name, "active")
-            self.badges["gate"].set(
-                "OPEN" if record.motion_gate else "CLOSED",
-                "ok" if record.motion_gate else "idle",
-            )
-            self.badges["state"].set(
-                tlm.SAFETY_STATE_NAMES.get(record.state, str(record.state)),
-                "ok" if record.state in tlm.NOMINAL_SAFETY_STATES else "warn",
-            )
             self.badges["fault"].set(
                 tlm.FAULT_REASON_NAMES.get(
                     record.fault_reason, str(record.fault_reason)
@@ -340,38 +352,34 @@ class OverviewPage(BasePage):
                 "error" if record.fault_reason else "ok",
             )
         elif stream_id == int(tlm.StreamId.HEALTH):
-            self.badges["battery"].set(
-                f"{record.battery_mv} mV", "ok" if record.battery_mv > 10000 else "warn"
+            self.badges["uptime"].set(f"{record.uptime_ms // 1000} s", "info")
+            self.badges["watchdog"].set(
+                str(record.watchdog_missed),
+                "warn" if record.watchdog_missed else "ok",
             )
         elif stream_id == int(tlm.StreamId.SERVO_STATUS):
-            # Live servo frames confirm the DYNAMIXEL bus is responding.
-            self.badges["dxl"].set(f"{len(record.servos)} servos", "ok")
+            faulted = sum(1 for servo in record.servos if servo.hardware_error)
+            self.badges["dxl"].set(f"{len(record.servos)}/18", "ok")
+            self.badges["servo_faults"].set(
+                str(faulted), "error" if faulted else "ok"
+            )
         elif stream_id == int(tlm.StreamId.I2C_SENSORS_RAW):
-            self.badges["i2c"].set(f"{len(record.feet)} sensors", "ok")
+            count = len(record.feet)
+            self.badges["i2c"].set(
+                f"{count}/{tlm.NUM_FEET}", "ok" if count == tlm.NUM_FEET else "warn"
+            )
 
 
 class ModeSafetyPage(BasePage):
-    title = "Mode && Safety Center"
-    subtitle = "Arming, fault recovery, maintenance/passive locks, and feature flags."
+    title = "Safety && Authority"
+    subtitle = "Arm, recover faults, and prepare or release a maintenance session."
 
-    STREAMS = [
-        ("health", 5),
-        ("control_state", 20),
-        ("servo_status", 20),
-        ("contact_state", 20),
-        ("i2c_sensors_raw", 10),
-        ("rc_input", 20),
-        ("api_stats", 2),
-    ]
-
-    FEATURES = [
-        (api.FEATURE_FOOT_CONTACT, "Foot Contact"),
-        (api.FEATURE_TERRAIN_LEVELING, "Terrain Leveling"),
+    FEATURES: ClassVar = [
         (api.FEATURE_SENSOR_POLLING, "Sensor Polling"),
         (api.FEATURE_JETSON_CONTROL, "Jetson Control"),
     ]
 
-    REASON_NAMES = {
+    REASON_NAMES: ClassVar = {
         api.FEATURE_REASON_NONE: "NONE",
         api.FEATURE_REASON_HARDWARE_MISSING: "hardware missing",
         api.FEATURE_REASON_NOT_CALIBRATED: "not calibrated",
@@ -389,18 +397,7 @@ class ModeSafetyPage(BasePage):
 
         self.content.addWidget(self._safety_controls())
         self.content.addWidget(self._lock_controls())
-        self.content.addWidget(self._bench_controls())
         self.content.addWidget(self._feature_flags())
-        self.content.addWidget(self._subscriptions())
-
-        safety = QGroupBox("Emergency stop")
-        slay = QHBoxLayout(safety)
-        estop = QPushButton("\u23fb  EMERGENCY STOP")
-        estop.setObjectName("EmergencyStop")
-        estop.clicked.connect(self.service.emergency_stop)
-        slay.addWidget(estop)
-        slay.addStretch(1)
-        self.content.addWidget(safety)
 
         self.service.connected.connect(self._on_connected)
         self.service.state_changed.connect(self._on_state_changed)
@@ -409,7 +406,7 @@ class ModeSafetyPage(BasePage):
         self.service.maint_result.connect(self._on_maint_result)
         self.service.maint_lock_changed.connect(self._on_lock_changed)
         self.service.control_result.connect(self._on_control_result)
-        self.service.dxl_result.connect(self._on_dxl_result)
+        self.service.maintenance_setup_changed.connect(self._on_setup_changed)
         self.service.simulation_mode_changed.connect(self._on_simulation_mode)
 
         self._apply_gates()
@@ -447,23 +444,9 @@ class ModeSafetyPage(BasePage):
         )
         self.clear_btn = clear
 
-        set_disarmed = QPushButton("Set mode: Disarmed")
-        set_disarmed.clicked.connect(lambda: self.service.set_mode(2))
-        self.set_disarmed_btn = set_disarmed
-
-        force_estop = QPushButton("Set mode: E-stop")
-        force_estop.clicked.connect(
-            lambda: self._confirm(
-                "Force E-stop mode",
-                "Drive the safety machine into ESTOP?",
-                lambda: self.service.set_mode(12),
-            )
-        )
-        self.force_estop_btn = force_estop
-
-        for i, btn in enumerate((arm, disarm, clear, set_disarmed, force_estop)):
+        for i, btn in enumerate((arm, disarm, clear)):
             btn.setCursor(Qt.PointingHandCursor)
-            grid.addWidget(btn, i // 3, i % 3)
+            grid.addWidget(btn, 0, i)
         for c in range(3):
             grid.setColumnStretch(c, 1)
 
@@ -484,108 +467,31 @@ class ModeSafetyPage(BasePage):
         return box
 
     def _lock_controls(self) -> QGroupBox:
-        box = QGroupBox("Maintenance && passive pose")
+        box = QGroupBox("Maintenance session")
         grid = QGridLayout(box)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
 
-        enter_m = QPushButton("Enter Maintenance")
+        enter_m = QPushButton("Prepare maintenance")
         enter_m.clicked.connect(self.service.enter_maintenance)
         self.enter_maint_btn = enter_m
-        exit_m = QPushButton("Exit Maintenance")
+        exit_m = QPushButton("End maintenance")
         exit_m.clicked.connect(self.service.exit_maintenance)
         self.exit_maint_btn = exit_m
 
-        enter_p = QPushButton("Enter Passive Pose")
-        enter_p.clicked.connect(
-            lambda: self._confirm(
-                "Enter passive pose",
-                "Disable all servo torque and stream present positions?",
-                self.service.passive_enter,
-            )
-        )
-        self.enter_passive_btn = enter_p
-        exit_p = QPushButton("Exit Passive Pose")
-        exit_p.clicked.connect(self.service.passive_exit)
-        self.exit_passive_btn = exit_p
-
-        for i, btn in enumerate((enter_m, exit_m, enter_p, exit_p)):
+        for i, btn in enumerate((enter_m, exit_m)):
             btn.setCursor(Qt.PointingHandCursor)
-            grid.addWidget(btn, i // 2, i % 2)
+            grid.addWidget(btn, 0, i)
         for c in range(2):
             grid.setColumnStretch(c, 1)
 
-        self.lock_lbl = QLabel("Maintenance lock: none")
+        self.lock_lbl = QLabel("Not prepared")
         self.lock_lbl.setStyleSheet(f"color: {DRACULA.comment};")
-        grid.addWidget(self.lock_lbl, 2, 0, 1, 2)
-        return box
-
-    def _bench_controls(self) -> QGroupBox:
-        box = QGroupBox("Bench servo control (maintenance mode)")
-        outer = QVBoxLayout(box)
-
-        hint = QLabel(
-            "Bench flow: 1) Enter Maintenance above  2) DXL Power On  "
-            "3) Scan Servos  4) Torque On  5) Center All. Targets are clamped "
-            "by the configured servo travel limits in firmware."
-        )
-        hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {DRACULA.comment}; font-size: 12px;")
-        outer.addWidget(hint)
-
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(12)
-
-        power_on = QPushButton("DXL Power On")
-        power_on.clicked.connect(lambda: self.service.dxl_power(True))
-        power_off = QPushButton("DXL Power Off")
-        power_off.clicked.connect(lambda: self.service.dxl_power(False))
-        scan = QPushButton("Scan Servos")
-        scan.clicked.connect(self._on_scan)
-        torque_on = QPushButton("Torque On")
-        torque_on.clicked.connect(
-            lambda: self._confirm(
-                "Enable torque",
-                "Enable torque on all scanned servos? They will hold and then "
-                "follow commanded targets.",
-                lambda: self.service.dxl_torque(True),
-            )
-        )
-        torque_off = QPushButton("Torque Off")
-        torque_off.clicked.connect(lambda: self.service.dxl_torque(False))
-        center = QPushButton("Center All (180\u00b0)")
-        center.setProperty("accent", True)
-        center.clicked.connect(
-            lambda: self._confirm(
-                "Center all servos",
-                "Move ALL 18 joints to center (tick 2048 / 180\u00b0)? The robot "
-                "must be on a stand \u2014 servos WILL move.",
-                self.service.center_all_joints,
-            )
-        )
-
-        for i, btn in enumerate(
-            (power_on, power_off, scan, torque_on, torque_off, center)
-        ):
-            btn.setCursor(Qt.PointingHandCursor)
-            grid.addWidget(btn, i // 3, i % 3)
-        for c in range(3):
-            grid.setColumnStretch(c, 1)
-        outer.addLayout(grid)
-
-        self.bench_lbl = QLabel("Requires the maintenance lock.")
-        self.bench_lbl.setStyleSheet(f"color: {DRACULA.comment};")
-        self.bench_lbl.setWordWrap(True)
-        outer.addWidget(self.bench_lbl)
-
-        self._bench_buttons = (power_on, power_off, scan, torque_on, torque_off, center)
-        for btn in self._bench_buttons:
-            btn.setEnabled(False)
+        grid.addWidget(self.lock_lbl, 1, 0, 1, 2)
         return box
 
     def _feature_flags(self) -> QGroupBox:
-        box = QGroupBox("Feature flags")
+        box = QGroupBox("System authority")
         outer = QVBoxLayout(box)
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
@@ -596,8 +502,8 @@ class ModeSafetyPage(BasePage):
             card.toggled.connect(self._on_feature_toggle)
             grid.addWidget(card, i // 2, i % 2)
             self._feature_cards[fid] = card
-        for c in range(2):
-            grid.setColumnStretch(c, 1)
+        for column in range(2):
+            grid.setColumnStretch(column, 1)
         outer.addLayout(grid)
 
         refresh = QPushButton("Refresh feature state")
@@ -607,25 +513,6 @@ class ModeSafetyPage(BasePage):
         row.addWidget(refresh)
         row.addStretch(1)
         outer.addLayout(row)
-        return box
-
-    def _subscriptions(self) -> QGroupBox:
-        box = QGroupBox("Telemetry subscriptions")
-        lay = QGridLayout(box)
-        lay.setHorizontalSpacing(12)
-        lay.setVerticalSpacing(12)
-        self._buttons = {}
-        for i, (name, rate) in enumerate(self.STREAMS):
-            btn = QPushButton(f"Subscribe {name} @ {rate} Hz")
-            btn.setCheckable(True)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.clicked.connect(
-                lambda checked, n=name, r=rate: self._toggle(n, r, checked)
-            )
-            lay.addWidget(btn, i // 2, i % 2)
-            self._buttons[name] = btn
-        for c in range(2):
-            lay.setColumnStretch(c, 1)
         return box
 
     # --- actions / reactions ---------------------------------------------
@@ -644,19 +531,18 @@ class ModeSafetyPage(BasePage):
                 "Grant the Jetson high-level motion authority?",
                 lambda: self.service.set_feature(feature, True),
             )
-            # Revert the optimistic check until the firmware confirms.
             self.service.refresh_features()
         else:
             self.service.set_feature(feature, enable)
 
-    def _on_feature_list(self, fl) -> None:
-        for f in fl.features:
-            card = self._feature_cards.get(f.feature)
+    def _on_feature_list(self, feature_list) -> None:
+        for feature in feature_list.features:
+            card = self._feature_cards.get(feature.feature)
             if card is not None:
                 card.set_state(
-                    f.available,
-                    f.enabled,
-                    self.REASON_NAMES.get(f.reason, str(f.reason)),
+                    feature.available,
+                    feature.enabled,
+                    self.REASON_NAMES.get(feature.reason, str(feature.reason)),
                 )
 
     def _on_simulation_mode(self, enabled: bool) -> None:
@@ -678,47 +564,15 @@ class ModeSafetyPage(BasePage):
     def _on_lock_changed(self, held: bool, token: int) -> None:
         self._lock_held = held
         if held:
-            self.lock_lbl.setText(
-                f"Maintenance lock: held (token {token}, heartbeating)"
-            )
+            self.lock_lbl.setText("Preparing DXL bus…")
         else:
-            self.lock_lbl.setText("Maintenance lock: none")
-        self.bench_lbl.setText("Ready." if held else "Requires the maintenance lock.")
+            self.lock_lbl.setText("Not prepared")
         self._apply_gates()
 
-    def _on_scan(self) -> None:
-        self.bench_lbl.setText("Scanning IDs 1-30 (takes a few seconds)\u2026")
-        self.service.dxl_scan()
-
-    def _on_dxl_result(self, kind: str, res) -> None:
-        if kind not in ("power", "torque", "scan"):
-            return
-        if res is None:
-            self.bench_lbl.setText(f"DXL {kind}: no result (rejected or timed out)")
-            return
-        if not res.done:
-            self.bench_lbl.setText(f"DXL {kind}: not finished (slot {res.slot})")
-            return
-        if kind == "scan":
-            servos = res.servos()
-            ids = ", ".join(str(s.id) for s in servos)
-            self.bench_lbl.setText(
-                f"Scan: {len(servos)} servo(s) found"
-                + (f" \u2014 ids {ids}" if servos else " (power on first?)")
-            )
-        elif kind == "power":
-            pr = res.power()
-            if pr is None:
-                self.bench_lbl.setText("DXL power: no decode")
-            else:
-                self.bench_lbl.setText(f"DXL power: {'ON' if pr.power_on else 'OFF'}")
-        elif len(res.data) >= 2:
-            self.bench_lbl.setText(
-                f"Torque {'ON' if res.data[0] else 'OFF'} \u2014 acked by "
-                f"{res.data[1]} servo(s)"
-            )
-        else:
-            self.bench_lbl.setText(f"Torque command acknowledged (code {res.code}).")
+    def _on_setup_changed(self, busy: bool, ready: bool, detail: str) -> None:
+        self.lock_lbl.setText(detail.capitalize())
+        self.enter_maint_btn.setText("Preparing…" if busy else "Prepare maintenance")
+        self._apply_gates()
 
     def _on_control_result(self, kind: str, res) -> None:
         state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
@@ -763,8 +617,7 @@ class ModeSafetyPage(BasePage):
             btn.setEnabled(enabled)
             btn.setToolTip("" if enabled else why)
 
-        for btn in (self.disarm_btn, self.set_disarmed_btn, self.force_estop_btn):
-            gate(btn, con, "Connect to the robot first.")
+        gate(self.disarm_btn, con, "Connect to the robot first.")
         gate(
             self.arm_btn,
             con and st != tlm.SafetyState.PASSIVE_POSE_STREAM,
@@ -795,39 +648,6 @@ class ModeSafetyPage(BasePage):
             not self._simulation_mode and con and held,
             "Unavailable in the ROS simulated firmware.",
         )
-        gate(
-            self.enter_passive_btn,
-            not self._simulation_mode
-            and con
-            and st
-            in (
-                -1,
-                tlm.SafetyState.DISARMED,
-                tlm.SafetyState.MAC_MAINTENANCE,
-                tlm.SafetyState.PASSIVE_POSE_STREAM,
-            ),
-            "Unavailable in the ROS simulated firmware.",
-        )
-        gate(
-            self.exit_passive_btn,
-            not self._simulation_mode
-            and con
-            and st == tlm.SafetyState.PASSIVE_POSE_STREAM,
-            "Unavailable in the ROS simulated firmware.",
-        )
-        for btn in self._bench_buttons:
-            gate(
-                btn,
-                not self._simulation_mode and con and held,
-                "Unavailable in the ROS simulated firmware.",
-            )
-
-    def _toggle(self, name: str, rate: int, checked: bool) -> None:
-        sid = int(tlm.stream_id_from_name(name))
-        if checked:
-            self.service.subscribe(sid, rate)
-        else:
-            self.service.unsubscribe(sid)
 
 
 class GaitLabPage(BasePage):
@@ -835,7 +655,7 @@ class GaitLabPage(BasePage):
     subtitle = "Bench-test gait families and body modes under maintenance authority."
 
     # (label, GAIT_* id). Stand/Sit are postures; the rest are walking gaits.
-    GAITS = [
+    GAITS: ClassVar = [
         ("Stand", api.GAIT_STAND),
         ("Sit", api.GAIT_SIT),
         ("Tripod", api.GAIT_TRIPOD),
@@ -872,19 +692,6 @@ class GaitLabPage(BasePage):
         self.translate_box.hide()
         self.rotate_box.hide()
 
-        # Always-available stop + emergency stop row.
-        safety = QGroupBox("Stop")
-        slay = QHBoxLayout(safety)
-        stop = QPushButton("Hold Stand")
-        stop.clicked.connect(self._hold_stand)
-        estop = QPushButton("\u23fb  EMERGENCY STOP")
-        estop.setObjectName("EmergencyStop")
-        estop.clicked.connect(self.service.emergency_stop)
-        slay.addWidget(stop)
-        slay.addWidget(estop)
-        slay.addStretch(1)
-        self.content.addWidget(safety)
-
         self.banner = self.add_telemetry_banner(
             [(tlm.StreamId.CONTROL_STATE, "control_state")]
         )
@@ -914,13 +721,16 @@ class GaitLabPage(BasePage):
         self.start_btn.clicked.connect(self._start_session)
         self.stop_session_btn = QPushButton("Stop && torque off")
         self.stop_session_btn.clicked.connect(self.service.stop_gait_test)
+        self.hold_btn = QPushButton("Hold stand")
+        self.hold_btn.clicked.connect(self._hold_stand)
         self.authority_lbl = QLabel("Disconnected")
         self.authority_lbl.setStyleSheet(f"color: {DRACULA.comment};")
         lay.addWidget(self.session_badge, 0, 0)
         lay.addWidget(self.gate_badge, 0, 1)
         lay.addWidget(self.start_btn, 1, 0)
         lay.addWidget(self.stop_session_btn, 1, 1)
-        lay.addWidget(self.authority_lbl, 2, 0, 1, 2)
+        lay.addWidget(self.hold_btn, 2, 0, 1, 2)
+        lay.addWidget(self.authority_lbl, 3, 0, 1, 2)
         lay.setColumnStretch(0, 1)
         lay.setColumnStretch(1, 1)
         return box
@@ -1004,7 +814,7 @@ class GaitLabPage(BasePage):
     # Pressing a pad button walks in that direction until release. The
     # firmware holds home stance and ignores twist while the gait is a
     # posture (Stand/Sit), so a press always re-asserts a walking gait first.
-    WALK_PAD = [
+    WALK_PAD: ClassVar = [
         ("yaw_ccw", "\u21ba", (0.0, 0.0, 1.0), (0, 0)),
         ("forward", "\u25b2", (1.0, 0.0, 0.0), (0, 1)),
         ("yaw_cw", "\u21bb", (0.0, 0.0, -1.0), (0, 2)),
@@ -1106,16 +916,12 @@ class GaitLabPage(BasePage):
         self.rotate_box.setVisible(mode == "rotate")
         if not self._session_active:
             return
-        self.service.set_body_twist(0.0, 0.0, 0.0)
-        self.service.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        self.service.hold_stand()
         if mode != "walk":
-            self.service.set_gait(api.GAIT_STAND)
             self._gait_buttons[api.GAIT_STAND].setChecked(True)
 
     def _hold_stand(self) -> None:
-        self._zero_twist()
-        self.service.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-        self.service.stop_motion()
+        self.service.hold_stand()
         # STOP_MOTION resets the firmware gait to Stand; mirror that here.
         self._gait_buttons[api.GAIT_STAND].setChecked(True)
 
@@ -1141,16 +947,16 @@ class GaitLabPage(BasePage):
         gait = self._walking_gait()
         if not self._gait_buttons[gait].isChecked():
             self._gait_buttons[gait].setChecked(True)
-        self.service.set_gait(gait)
         magnitude = self._walk_speed.value() / 100.0
-        self.service.set_body_twist(vx * magnitude, vy * magnitude, wz * magnitude)
+        self.service.command_walk(
+            gait, vx * magnitude, vy * magnitude, wz * magnitude
+        )
 
     def _pad_released(self) -> None:
         self.service.set_body_twist(0.0, 0.0, 0.0)
 
     def _send_translation(self) -> None:
-        self.service.set_gait(api.GAIT_STAND)
-        self.service.set_body_pose(
+        self.service.command_standing_pose(
             self._translate_spins["x"].value(),
             self._translate_spins["y"].value(),
             self._translate_spins["z"].value(),
@@ -1160,8 +966,7 @@ class GaitLabPage(BasePage):
         )
 
     def _send_rotation(self) -> None:
-        self.service.set_gait(api.GAIT_STAND)
-        self.service.set_body_pose(
+        self.service.command_standing_pose(
             0.0,
             0.0,
             0.0,
@@ -1178,7 +983,7 @@ class GaitLabPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         self._connected = connected
         if connected:
-            self.service.subscribe(int(tlm.StreamId.CONTROL_STATE), 10)
+            self.request_stream(int(tlm.StreamId.CONTROL_STATE), 10)
             self.authority_lbl.setText("Ready to start maintenance gait session")
         else:
             self._session_active = False
@@ -1220,6 +1025,7 @@ class GaitLabPage(BasePage):
         self.stop_session_btn.setEnabled(
             self._connected and (self._session_active or self._session_busy)
         )
+        self.hold_btn.setEnabled(self._connected and self._session_active)
         for control in self._session_controls:
             control.setEnabled(self._session_active)
 
@@ -1238,17 +1044,15 @@ class GaitLabPage(BasePage):
 
 
 class LegLabPage(BasePage):
-    title = "Leg Lab"
+    title = "Foot IK"
     subtitle = (
-        "Per-leg foot and per-joint maintenance controls with live IK and "
-        "clamp feedback. Honored only in Mac Maintenance with the lock held."
+        "Preview and command one foot in body coordinates with live reach and "
+        "clamp feedback. Use Bench Joints for individual joints."
     )
-
-    # Joint roles in firmware order (0=coxa, 1=femur, 2=tibia).
-    JOINTS = [("Coxa", 0), ("Femur", 1), ("Tibia", 2)]
 
     def build(self) -> None:
         from hexapod_protocol import config as cfg
+
         from models import HexapodPoseModel
 
         self._num_legs = cfg.NUM_LEGS
@@ -1260,59 +1064,46 @@ class LegLabPage(BasePage):
         self.content.addWidget(self._maintenance_box())
         self.content.addWidget(self._leg_select())
         self.content.addWidget(self._foot_target())
-        self.content.addWidget(self._joint_target())
         self.content.addWidget(self._live_legs())
-
-        safety = QGroupBox("Stop")
-        slay = QHBoxLayout(safety)
-        stop = QPushButton("Stop motion (hold Stand)")
-        stop.clicked.connect(self.service.stop_motion)
-        estop = QPushButton("\u23fb  EMERGENCY STOP")
-        estop.setObjectName("EmergencyStop")
-        estop.clicked.connect(self.service.emergency_stop)
-        slay.addWidget(stop)
-        slay.addWidget(estop)
-        slay.addStretch(1)
-        self.content.addWidget(safety)
 
         self.banner = self.add_telemetry_banner([(tlm.StreamId.LEG_STATE, "leg_state")])
 
         self._connected = False
         self._state = -1
         self._lock_held = False
+        self._setup_busy = False
+        self._setup_ready = False
 
         self.service.connected.connect(self._on_connected)
         self.service.state_changed.connect(self._on_state_changed)
         self.service.maint_result.connect(self._on_maint_result)
         self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self.service.maintenance_setup_changed.connect(self._on_setup_changed)
         self.service.config_loaded.connect(self._on_config_loaded)
         self.service.leg_target_result.connect(self._on_leg_result)
-        self.service.joint_target_result.connect(self._on_joint_result)
         self.service.telemetry.connect(self._on_telemetry)
 
         self._set_safe_home()
-        self._update_joint_limits()
         self._apply_gates()
 
     # --- groups -----------------------------------------------------------
 
     def _maintenance_box(self) -> QGroupBox:
-        box = QGroupBox("Maintenance lock")
+        box = QGroupBox("Bench setup")
         lay = QVBoxLayout(box)
         note = QLabel(
-            "Leg and joint commands are rejected unless the robot is in Mac "
-            "Maintenance with the lock held. Acquire the lock, command slowly, "
-            "and release it when done."
+            "Prepare Maintenance once to acquire authority, power the DXL bus, "
+            "and discover servos. Foot commands stay locked until setup is ready."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {DRACULA.comment};")
         lay.addWidget(note)
 
         row = QHBoxLayout()
-        enter = QPushButton("Enter Maintenance")
+        enter = QPushButton("Prepare Maintenance")
         enter.clicked.connect(self.service.enter_maintenance)
         self.enter_maint_btn = enter
-        leave = QPushButton("Exit Maintenance")
+        leave = QPushButton("End Maintenance")
         leave.clicked.connect(self.service.exit_maintenance)
         self.exit_maint_btn = leave
         row.addWidget(enter)
@@ -1351,7 +1142,7 @@ class LegLabPage(BasePage):
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
         hint = QLabel(
-            "X moves forward/back, Y moves left/right, and Z moves up/down. "
+            "X moves right/left, Y moves forward/back, and Z moves up/down. "
             "Start from Safe home and make small changes; the preview uses the "
             "active robot geometry before a command can be sent."
         )
@@ -1359,7 +1150,7 @@ class LegLabPage(BasePage):
         hint.setStyleSheet(f"color: {DRACULA.comment};")
         form.addRow(hint)
         self._foot_spins = {}
-        for attr, label in (("x", "X (forward)"), ("y", "Y (left)"), ("z", "Z (up)")):
+        for attr, label in (("x", "X (right)"), ("y", "Y (forward)"), ("z", "Z (up)")):
             spin = QSpinBox()
             spin.setRange(-350, 350)
             spin.setValue(0)
@@ -1401,51 +1192,6 @@ class LegLabPage(BasePage):
         form.addRow("Result", self.foot_result)
         return box
 
-    def _joint_target(self) -> QGroupBox:
-        box = QGroupBox("Joint target (physical servo angle)")
-        form = QFormLayout(box)
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(12)
-        note = QLabel(
-            "180° is the safe calibrated center (firmware-relative 0° / nominal "
-            "MX-28 center tick 2048). Move one joint at a time and watch clamp feedback."
-        )
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color: {DRACULA.comment};")
-        form.addRow(note)
-        self.joint_combo = QComboBox()
-        for label, jid in self.JOINTS:
-            self.joint_combo.addItem(label, jid)
-        self.joint_combo.currentIndexChanged.connect(self._update_joint_limits)
-        form.addRow("Joint", self.joint_combo)
-        self.joint_angle = QSpinBox()
-        self.joint_angle.setRange(0, 360)
-        self.joint_angle.setValue(180)
-        self.joint_angle.setSuffix(" \u00b0")
-        self.joint_angle.setToolTip(
-            "Displayed as a physical servo angle; 180° is sent as 0° relative."
-        )
-        form.addRow("Servo angle", self.joint_angle)
-        self.joint_limit_hint = QLabel("")
-        self.joint_limit_hint.setObjectName("MonoLabel")
-        form.addRow("Configured travel", self.joint_limit_hint)
-        center = QPushButton("Reset to 180° center")
-        center.clicked.connect(lambda: self.joint_angle.setValue(180))
-        send = QPushButton("Send joint target")
-        send.setProperty("accent", True)
-        send.clicked.connect(self._send_joint_target)
-        self.send_joint_btn = send
-        actions = QHBoxLayout()
-        actions.addWidget(center)
-        actions.addWidget(send)
-        actions.addStretch(1)
-        form.addRow("", self._wrap(actions))
-        self.joint_result = QLabel("--")
-        self.joint_result.setObjectName("MonoLabel")
-        self.joint_result.setWordWrap(True)
-        form.addRow("Result", self.joint_result)
-        return box
-
     def _live_legs(self) -> QGroupBox:
         box = QGroupBox("Live leg state")
         lay = QVBoxLayout(box)
@@ -1471,49 +1217,8 @@ class LegLabPage(BasePage):
             self._foot_spins["z"].value(),
         )
 
-    def _send_joint_target(self) -> None:
-        self.joint_result.setText("sending\u2026")
-        # The UI shows the physical servo convention (180° center); firmware
-        # expects a URDF-zero-relative centidegree angle.
-        self.service.set_joint_target(
-            self.leg_combo.currentData(),
-            self.joint_combo.currentData(),
-            (self.joint_angle.value() - 180) * 100,
-        )
-
     def _on_leg_changed(self, _index: int) -> None:
-        self.joint_angle.setValue(180)
         self._set_safe_home()
-        self._update_joint_limits()
-
-    def _update_joint_limits(self, _index: int | None = None) -> None:
-        import math
-
-        from hexapod_protocol import config as cfg
-
-        leg = self.leg_combo.currentData()
-        joint = self.joint_combo.currentData()
-        if leg is None or joint is None:
-            return
-        servo = cfg.ServoMap(self._workspace_config).servo_for(int(leg), int(joint))
-        if servo is None:
-            self.joint_angle.setRange(180, 180)
-            self.joint_limit_hint.setText("unmapped joint")
-            return
-        physical = sorted(
-            (
-                180.0 + math.degrees(cfg.tick_to_angle(servo, servo.min_tick)),
-                180.0 + math.degrees(cfg.tick_to_angle(servo, servo.max_tick)),
-            )
-        )
-        low = max(0, math.ceil(physical[0]))
-        high = min(360, math.floor(physical[1]))
-        self.joint_angle.setRange(low, high)
-        self.joint_angle.setValue(min(high, max(low, 180)))
-        self.joint_limit_hint.setText(
-            f"{low}°–{high}° from servo {servo.id} limits "
-            f"({servo.min_tick}–{servo.max_tick} ticks)"
-        )
 
     def _set_safe_home(self) -> None:
         leg = self.leg_combo.currentData()
@@ -1557,13 +1262,14 @@ class LegLabPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         self._connected = connected
         if connected:
-            self.service.subscribe(int(tlm.StreamId.LEG_STATE), 10)
+            self.request_stream(int(tlm.StreamId.LEG_STATE), 10)
         else:
             self._state = -1
             self._lock_held = False
+            self._setup_busy = False
+            self._setup_ready = False
             self.lock_lbl.setText("Maintenance lock: none")
             self.foot_result.setText("--")
-            self.joint_result.setText("--")
             self.leg_table.setRowCount(0)
             self._leg_rows.clear()
         self._apply_gates()
@@ -1576,7 +1282,6 @@ class LegLabPage(BasePage):
         self._workspace_config = config
         self._workspace_model = HexapodPoseModel(config)
         self._set_safe_home()
-        self._update_joint_limits()
 
     def _on_state_changed(self, state: int) -> None:
         self._state = state
@@ -1589,7 +1294,19 @@ class LegLabPage(BasePage):
                 f"Maintenance lock: held (token {token}, heartbeating)"
             )
         else:
+            self._setup_ready = False
             self.lock_lbl.setText("Maintenance lock: none")
+        self._apply_gates()
+
+    def _on_setup_changed(self, busy: bool, ready: bool, detail: str) -> None:
+        self._setup_busy = busy
+        self._setup_ready = ready
+        self.enter_maint_btn.setText(
+            "Preparing..."
+            if busy
+            else ("Maintenance ready" if ready else "Prepare Maintenance")
+        )
+        self.lock_lbl.setText(detail)
         self._apply_gates()
 
     def _apply_gates(self) -> None:
@@ -1603,21 +1320,27 @@ class LegLabPage(BasePage):
 
         gate(
             self.enter_maint_btn,
-            con and not held and self._state in (-1, tlm.SafetyState.DISARMED),
+            con
+            and not self._setup_busy
+            and not self._setup_ready
+            and self._state in (-1, tlm.SafetyState.DISARMED),
             "Requires connection and a Disarmed robot.",
         )
-        gate(self.exit_maint_btn, con and held, "The maintenance lock is not held.")
         gate(
-            self.send_foot_btn,
-            con and held and self._target_reachable,
-            "Adjust XYZ into the reachable workspace."
-            if con and held
-            else "Enter Maintenance first — targets need the lock.",
+            self.exit_maint_btn,
+            con and held and not self._setup_busy,
+            "The maintenance lock is not held.",
         )
         gate(
-            self.send_joint_btn,
-            con and held,
-            "Enter Maintenance first — targets need the lock.",
+            self.send_foot_btn,
+            con
+            and held
+            and self._setup_ready
+            and not self._setup_busy
+            and self._target_reachable,
+            "Adjust XYZ into the reachable workspace."
+            if con and held and self._setup_ready
+            else "Prepare Maintenance first; targets need a scanned DXL bus.",
         )
 
     def _on_maint_result(self, res) -> None:
@@ -1644,38 +1367,6 @@ class LegLabPage(BasePage):
             self.foot_result.setText(f"UNREACHABLE \u2014 not committed; state {state}")
         else:
             self.foot_result.setText(f"rejected (result {res.result}); state {state}")
-
-    def _on_joint_result(self, res) -> None:
-        if res is None:
-            self.joint_result.setText("failed (rejected or timed out)")
-            return
-        state = tlm.SAFETY_STATE_NAMES.get(res.state, str(res.state))
-        # center-all sends an aggregate (AllJointTargetResult) with a stored
-        # count and an 18-bit clamp mask; single-joint sends a per-joint result.
-        if hasattr(res, "stored_count"):
-            if res.ok:
-                clamped = bin(res.clamp_mask).count("1")
-                self.joint_result.setText(
-                    f"ok \u2014 {res.stored_count}/18 joints; "
-                    f"{clamped} clamped; state {state}"
-                )
-            else:
-                self.joint_result.setText(
-                    f"rejected (result {res.result}); state {state}"
-                )
-            return
-        if res.ok:
-            flags = []
-            if res.clamped_low:
-                flags.append("low")
-            if res.clamped_high:
-                flags.append("high")
-            clamp = "+".join(flags) if flags else "none"
-            self.joint_result.setText(
-                f"ok \u2014 tick={res.tick}; clamp {clamp}; state {state}"
-            )
-        else:
-            self.joint_result.setText(f"rejected (result {res.result}); state {state}")
 
     def _clamp_text(self, low: int, high: int) -> str:
         names = ("coxa", "femur", "tibia")
@@ -1717,24 +1408,24 @@ class LegLabPage(BasePage):
 
 
 class ServoConfigPage(BasePage):
-    title = "Robot Calibration && Config"
+    title = "Robot Config"
     subtitle = (
-        "Calibrate servo zero/sign/travel, leg geometry, and foot sensors; then "
-        "validate, stage, commit, or export the OpenLog-backed robot config."
+        "Edit the active servo map, geometry, and persistent foot calibration; "
+        "save once with validation and read-back verification."
     )
 
-    COLUMNS = ["ID", "Leg", "Joint", "Sign", "Trim", "Min tick", "Max tick"]
-    GEOMETRY_COLUMNS = [
+    COLUMNS: ClassVar = ["ID", "Leg", "Joint", "Sign", "Trim", "Min tick", "Max tick"]
+    GEOMETRY_COLUMNS: ClassVar = [
         "Leg",
         "Mount X (mm)",
         "Mount Y (mm)",
         "Mount Z (mm)",
         "Yaw (deg)",
     ]
-    SENSOR_COLUMNS = ["Foot", "Baseline (raw)", "Near", "Touch", "Load", "Enabled"]
+    SENSOR_COLUMNS: ClassVar = ["Foot", "Baseline (raw)", "Near", "Touch", "Load", "Enabled"]
 
     # (column, attribute, lo, hi) for in-table validation of edited servo rows.
-    FIELDS = [
+    FIELDS: ClassVar = [
         (0, "id", 1, 253),
         (1, "leg", 0, 5),
         (2, "joint", 0, 2),
@@ -1749,9 +1440,10 @@ class ServoConfigPage(BasePage):
 
         self._cfg = cfg
         self._loaded = None  # last config read from the robot / reset (the base)
-        self._edited = None  # config last sent to the staging buffer
+        self._edited = None  # local candidate currently being saved
         self._connected = False
         self._lock_held = False
+        self._save_pending = False
         self._latest_pressure_raw = [None] * tlm.NUM_FEET
         self._latest_pressure_time = 0.0
 
@@ -1765,8 +1457,8 @@ class ServoConfigPage(BasePage):
         self.service.connected.connect(self._on_connected)
         self.service.config_loaded.connect(self._on_config_loaded)
         self.service.config_summary.connect(self._on_config_summary)
-        self.service.config_staged.connect(self._on_config_staged)
         self.service.config_result.connect(self._on_config_result)
+        self.service.config_save_changed.connect(self._on_config_save_changed)
         self.service.maint_lock_changed.connect(self._on_lock_changed)
         self.service.telemetry.connect(self._on_telemetry)
         self._apply_gates()
@@ -1897,24 +1589,20 @@ class ServoConfigPage(BasePage):
         return box
 
     def _actions_box(self) -> QGroupBox:
-        box = QGroupBox("Config actions")
+        box = QGroupBox("Review && save")
         grid = QGridLayout(box)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
         diff = QPushButton("Diff vs loaded")
         diff.clicked.connect(self._show_diff)
-        self.stage_btn = QPushButton("Stage to robot")
-        self.stage_btn.setProperty("accent", True)
-        self.stage_btn.clicked.connect(self._stage)
-        validate = QPushButton("Validate staged")
-        validate.clicked.connect(self.service.validate_config)
-        self.commit_btn = QPushButton("Commit to OpenLog")
-        self.commit_btn.clicked.connect(self._commit)
+        self.save_btn = QPushButton("Save && verify")
+        self.save_btn.setProperty("accent", True)
+        self.save_btn.clicked.connect(self._save)
         export = QPushButton("Export JSON\u2026")
         export.clicked.connect(self._export)
         importb = QPushButton("Import JSON\u2026")
         importb.clicked.connect(self._import)
-        buttons = [diff, self.stage_btn, validate, self.commit_btn, export, importb]
+        buttons = [diff, self.save_btn, export, importb]
         for i, btn in enumerate(buttons):
             btn.setCursor(Qt.PointingHandCursor)
             grid.addWidget(btn, i // 3, i % 3)
@@ -2184,7 +1872,7 @@ class ServoConfigPage(BasePage):
             return
         lines = self._diff_lines(edited)
         self.diff_text.setPlainText(
-            "\n".join(lines) if lines else "No changes vs loaded config."
+            "\n".join(lines) if lines else "No changes vs active config."
         )
 
     def _capture_live_baselines(self) -> None:
@@ -2202,37 +1890,28 @@ class ServoConfigPage(BasePage):
             copied += 1
         if copied:
             self.sensor_capture_lbl.setText(
-                f"Copied {copied} live baseline(s); stage and commit to persist."
+                f"Copied {copied} live baseline(s); save and verify to persist."
             )
         else:
             self.sensor_capture_lbl.setText("No raw pressure samples are available.")
 
-    def _stage(self) -> None:
+    def _save(self) -> None:
         edited, err = self._read_table()
         if err is not None:
-            self.action_lbl.setText(f"stage blocked: {err}")
+            self.action_lbl.setText(f"save blocked: {err}")
             return
         lines = self._diff_lines(edited)
         summary = f"{len(lines)} field(s) changed" if lines else "no changes"
         if not self._confirm(
-            "Stage config to robot",
-            f"Write the edited config to the staging buffer ({summary})? "
-            "It is not persisted until you commit.",
+            "Save robot config",
+            f"Save the edited config ({summary})? Servo torque will be disabled, "
+            "the record will be committed to OpenLog, then read back and compared.",
         ):
             return
         self._edited = edited
-        self.action_lbl.setText("staging\u2026")
-        self.service.stage_config(edited)
-
-    def _commit(self) -> None:
-        if self._confirm(
-            "Commit config to OpenLog",
-            "Append the staged config to CONFIG.TXT on the Qwiic OpenLog? The firmware "
-            "requires Maintenance with all servo torque off and rejects an "
-            "invalid staged config.",
-        ):
-            self.action_lbl.setText("committing\u2026")
-            self.service.commit_config()
+        self._save_pending = True
+        self.action_lbl.setText("saving...")
+        self.service.save_config(edited)
 
     def _export(self) -> None:
         edited, err = self._read_table()
@@ -2270,12 +1949,13 @@ class ServoConfigPage(BasePage):
         except (OSError, ValueError, KeyError, TypeError) as exc:
             self.action_lbl.setText(f"import failed: {exc}")
             return
-        self._loaded = config
         self.name_edit.setText(config.robot_name)
         self._populate_table(config)
         self._apply_gates()
-        self.action_lbl.setText(f"imported {path} (stage to apply)")
-        self.diff_text.setPlainText("Imported config loaded as the new base.")
+        self.action_lbl.setText(f"imported {path} (review, then save)")
+        self.diff_text.setPlainText(
+            "Imported candidate; active robot config is unchanged."
+        )
 
     def _config_from_dict(self, data: dict):
         cfg = self._cfg
@@ -2310,7 +1990,7 @@ class ServoConfigPage(BasePage):
         self._connected = connected
         if connected:
             self.service.load_config()
-            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
+            self.request_stream(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
         else:
             self.table.setRowCount(0)
             self.sensor_table.setRowCount(0)
@@ -2327,9 +2007,9 @@ class ServoConfigPage(BasePage):
         self._apply_gates()
 
     def _apply_gates(self) -> None:
-        allowed = self._connected and self._lock_held
-        why = "Enter Maintenance first; Commit/Reset also require torque off."
-        for button in (self.reset_btn, self.stage_btn, self.commit_btn):
+        allowed = self._connected and self._lock_held and not self._save_pending
+        why = "Prepare Maintenance first; saving verifies torque off automatically."
+        for button in (self.reset_btn, self.save_btn):
             button.setEnabled(allowed)
             button.setToolTip("" if allowed else why)
         capture_allowed = (
@@ -2364,23 +2044,34 @@ class ServoConfigPage(BasePage):
         staged = "staged valid" if summary.staged_valid else "staged invalid"
         self.persist_lbl.setText(f"{persist} \u2014 {staged}")
 
-    def _on_config_staged(self, ok: bool) -> None:
-        if ok:
-            self._loaded = self._edited
-            self.action_lbl.setText("staged ok \u2014 validate, then commit")
-            self.diff_text.setPlainText("Staged. Validate and commit to persist.")
-        else:
-            self.action_lbl.setText("stage failed (a block was not acked)")
-
     def _on_config_result(self, kind: str, res) -> None:
+        if kind != "reset":
+            return
         if res is None:
             self.action_lbl.setText(f"{kind}: no response")
             return
         verdict = "ok" if res.ok else f"failed (result {res.result})"
         self.action_lbl.setText(f"{kind}: {verdict}")
-        if kind == "reset" and res.ok:
+        if res.ok:
             # The firmware reloaded defaults into the staging buffer; pull them.
             self.service.load_config()
+
+    def _on_config_save_changed(self, busy: bool, detail: str, readback) -> None:
+        if not self._save_pending:
+            return
+        self.action_lbl.setText(detail)
+        if busy:
+            return
+        self._save_pending = False
+        if readback is not None:
+            self._loaded = readback
+            self._edited = None
+            self.name_edit.setText(readback.robot_name)
+            self._populate_table(readback)
+            self.diff_text.setPlainText(
+                "No pending changes; saved read-back verified."
+            )
+        self._apply_gates()
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id != int(tlm.StreamId.I2C_SENSORS_RAW):
@@ -2403,15 +2094,15 @@ class ServoConfigPage(BasePage):
 
 
 class ServoTuningPage(BasePage):
-    title = "Servo Monitor && DXL Tuning"
+    title = "DXL Settings"
     subtitle = (
-        "Live per-servo status and safe logical-parameter writes "
-        "(staged, verified, read-back)."
+        "Monitor servos and perform maintenance-gated logical parameter writes "
+        "with firmware read-back verification."
     )
 
     # Logical parameters surfaced in the editor combo (label, DXL_PARAM_* id).
     # Limit pairs are handled by the dedicated limits group below.
-    PARAMS = [
+    PARAMS: ClassVar = [
         ("Return delay time", api.DXL_PARAM_RETURN_DELAY_TIME),
         ("Temperature limit", api.DXL_PARAM_TEMPERATURE_LIMIT),
         ("Min voltage limit", api.DXL_PARAM_MIN_VOLTAGE_LIMIT),
@@ -2430,7 +2121,7 @@ class ServoTuningPage(BasePage):
     ]
 
     # EEPROM-region params need a torque-off write; warn before committing.
-    EEPROM_PARAMS = {
+    EEPROM_PARAMS: ClassVar = {
         api.DXL_PARAM_RETURN_DELAY_TIME,
         api.DXL_PARAM_TEMPERATURE_LIMIT,
         api.DXL_PARAM_MIN_VOLTAGE_LIMIT,
@@ -2439,7 +2130,7 @@ class ServoTuningPage(BasePage):
         api.DXL_PARAM_STATUS_RETURN_LEVEL,
     }
 
-    COLUMNS = [
+    COLUMNS: ClassVar = [
         "ID",
         "Position",
         "Velocity",
@@ -2460,7 +2151,12 @@ class ServoTuningPage(BasePage):
         self._servo_map = cfg.ServoMap(cfg.default_robot_config())
         self._last_status: dict[int, object] = {}  # servo id -> ServoStatus
         self._goal_ticks: dict[int, int] = {}  # servo id -> commanded target tick
+        self._connected = False
+        self._lock_held = self.service.maint_lock_held
+        self._setup_busy = self.service.maintenance_setup_busy
+        self._setup_ready = self.service.maintenance_setup_ready
 
+        self.content.addWidget(self._maintenance_controls())
         self.content.addWidget(self._status_table())
         self.content.addWidget(self._detail_panel())
         self.content.addWidget(self._param_editor())
@@ -2476,10 +2172,28 @@ class ServoTuningPage(BasePage):
         )
 
         self.service.connected.connect(self._on_connected)
+        self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self.service.maintenance_setup_changed.connect(self._on_setup_changed)
         self.service.telemetry.connect(self._on_telemetry)
         self.service.dxl_result.connect(self._on_dxl_result)
+        self._apply_gates()
 
     # --- groups -----------------------------------------------------------
+
+    def _maintenance_controls(self) -> QGroupBox:
+        box = QGroupBox("Bench setup")
+        row = QHBoxLayout(box)
+        self.enter_maint_btn = QPushButton("Prepare Maintenance")
+        self.enter_maint_btn.setProperty("accent", True)
+        self.enter_maint_btn.clicked.connect(self.service.enter_maintenance)
+        self.exit_maint_btn = QPushButton("End Maintenance")
+        self.exit_maint_btn.clicked.connect(self.service.exit_maintenance)
+        self.setup_lbl = QLabel("Not prepared")
+        self.setup_lbl.setObjectName("MonoLabel")
+        row.addWidget(self.enter_maint_btn)
+        row.addWidget(self.exit_maint_btn)
+        row.addWidget(self.setup_lbl, 1)
+        return box
 
     def _status_table(self) -> QGroupBox:
         box = QGroupBox("Live servo status")
@@ -2517,12 +2231,12 @@ class ServoTuningPage(BasePage):
             self.param_combo.addItem(label, pid)
         form.addRow("Parameter", self.param_combo)
 
-        read = QPushButton("Read")
-        read.clicked.connect(self._read_param)
+        self.read_param_btn = QPushButton("Read")
+        self.read_param_btn.clicked.connect(self._read_param)
         self.param_current = QLabel("--")
         self.param_current.setObjectName("MonoLabel")
         rrow = QHBoxLayout()
-        rrow.addWidget(read)
+        rrow.addWidget(self.read_param_btn)
         rrow.addWidget(self.param_current, 1)
         form.addRow("Current", self._wrap(rrow))
 
@@ -2530,10 +2244,10 @@ class ServoTuningPage(BasePage):
         self.param_value.setRange(self.INT32_MIN, self.INT32_MAX)
         form.addRow("New value", self.param_value)
 
-        write = QPushButton("Stage && write")
-        write.setProperty("accent", True)
-        write.clicked.connect(self._write_param)
-        form.addRow("", write)
+        self.write_param_btn = QPushButton("Write && verify")
+        self.write_param_btn.setProperty("accent", True)
+        self.write_param_btn.clicked.connect(self._write_param)
+        form.addRow("", self.write_param_btn)
 
         self.param_result = QLabel("--")
         self.param_result.setObjectName("MonoLabel")
@@ -2563,10 +2277,10 @@ class ServoTuningPage(BasePage):
         mrow.addStretch(1)
         form.addRow("Limits (ticks)", self._wrap(mrow))
 
-        write = QPushButton("Write limits")
-        write.setProperty("accent", True)
-        write.clicked.connect(self._write_limits)
-        form.addRow("", write)
+        self.write_limits_btn = QPushButton("Write && verify limits")
+        self.write_limits_btn.setProperty("accent", True)
+        self.write_limits_btn.clicked.connect(self._write_limits)
+        form.addRow("", self.write_limits_btn)
 
         self.limit_result = QLabel("--")
         self.limit_result.setObjectName("MonoLabel")
@@ -2602,13 +2316,13 @@ class ServoTuningPage(BasePage):
         self.reg_eeprom = QCheckBox("EEPROM region (torque-off write)")
         form.addRow("", self.reg_eeprom)
 
-        read = QPushButton("Read register")
-        read.clicked.connect(self._read_register)
-        write = QPushButton("Write register")
-        write.clicked.connect(self._write_register)
+        self.read_register_btn = QPushButton("Read register")
+        self.read_register_btn.clicked.connect(self._read_register)
+        self.write_register_btn = QPushButton("Write register")
+        self.write_register_btn.clicked.connect(self._write_register)
         brow = QHBoxLayout()
-        brow.addWidget(read)
-        brow.addWidget(write)
+        brow.addWidget(self.read_register_btn)
+        brow.addWidget(self.write_register_btn)
         brow.addStretch(1)
         form.addRow("", self._wrap(brow))
 
@@ -2628,15 +2342,58 @@ class ServoTuningPage(BasePage):
     # --- live status ------------------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
         if connected:
-            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
-            self.service.subscribe(int(tlm.StreamId.SERVO_GOALS), 20)
+            self.request_stream(int(tlm.StreamId.SERVO_STATUS), 20)
+            self.request_stream(int(tlm.StreamId.SERVO_GOALS), 20)
         else:
             self.table.setRowCount(0)
             self._rows.clear()
             self._last_status.clear()
             self._goal_ticks.clear()
             self.detail.select_servo(None)
+            self._lock_held = False
+            self._setup_busy = False
+            self._setup_ready = False
+        self._apply_gates()
+
+    def _on_lock_changed(self, held: bool, _token: int) -> None:
+        self._lock_held = held
+        if not held:
+            self._setup_ready = False
+        self._apply_gates()
+
+    def _on_setup_changed(self, busy: bool, ready: bool, detail: str) -> None:
+        self._setup_busy = busy
+        self._setup_ready = ready
+        self.setup_lbl.setText(detail)
+        self.enter_maint_btn.setText(
+            "Preparing..." if busy else ("Maintenance ready" if ready else "Prepare Maintenance")
+        )
+        self._apply_gates()
+
+    def _apply_gates(self) -> None:
+        ready = (
+            self._connected
+            and self._lock_held
+            and self._setup_ready
+            and not self._setup_busy
+        )
+        self.enter_maint_btn.setEnabled(
+            self._connected and not self._setup_busy and not self._setup_ready
+        )
+        self.exit_maint_btn.setEnabled(
+            self._connected and self._lock_held and not self._setup_busy
+        )
+        for button in (
+            self.read_param_btn,
+            self.write_param_btn,
+            self.write_limits_btn,
+            self.read_register_btn,
+            self.write_register_btn,
+        ):
+            button.setEnabled(ready)
+            button.setToolTip("" if ready else "Prepare Maintenance first.")
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id == int(tlm.StreamId.SERVO_GOALS):
@@ -2802,8 +2559,9 @@ class ServoTuningPage(BasePage):
             sp = res.set_param()
             if sp is not None:
                 self.param_result.setText(
-                    f"wrote {sp.written}, read-back {sp.readback}, "
-                    f"verified={sp.verified}"
+                    f"verified: {sp.readback}"
+                    if sp.verified
+                    else f"FAILED verification: wrote {sp.written}, read {sp.readback}"
                 )
             else:
                 self.param_result.setText(f"code {res.code}")
@@ -2811,8 +2569,9 @@ class ServoTuningPage(BasePage):
             sl = res.servo_limits()
             if sl is not None:
                 self.limit_result.setText(
-                    f"table {sl.table_kind}: [{sl.min_tick}, {sl.max_tick}] "
-                    f"verified={sl.verified}"
+                    f"verified table {sl.table_kind}: [{sl.min_tick}, {sl.max_tick}]"
+                    if sl.verified
+                    else "FAILED limit read-back verification"
                 )
             else:
                 self.limit_result.setText(f"code {res.code}")
@@ -2844,15 +2603,15 @@ class ServoTuningPage(BasePage):
 
 
 class FootContactPage(BasePage):
-    title = "Foot Contact && Leveling"
+    title = "Contact && Leveling"
     subtitle = (
-        "Per-leg touchdown state, live proximity/pressure, runtime threshold "
-        "tuning, and contact/leveling enable with reasons."
+        "Monitor touchdown confidence, enable terrain behavior, and tune the "
+        "runtime contact estimator."
     )
 
-    COLUMNS = ["Leg", "State", "Conf", "Δpressure", "Proximity", "Pressure"]
+    COLUMNS: ClassVar = ["Leg", "State", "Conf", "Δpressure", "Proximity", "Pressure"]
 
-    REASON_NAMES = {
+    REASON_NAMES: ClassVar = {
         api.FEATURE_REASON_NONE: "NONE",
         api.FEATURE_REASON_HARDWARE_MISSING: "hardware missing",
         api.FEATURE_REASON_NOT_CALIBRATED: "not calibrated",
@@ -2874,6 +2633,7 @@ class FootContactPage(BasePage):
 
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
+        self.service.feature_list.connect(self._on_feature_list)
         self.service.sensor_feature_result.connect(self._on_feature_result)
         self.service.contact_threshold_result.connect(self._on_threshold_result)
         self.service.sensor_calibrate_result.connect(self._on_calibrate_result)
@@ -2897,38 +2657,28 @@ class FootContactPage(BasePage):
         return box
 
     def _feature_controls(self) -> QGroupBox:
-        box = QGroupBox("Contact && terrain leveling")
-        form = QFormLayout(box)
-        form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(12)
-
-        crow = QHBoxLayout()
-        self.contact_on = QPushButton("Enable contact")
-        self.contact_on.setProperty("accent", True)
-        self.contact_on.clicked.connect(lambda: self.service.set_contact(True))
-        self.contact_off = QPushButton("Disable contact")
-        self.contact_off.clicked.connect(lambda: self.service.set_contact(False))
-        crow.addWidget(self.contact_on)
-        crow.addWidget(self.contact_off)
-        crow.addStretch(1)
-        form.addRow("Foot contact", self._wrap(crow))
+        box = QGroupBox("Terrain behavior")
+        grid = QGridLayout(box)
+        grid.setHorizontalSpacing(12)
+        self._feature_cards = {
+            api.FEATURE_FOOT_CONTACT: FeatureToggleCard(
+                api.FEATURE_FOOT_CONTACT, "Foot contact"
+            ),
+            api.FEATURE_TERRAIN_LEVELING: FeatureToggleCard(
+                api.FEATURE_TERRAIN_LEVELING, "Terrain leveling"
+            ),
+        }
+        for column, card in enumerate(self._feature_cards.values()):
+            card.set_state(False, False, "connect to inspect availability")
+            card.toggled.connect(self._toggle_feature)
+            grid.addWidget(card, 0, column)
+            grid.setColumnStretch(column, 1)
         self.contact_result = QLabel("--")
         self.contact_result.setObjectName("MonoLabel")
-        form.addRow("", self.contact_result)
-
-        lrow = QHBoxLayout()
-        self.level_on = QPushButton("Enable leveling")
-        self.level_on.setProperty("accent", True)
-        self.level_on.clicked.connect(lambda: self.service.set_leveling(True))
-        self.level_off = QPushButton("Disable leveling")
-        self.level_off.clicked.connect(lambda: self.service.set_leveling(False))
-        lrow.addWidget(self.level_on)
-        lrow.addWidget(self.level_off)
-        lrow.addStretch(1)
-        form.addRow("Terrain leveling", self._wrap(lrow))
         self.level_result = QLabel("--")
         self.level_result.setObjectName("MonoLabel")
-        form.addRow("", self.level_result)
+        grid.addWidget(self.contact_result, 1, 0)
+        grid.addWidget(self.level_result, 1, 1)
         return box
 
     def _threshold_editor(self) -> QGroupBox:
@@ -2989,6 +2739,12 @@ class FootContactPage(BasePage):
 
     # --- actions ----------------------------------------------------------
 
+    def _toggle_feature(self, feature: int, enabled: bool) -> None:
+        if feature == api.FEATURE_FOOT_CONTACT:
+            self.service.set_contact(enabled)
+        else:
+            self.service.set_leveling(enabled)
+
     def _write_thresholds(self) -> None:
         near = self.thr_near.value()
         touch = self.thr_touch.value()
@@ -3025,9 +2781,12 @@ class FootContactPage(BasePage):
 
     def _on_connected(self, connected: bool) -> None:
         if connected:
-            self.service.subscribe(int(tlm.StreamId.CONTACT_STATE), 20)
-            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
+            self.request_stream(int(tlm.StreamId.CONTACT_STATE), 20)
+            self.request_stream(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
+            self.service.refresh_features()
         else:
+            for card in self._feature_cards.values():
+                card.set_state(False, False, "connect to inspect availability")
             for foot in range(tlm.NUM_FEET):
                 for col in range(1, len(self.COLUMNS)):
                     self.table.item(foot, col).setText("--")
@@ -3058,6 +2817,26 @@ class FootContactPage(BasePage):
     def _on_feature_result(self, kind: str, res) -> None:
         label = self.contact_result if kind == "contact" else self.level_result
         label.setText(self._format_feature(res))
+        feature = (
+            api.FEATURE_FOOT_CONTACT
+            if kind == "contact"
+            else api.FEATURE_TERRAIN_LEVELING
+        )
+        self._feature_cards[feature].set_state(
+            res.available,
+            res.enabled,
+            self.REASON_NAMES.get(res.reason, str(res.reason)),
+        )
+
+    def _on_feature_list(self, features) -> None:
+        for state in features.features:
+            card = self._feature_cards.get(state.feature)
+            if card is not None:
+                card.set_state(
+                    state.available,
+                    state.enabled,
+                    self.REASON_NAMES.get(state.reason, str(state.reason)),
+                )
 
     def _on_threshold_result(self, res) -> None:
         if res.ok:
@@ -3086,16 +2865,21 @@ class FootContactPage(BasePage):
 
 
 class SensorDashboardPage(BasePage):
-    title = "Sensor Dashboard && I2C"
+    title = "Foot Sensor Hardware"
     subtitle = (
-        "Root I2C topology, TCA9548A mux channels, live Robotic Finger Sensor v2 "
-        "values, poll-rate control, and baseline calibration."
+        "Inspect device discovery, raw foot readings, and sensor polling health."
     )
 
-    TOPO_COLUMNS = ["Ch", "Scanned", "VCNL4040", "LPS25HB", "Devices", "State"]
-    LIVE_COLUMNS = ["Ch", "Present", "State", "Conf", "Proximity", "Pressure"]
-    CHANNEL_STATE_NAMES = {0: "missing", 1: "present", 2: "fault"}
-    CHANNEL_STATE_LEVEL = {0: "idle", 1: "ok", 2: "warn"}
+    TOPO_COLUMNS: ClassVar = [
+        "Channel",
+        "Scanned",
+        "Proximity sensor",
+        "Pressure sensor",
+        "Devices",
+        "Health",
+    ]
+    LIVE_COLUMNS: ClassVar = ["Foot", "Detected", "Proximity raw", "Pressure raw"]
+    CHANNEL_STATE_NAMES: ClassVar = {0: "missing", 1: "present", 2: "fault"}
 
     def build(self) -> None:
         self.content.addWidget(self._topology_group())
@@ -3103,10 +2887,7 @@ class SensorDashboardPage(BasePage):
         self.content.addWidget(self._controls_group())
 
         self.banner = self.add_telemetry_banner(
-            [
-                (tlm.StreamId.I2C_SENSORS_RAW, "i2c_sensors_raw"),
-                (tlm.StreamId.CONTACT_STATE, "contact_state"),
-            ],
+            [(tlm.StreamId.I2C_SENSORS_RAW, "foot sensor data")],
             hint="Sensor streams also require sensor polling to be enabled.",
         )
 
@@ -3115,17 +2896,16 @@ class SensorDashboardPage(BasePage):
         self.service.i2c_topology.connect(self._apply_topology)
         self.service.sensor_status.connect(self._apply_sensor_status)
         self.service.sensor_rate_result.connect(self._on_rate_result)
-        self.service.sensor_calibrate_result.connect(self._on_calibrate_result)
 
     # --- groups -----------------------------------------------------------
 
     def _topology_group(self) -> QGroupBox:
-        box = QGroupBox("Root I2C topology")
+        box = QGroupBox("Device discovery")
         lay = QVBoxLayout(box)
 
         badges = QHBoxLayout()
-        self.mux_badge = StatusBadge("TCA9548A mux")
-        self.eeprom_badge = StatusBadge("Qwiic OpenLog")
+        self.mux_badge = StatusBadge("Sensor multiplexer")
+        self.eeprom_badge = StatusBadge("Config storage")
         badges.addWidget(self.mux_badge)
         badges.addWidget(self.eeprom_badge)
         badges.addStretch(1)
@@ -3156,7 +2936,7 @@ class SensorDashboardPage(BasePage):
         return box
 
     def _live_group(self) -> QGroupBox:
-        box = QGroupBox("Live foot sensors (channels 0-5)")
+        box = QGroupBox("Raw foot readings")
         lay = QVBoxLayout(box)
         self.live_table = QTableWidget(tlm.NUM_FEET, len(self.LIVE_COLUMNS))
         self.live_table.setHorizontalHeaderLabels(self.LIVE_COLUMNS)
@@ -3164,7 +2944,7 @@ class SensorDashboardPage(BasePage):
         self.live_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.live_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for ch in range(tlm.NUM_FEET):
-            self.live_table.setItem(ch, 0, QTableWidgetItem(f"Ch {ch}"))
+            self.live_table.setItem(ch, 0, QTableWidgetItem(f"Foot {ch + 1}"))
             for col in range(1, len(self.LIVE_COLUMNS)):
                 self.live_table.setItem(ch, col, QTableWidgetItem("--"))
         self.live_table.setMinimumHeight(220)
@@ -3182,7 +2962,7 @@ class SensorDashboardPage(BasePage):
         return box
 
     def _controls_group(self) -> QGroupBox:
-        box = QGroupBox("Polling && calibration")
+        box = QGroupBox("Sensor polling")
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
@@ -3205,12 +2985,6 @@ class SensorDashboardPage(BasePage):
         self.rate_result.setObjectName("MonoLabel")
         form.addRow("", self.rate_result)
 
-        cal = QPushButton("Re-zero all foot baselines")
-        cal.clicked.connect(self._calibrate)
-        form.addRow("Calibration", cal)
-        self.cal_result = QLabel("Feet must be at rest before calibrating.")
-        self.cal_result.setObjectName("MonoLabel")
-        form.addRow("", self.cal_result)
         return box
 
     def _wrap(self, layout) -> QWidget:
@@ -3224,22 +2998,11 @@ class SensorDashboardPage(BasePage):
         self.topo_status.setText("rescanning…")
         self.service.refresh_i2c_topology(rescan=True)
 
-    def _calibrate(self) -> None:
-        if not self._confirm(
-            "Calibrate all baselines",
-            "Re-zero the pressure baseline for every foot? All feet must be "
-            "unloaded and at rest.",
-        ):
-            return
-        self.cal_result.setText("calibrating…")
-        self.service.calibrate_contact(api.SENSOR_CALIBRATE_ALL)
-
     # --- telemetry & results ---------------------------------------------
 
     def _on_connected(self, connected: bool) -> None:
         if connected:
-            self.service.subscribe(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
-            self.service.subscribe(int(tlm.StreamId.CONTACT_STATE), 10)
+            self.request_stream(int(tlm.StreamId.I2C_SENSORS_RAW), 10)
             self.service.refresh_i2c_topology(rescan=False)
             self.service.refresh_sensor_status()
         else:
@@ -3256,14 +3019,8 @@ class SensorDashboardPage(BasePage):
             for ch, fr in enumerate(record.feet):
                 if ch >= tlm.NUM_FEET:
                     break
-                self.live_table.item(ch, 4).setText(str(fr.proximity))
-                self.live_table.item(ch, 5).setText(str(fr.pressure_raw))
-        elif stream_id == int(tlm.StreamId.CONTACT_STATE):
-            for ch, fc in enumerate(record.feet):
-                if ch >= tlm.NUM_FEET:
-                    break
-                self.live_table.item(ch, 2).setText(fc.state_name)
-                self.live_table.item(ch, 3).setText(str(fc.confidence))
+                self.live_table.item(ch, 2).setText(str(fr.proximity))
+                self.live_table.item(ch, 3).setText(str(fr.pressure_raw))
 
     def _apply_topology(self, res) -> None:
         if res is None:
@@ -3305,14 +3062,11 @@ class SensorDashboardPage(BasePage):
                 break
             present = bool(res.present_mask & (1 << ch))
             self.live_table.item(ch, 1).setText("yes" if present else "no")
-            self.live_table.item(ch, 2).setText(
-                tlm.CONTACT_STATE_NAMES.get(foot.state, str(foot.state))
-            )
-            self.live_table.item(ch, 3).setText(str(foot.confidence))
-            self.live_table.item(ch, 4).setText(str(foot.proximity))
+            self.live_table.item(ch, 2).setText(str(foot.proximity))
         polling = "on" if res.polling_enabled else "off"
+        detected = res.present_mask.bit_count()
         self.live_status.setText(
-            f"present_mask=0x{res.present_mask:02X}  polling={polling}"
+            f"{detected}/{tlm.NUM_FEET} sensors detected · polling {polling}"
         )
 
     def _on_rate_result(self, res) -> None:
@@ -3320,21 +3074,6 @@ class SensorDashboardPage(BasePage):
             self.rate_result.setText(f"poll rate set to {res.rate_hz} Hz")
         else:
             self.rate_result.setText(f"rejected (code {res.result})")
-
-    def _on_calibrate_result(self, res) -> None:
-        if res.ok:
-            self.cal_result.setText(f"calibrated (mask 0x{res.mask:02X})")
-        else:
-            self.cal_result.setText(f"rejected (code {res.result})")
-
-    def _confirm(self, title: str, text: str) -> bool:
-        return (
-            QMessageBox.question(
-                self, title, text, QMessageBox.Yes | QMessageBox.No, QMessageBox.No
-            )
-            == QMessageBox.Yes
-        )
-
 
 class PassivePosePage(BasePage):
 
@@ -3344,7 +3083,7 @@ class PassivePosePage(BasePage):
         "angles update live for calibration and URDF capture."
     )
 
-    COLUMNS = ["Leg", "Joint", "Angle"]
+    COLUMNS: ClassVar = ["Leg", "Joint", "Angle"]
 
     def build(self) -> None:
         self._rows: dict[tuple[int, int], int] = {}  # (leg, joint) -> row
@@ -3363,12 +3102,14 @@ class PassivePosePage(BasePage):
 
         self._connected = False
         self._state = -1
+        self._busy = self.service.passive_busy
 
         self.service.connected.connect(self._on_connected)
         self.service.state_changed.connect(self._on_state_changed)
         self.service.telemetry.connect(self._on_telemetry)
         self.service.passive_result.connect(self._on_passive_result)
         self.service.passive_rate_result.connect(self._on_rate_result)
+        self.service.passive_setup_changed.connect(self._on_setup_changed)
 
         self._apply_gates()
 
@@ -3410,18 +3151,18 @@ class PassivePosePage(BasePage):
         self.rate_spin.setRange(1, 200)
         self.rate_spin.setValue(50)
         self.rate_spin.setSuffix(" Hz")
-        apply_rate = QPushButton("Apply rate")
-        apply_rate.clicked.connect(
+        self.apply_rate_btn = QPushButton("Apply rate")
+        self.apply_rate_btn.clicked.connect(
             lambda: self.service.passive_set_stream_rate(self.rate_spin.value())
         )
         rrow.addWidget(self.rate_spin)
-        rrow.addWidget(apply_rate)
+        rrow.addWidget(self.apply_rate_btn)
         rrow.addStretch(1)
         form.addRow("Stream rate", self._wrap(rrow))
 
-        zero = QPushButton("Capture zero reference")
-        zero.clicked.connect(lambda: self.service.passive_zero_reference())
-        form.addRow("", zero)
+        self.zero_btn = QPushButton("Capture zero reference")
+        self.zero_btn.clicked.connect(lambda: self.service.passive_zero_reference())
+        form.addRow("", self.zero_btn)
         self.rate_result = QLabel("--")
         self.rate_result.setObjectName("MonoLabel")
         form.addRow("Result", self.rate_result)
@@ -3461,7 +3202,7 @@ class PassivePosePage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         self._connected = connected
         if connected:
-            self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
+            self.request_stream(int(tlm.StreamId.JOINT_STATE), 50)
         else:
             self._state = -1
             self.table.setRowCount(0)
@@ -3500,6 +3241,12 @@ class PassivePosePage(BasePage):
         self.exit_btn.setToolTip(
             "" if exit_ok else "The robot is not in passive pose mode."
         )
+        controls_ok = con and st == tlm.SafetyState.PASSIVE_POSE_STREAM and not self._busy
+        self.apply_rate_btn.setEnabled(controls_ok)
+        self.zero_btn.setEnabled(controls_ok)
+        if self._busy:
+            self.enter_btn.setEnabled(False)
+            self.exit_btn.setEnabled(False)
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id != int(tlm.StreamId.JOINT_STATE):
@@ -3519,10 +3266,11 @@ class PassivePosePage(BasePage):
     def _on_passive_result(self, kind: str, res) -> None:
         verdict = "ok" if res.ok else ("rejected" if res.rejected else "error")
         self.mode_result.setText(f"{kind}: {verdict} (state {res.state})")
-        if kind == "enter" and res.ok:
-            self.mode_badge.set("passive (torque off)", "warn")
-        elif kind == "exit" and res.ok:
-            self.mode_badge.set("inactive", "ok")
+
+    def _on_setup_changed(self, busy: bool, detail: str) -> None:
+        self._busy = busy
+        self.mode_result.setText(detail)
+        self._apply_gates()
 
     def _on_rate_result(self, res) -> None:
         if res.ok:
@@ -3540,10 +3288,10 @@ class PassivePosePage(BasePage):
 
 
 class RcTroubleshootingPage(BasePage):
-    title = "RC Troubleshooting"
-    subtitle = "Live ControllerBridge intent and decoded physical controls."
+    title = "Radio && Controller"
+    subtitle = "Check CRSF link health first, then inspect decoded robot commands."
     MODE_NAMES = tlm.CONTROLLER_MODE_NAMES
-    TRICK_NAMES = {
+    TRICK_NAMES: ClassVar = {
         0: "None",
         1: "Stand up",
         2: "Sit down",
@@ -3556,15 +3304,15 @@ class RcTroubleshootingPage(BasePage):
         9: "Spider attack",
         10: "Jump-kick",
     }
-    RAW_INPUTS = [
+    RAW_INPUTS: ClassVar = [
         ("gimbal_lx", "Gimbal", "Left X"),
         ("gimbal_ly", "Gimbal", "Left Y"),
         ("gimbal_rx", "Gimbal", "Right X"),
         ("gimbal_ry", "Gimbal", "Right Y"),
         ("pot1", "Shape", "POT1 / speed"),
         ("pot2", "Shape", "POT2 / body height"),
-        ("enc1", "Shape", "ENC1 / stride"),
-        ("enc2", "Shape", "ENC2 / step height"),
+        ("enc1", "Unbound", "ENC1"),
+        ("enc2", "Unbound", "ENC2"),
         ("sw_a", "2-position", "SW_A / arm"),
         ("sw_b", "2-position", "SW_B / estop"),
         ("sw_c", "2-position", "SW_C / foot contact"),
@@ -3576,7 +3324,7 @@ class RcTroubleshootingPage(BasePage):
         ("btn1", "Button", "BTN_1 / stand up"),
         ("btn2", "Button", "BTN_2 / sit down"),
         ("btn3", "Button", "BTN_3 / wave"),
-        ("btn4", "Button", "BTN_4 / crouch"),
+        ("btn4", "Button", "BTN_4 / capture"),
         ("nav1_u", "NAV1 trim", "Up / pitch +"),
         ("nav1_d", "NAV1 trim", "Down / pitch -"),
         ("nav1_l", "NAV1 trim", "Left / roll +"),
@@ -3590,18 +3338,38 @@ class RcTroubleshootingPage(BasePage):
     ]
 
     def build(self) -> None:
+        self.content.addWidget(self._link_group())
         self.content.addWidget(self._bridge_group())
         self.content.addWidget(self._command_group())
         self.content.addWidget(self._raw_inputs_group())
 
         self.banner = self.add_telemetry_banner(
-            [(tlm.StreamId.CONTROLLER_STATE, "controller_state")]
+            [
+                (tlm.StreamId.CONTROLLER_STATE, "decoded controller"),
+                (tlm.StreamId.RC_DIAGNOSTICS, "radio diagnostics"),
+            ]
         )
 
         self.service.connected.connect(self._on_connected)
         self.service.telemetry.connect(self._on_telemetry)
 
     # --- groups -----------------------------------------------------------
+
+    def _link_group(self) -> QGroupBox:
+        box = QGroupBox("Radio link")
+        self.link = self._grid_of_cards(
+            box,
+            [
+                ("state", "Link state"),
+                ("rssi", "Uplink RSSI"),
+                ("lq", "Link quality"),
+                ("age", "Last frame"),
+                ("frames", "Frames decoded"),
+                ("crc", "CRC errors"),
+            ],
+            per_row=2,
+        )
+        return box
 
     def _grid_of_cards(self, box: QGroupBox, keys, per_row: int = 4) -> dict:
         grid = QGridLayout(box)
@@ -3633,9 +3401,9 @@ class RcTroubleshootingPage(BasePage):
                 ("trick", "Trick trigger"),
                 ("contact", "SW_C foot contact"),
                 ("leveling", "SW_D leveling"),
-                ("passive", "SW_G passive pose"),
+                ("passive", "Passive request"),
             ],
-            per_row=4,
+            per_row=2,
         )
         return box
 
@@ -3653,7 +3421,7 @@ class RcTroubleshootingPage(BasePage):
                 ("stride", "Stride"),
                 ("step", "Step height"),
             ],
-            per_row=4,
+            per_row=2,
         )
         return box
 
@@ -3679,9 +3447,12 @@ class RcTroubleshootingPage(BasePage):
 
     def _on_connected(self, connected: bool) -> None:
         if connected:
-            self.service.subscribe(int(tlm.StreamId.CONTROLLER_STATE), 20)
+            self.request_stream(int(tlm.StreamId.CONTROLLER_STATE), 20)
+            self.request_stream(int(tlm.StreamId.RC_INPUT), 20)
+            self.request_stream(int(tlm.StreamId.RC_DIAGNOSTICS), 10)
         else:
             for card in (
+                *self.link.values(),
                 *self.bridge.values(),
                 *self.command.values(),
             ):
@@ -3692,6 +3463,36 @@ class RcTroubleshootingPage(BasePage):
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id == int(tlm.StreamId.CONTROLLER_STATE):
             self._apply_controller(record)
+        elif stream_id == int(tlm.StreamId.RC_INPUT):
+            self.link["state"].set(
+                "FAILSAFE" if record.failsafe else "linked",
+                "error" if record.failsafe else "ok",
+            )
+        elif stream_id == int(tlm.StreamId.RC_DIAGNOSTICS):
+            self._apply_radio_diagnostics(record)
+
+    def _apply_radio_diagnostics(self, record) -> None:
+        if record.failsafe:
+            state, level = "FAILSAFE", "error"
+        elif record.ever_seen:
+            state, level = "linked", "ok"
+        else:
+            state, level = "not seen", "warn"
+        self.link["state"].set(state, level)
+        self.link["age"].set(f"{record.last_frame_age_ms} ms", level)
+        self.link["frames"].set(str(record.frames_decoded), "info")
+        self.link["crc"].set(
+            str(record.crc_errors), "warn" if record.crc_errors else "ok"
+        )
+        if record.link_stats_valid:
+            self.link["rssi"].set(f"{record.link_stats.up_rssi_dbm} dBm", "info")
+            self.link["lq"].set(
+                f"{record.link_stats.up_link_quality}%",
+                "ok" if record.link_stats.up_link_quality >= 70 else "warn",
+            )
+        else:
+            self.link["rssi"].set("unavailable", "idle")
+            self.link["lq"].set("unavailable", "idle")
 
     def _apply_controller(self, rec) -> None:
         self.bridge["valid"].set(
@@ -3788,9 +3589,9 @@ class RcTroubleshootingPage(BasePage):
 
 
 class DiagnosticsPage(BasePage):
-    title = "Diagnostics"
+    title = "Protocol && Faults"
     subtitle = (
-        "Protocol stats, DXL/I2C errors, firmware timing, and a raw frame inspector."
+        "Review transport health, firmware timing, servo faults, and sensor freshness."
     )
     fill = True
 
@@ -3833,8 +3634,8 @@ class DiagnosticsPage(BasePage):
                 self.fw_overflow_card,
             )
         ):
-            pg.addWidget(card, col // 5, col % 5)
-            pg.setColumnStretch(col % 5, 1)
+            pg.addWidget(card, col // 2, col % 2)
+            pg.setColumnStretch(col % 2, 1)
         self.content.addWidget(proto)
 
         # --- firmware timing ------------------------------------------------
@@ -3879,8 +3680,14 @@ class DiagnosticsPage(BasePage):
         self.content.addWidget(i2c)
 
         # --- raw frame inspector -------------------------------------------
-        raw = QGroupBox("Raw frame inspector")
+        raw = QGroupBox("Expert raw frames")
         rv = QVBoxLayout(raw)
+        self.raw_gate = QCheckBox("Show raw frame inspector")
+        self.raw_gate.toggled.connect(self._toggle_raw_inspector)
+        rv.addWidget(self.raw_gate)
+        self.raw_body = QWidget()
+        raw_body_layout = QVBoxLayout(self.raw_body)
+        raw_body_layout.setContentsMargins(0, 0, 0, 0)
         ctl = QHBoxLayout()
         self.capture_chk = QCheckBox("Capture raw frames")
         self.capture_chk.toggled.connect(self._on_capture_toggled)
@@ -3889,12 +3696,14 @@ class DiagnosticsPage(BasePage):
         ctl.addWidget(self.capture_chk)
         ctl.addStretch(1)
         ctl.addWidget(clear_btn)
-        rv.addLayout(ctl)
+        raw_body_layout.addLayout(ctl)
         self.raw_feed = QPlainTextEdit()
         self.raw_feed.setReadOnly(True)
         self.raw_feed.setMaximumBlockCount(500)
         self.raw_feed.setObjectName("MonoLabel")
-        rv.addWidget(self.raw_feed, 1)
+        raw_body_layout.addWidget(self.raw_feed, 1)
+        self.raw_body.setVisible(False)
+        rv.addWidget(self.raw_body, 1)
         self.content.addWidget(raw, 1)
 
         # --- wiring ---------------------------------------------------------
@@ -3909,14 +3718,24 @@ class DiagnosticsPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         if connected:
             for stream_id, rate in self._STREAMS:
-                self.service.subscribe(stream_id, rate)
+                self.request_stream(stream_id, rate)
             if self.capture_chk.isChecked():
                 self.service.set_raw_capture(True)
             self._timer.start()
         else:
             self._timer.stop()
             self._last.clear()
+            self.capture_chk.blockSignals(True)
+            self.capture_chk.setChecked(False)
+            self.capture_chk.blockSignals(False)
+            self.service.set_raw_capture(False)
+            self.raw_feed.clear()
             self._reset_cards()
+
+    def _toggle_raw_inspector(self, enabled: bool) -> None:
+        self.raw_body.setVisible(enabled)
+        if not enabled and self.capture_chk.isChecked():
+            self.capture_chk.setChecked(False)
 
     def _on_capture_toggled(self, checked: bool) -> None:
         self.service.set_raw_capture(checked)
@@ -4023,6 +3842,9 @@ class DiagnosticsPage(BasePage):
             self.decode_card,
             self.backlog_card,
             self.dropped_card,
+            self.fw_rx_card,
+            self.fw_bad_card,
+            self.fw_overflow_card,
             self.uptime_card,
             self.watchdog_card,
             self.battery_card,
@@ -4034,7 +3856,7 @@ class DiagnosticsPage(BasePage):
 
 
 class ModelViewerPage(BasePage):
-    title = "Model Viewer"
+    title = "2D Kinematics"
     subtitle = "Live animated hexapod pose from joint telemetry (servo-map fallback)."
     fill = True
 
@@ -4042,8 +3864,9 @@ class ModelViewerPage(BasePage):
     _JOINT_STATE_TIMEOUT_MS = 750
 
     def build(self) -> None:
-        from models import HexapodPoseModel
         from hexapod_protocol import config as cfg
+
+        from models import HexapodPoseModel
         from ui.widgets import HexapodView
 
         self._model = HexapodPoseModel(cfg.default_robot_config())
@@ -4077,8 +3900,8 @@ class ModelViewerPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         if connected:
             # Ask the firmware for joint poses; servo_status is the fallback feed.
-            self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
-            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+            self.request_stream(int(tlm.StreamId.JOINT_STATE), 50)
+            self.request_stream(int(tlm.StreamId.SERVO_STATUS), 20)
         else:
             self.source_badge.set("disconnected", "idle")
 
@@ -4126,17 +3949,17 @@ class PlotWorkbenchPage(BasePage):
     _LIVE_RATE_HZ = 20
 
     def build(self) -> None:
-        from collections import deque
         import time as _time
+        from collections import deque
 
         import pyqtgraph as pg
 
+        from data.event_log import EventLog
         from data.plot_signals import (
             build_signal_registry,
             registry_by_key,
             streams_for,
         )
-        from data.event_log import EventLog
 
         self._pg = pg
         self._deque = deque
@@ -4373,6 +4196,7 @@ class PlotWorkbenchPage(BasePage):
             self._ensure_subscriptions()
             self._status.setText(f"{len(self._selected)} signal(s) \u00b7 live mode")
         else:
+            self._release_live_subscriptions()
             self._status.setText("Replay mode \u2014 load a recorded session.")
 
     def set_mode(self, mode: str) -> None:
@@ -4453,10 +4277,19 @@ class PlotWorkbenchPage(BasePage):
             self._ensure_subscriptions()
 
     def _ensure_subscriptions(self) -> None:
-        for sid in self._streams_for(self._selected):
+        desired = set(self._streams_for(self._selected))
+        for sid in self._subscribed - desired:
+            self.stop_stream(sid)
+        self._subscribed.intersection_update(desired)
+        for sid in desired:
             if sid not in self._subscribed:
-                self.service.subscribe(sid, self._LIVE_RATE_HZ)
+                self.request_stream(sid, self._LIVE_RATE_HZ)
                 self._subscribed.add(sid)
+
+    def _release_live_subscriptions(self) -> None:
+        for stream_id in tuple(self._subscribed):
+            self.stop_stream(stream_id)
+        self._subscribed.clear()
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if self._mode != "live" or not self._selected:
@@ -4550,7 +4383,7 @@ class PlotWorkbenchPage(BasePage):
 
         try:
             self._replay = SessionReplay(session_dir)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        except Exception as exc:  # noqa: BLE001 - replay loader boundary
             self._status.setText(f"Load failed: {exc}")
             self._replay = None
             return
@@ -4572,8 +4405,8 @@ class PlotWorkbenchPage(BasePage):
     def _replot_replay(self) -> None:
         if self._mode != "replay" or self._replay is None:
             return
-        from data.plot_signals import extract_series
         from data.event_log import EventLog
+        from data.plot_signals import extract_series
 
         frames = list(self._replay.iter_decoded_frames())
         t0_ns = min(
@@ -4607,7 +4440,7 @@ class PlotWorkbenchPage(BasePage):
 
 
 class UrdfViewerPage(BasePage):
-    title = "URDF Viewer"
+    title = "3D URDF"
     subtitle = (
         "Render the actual HexNav URDF meshes in 3D and animate them from "
         "live or replay joint telemetry."
@@ -4655,7 +4488,7 @@ class UrdfViewerPage(BasePage):
 
             meshes = build_link_meshes(self._model)
             self._view = UrdfGLView(self._model, self._fk, meshes)
-        except Exception as exc:  # noqa: BLE001 - degrade instead of crashing
+        except Exception as exc:  # noqa: BLE001 - optional 3D stack boundary
             self._show_unavailable(f"3D view unavailable: {exc}")
             return
 
@@ -4753,8 +4586,8 @@ class UrdfViewerPage(BasePage):
             self.source_badge.set("disconnected", "idle")
 
     def _ensure_subscriptions(self) -> None:
-        self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
-        self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+        self.request_stream(int(tlm.StreamId.JOINT_STATE), 50)
+        self.request_stream(int(tlm.StreamId.SERVO_STATUS), 20)
 
     def _on_telemetry(self, stream_id: int, record) -> None:
         if not self._ok or self._mode != "live":
@@ -4816,7 +4649,7 @@ class UrdfViewerPage(BasePage):
 
         try:
             replay = SessionReplay(session_dir)
-        except Exception as exc:  # noqa: BLE001 - surfaced to the operator
+        except Exception as exc:  # noqa: BLE001 - replay loader boundary
             self.source_badge.set(f"load failed: {exc}", "error")
             return
         frames: list = []
@@ -4879,6 +4712,39 @@ class UrdfViewerPage(BasePage):
             self._stop_play()
             return
         self.set_replay_index(nxt)
+
+
+class PoseViewerPage(QWidget):
+    """One Pose destination with lightweight 2D and detailed 3D modes."""
+
+    def __init__(self, service: ConnectionService, parent=None) -> None:
+        super().__init__(parent)
+        self.service = service
+        self._active = True
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.kinematic = ModelViewerPage(service)
+        self.urdf = UrdfViewerPage(service)
+        self.tabs.addTab(self.kinematic, "2D kinematics")
+        self.tabs.addTab(self.urdf, "3D URDF")
+        self.tabs.currentChanged.connect(self._on_mode_changed)
+        layout.addWidget(self.tabs)
+        self._sync_child_activity()
+
+    def set_page_active(self, active: bool) -> None:
+        self._active = active
+        self._sync_child_activity()
+
+    def _on_mode_changed(self, _index: int) -> None:
+        self._sync_child_activity()
+
+    def _sync_child_activity(self) -> None:
+        current = self.tabs.currentWidget()
+        self.kinematic.set_page_active(self._active and current is self.kinematic)
+        self.urdf.set_page_active(self._active and current is self.urdf)
 
 
 class JointMatrixCell(QWidget):
@@ -4993,10 +4859,10 @@ class JointMatrixCell(QWidget):
 
 
 class JointMatrixPage(BasePage):
-    title = "Joint Matrix"
+    title = "Bench Joints"
     subtitle = (
         "Six-leg maintenance targets with calibrated angle/tick conversion, "
-        "individual torque release, and passive-pose feedback."
+        "individual torque release, and live position feedback."
     )
 
     JOINTS = (("Coxa", 0), ("Femur", 1), ("Tibia", 2))
@@ -5042,12 +4908,11 @@ class JointMatrixPage(BasePage):
         self.service.config_loaded.connect(self._on_config_loaded)
         self.service.dxl_result.connect(self._on_dxl_result)
         self.service.servo_torque_changed.connect(self._on_servo_torque_changed)
-        self.service.passive_result.connect(self._on_passive_result)
         self.service.telemetry.connect(self._on_telemetry)
         self._apply_gates()
 
     def _maintenance_controls(self) -> QGroupBox:
-        box = QGroupBox("Maintenance and display")
+        box = QGroupBox("Bench setup && display")
         form = QFormLayout(box)
         form.setHorizontalSpacing(18)
         form.setVerticalSpacing(12)
@@ -5088,13 +4953,10 @@ class JointMatrixPage(BasePage):
         center.clicked.connect(self._center_all)
         self.center_btn = center
 
-        self.passive_toggle = QCheckBox("Passive pose stream (all torque off)")
-        self.passive_toggle.toggled.connect(self._toggle_passive)
         bottom = QHBoxLayout()
         bottom.addWidget(center)
-        bottom.addWidget(self.passive_toggle)
         bottom.addStretch(1)
-        form.addRow("Pose capture", self._wrap(bottom))
+        form.addRow("All joints", self._wrap(bottom))
 
         self.maintenance_lbl = QLabel("Maintenance lock: none")
         self.maintenance_lbl.setObjectName("MonoLabel")
@@ -5106,7 +4968,7 @@ class JointMatrixPage(BasePage):
         lay = QVBoxLayout(box)
         note = QLabel(
             "Each Set command is maintenance-gated. Release disables torque for "
-            "only that servo; passive pose disables torque for all servos."
+            "only that servo. Use Operate > Passive Pose to release all servos."
         )
         note.setWordWrap(True)
         note.setStyleSheet(f"color: {DRACULA.comment};")
@@ -5167,15 +5029,6 @@ class JointMatrixPage(BasePage):
             cell.set_display_value(
                 self._cfg.SERVO_CENTER_TICK if self._ticks_mode else 180, force=True
             )
-
-    def _toggle_passive(self, enabled: bool) -> None:
-        if enabled:
-            self.command_result.setText("starting passive pose stream...")
-            self.service.passive_enter()
-        else:
-            self.command_result.setText("stopping passive pose stream...")
-            self.service.passive_exit()
-        self._apply_gates()
 
     def _apply_cell_range(self, cell: JointMatrixCell, leg: int, joint: int) -> None:
         """Point one cell at the mapped servo's travel in the active unit."""
@@ -5246,8 +5099,8 @@ class JointMatrixPage(BasePage):
     def _on_connected(self, connected: bool) -> None:
         self._connected = connected
         if connected:
-            self.service.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
-            self.service.subscribe(int(tlm.StreamId.SERVO_STATUS), 20)
+            self.request_stream(int(tlm.StreamId.JOINT_STATE), 50)
+            self.request_stream(int(tlm.StreamId.SERVO_STATUS), 20)
             self.service.load_config()
         else:
             self._lock_held = False
@@ -5255,17 +5108,10 @@ class JointMatrixPage(BasePage):
             self._setup_ready = False
             self._torque_expected.clear()
             self._state = -1
-            self.passive_toggle.blockSignals(True)
-            self.passive_toggle.setChecked(False)
-            self.passive_toggle.blockSignals(False)
         self._apply_gates()
 
     def _on_state_changed(self, state: int) -> None:
         self._state = state
-        passive = state == tlm.SafetyState.PASSIVE_POSE_STREAM
-        self.passive_toggle.blockSignals(True)
-        self.passive_toggle.setChecked(passive)
-        self.passive_toggle.blockSignals(False)
         self._apply_gates()
 
     def _on_lock_changed(self, held: bool, token: int) -> None:
@@ -5327,19 +5173,6 @@ class JointMatrixPage(BasePage):
         else:
             self.command_result.setText(f"servo {servo_id} torque command failed")
 
-    def _on_passive_result(self, kind: str, res) -> None:
-        if kind not in ("enter", "exit"):
-            return
-        if res is None or not res.ok:
-            self.command_result.setText(f"passive {kind}: rejected")
-            if kind == "enter":
-                self.passive_toggle.blockSignals(True)
-                self.passive_toggle.setChecked(False)
-                self.passive_toggle.blockSignals(False)
-        else:
-            self.command_result.setText(f"passive {kind}: active" if kind == "enter" else "passive stopped")
-        self._apply_gates()
-
     def _on_telemetry(self, stream_id: int, record) -> None:
         if stream_id == int(tlm.StreamId.JOINT_STATE):
             for value in record.joints:
@@ -5380,7 +5213,7 @@ class JointMatrixPage(BasePage):
             cell.set_display_value(round(180 + relative_deg))
 
     def _apply_gates(self) -> None:
-        passive = self._state == tlm.SafetyState.PASSIVE_POSE_STREAM or self.passive_toggle.isChecked()
+        passive = self._state == tlm.SafetyState.PASSIVE_POSE_STREAM
         bench_ready = (
             self._connected
             and self._lock_held
@@ -5400,11 +5233,6 @@ class JointMatrixPage(BasePage):
         self.center_btn.setEnabled(bench_ready)
         self.angle_radio.setEnabled(not passive)
         self.tick_radio.setEnabled(not passive)
-        self.passive_toggle.setEnabled(
-            self._connected
-            and self._state
-            in (-1, tlm.SafetyState.DISARMED, tlm.SafetyState.MAC_MAINTENANCE, tlm.SafetyState.PASSIVE_POSE_STREAM)
-        )
         for cell in self._cells.values():
             cell.value.setEnabled(not passive)
             cell.value.setToolTip(
@@ -5418,5 +5246,5 @@ class JointMatrixPage(BasePage):
             cell.release.setEnabled(bench_ready)
 
 # Fixture calibration wizard (separate module keeps this file smaller).
-from .servo_calibration import ServoCalibrationPage  # noqa: E402
-from .openlog_config_file import OpenLogConfigFilePage  # noqa: E402
+from .openlog_config_file import OpenLogConfigFilePage as OpenLogConfigFilePage
+from .servo_calibration import ServoCalibrationPage as ServoCalibrationPage

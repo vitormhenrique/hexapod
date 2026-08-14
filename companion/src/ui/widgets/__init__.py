@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -168,22 +169,23 @@ class EmergencyStopButton(QPushButton):
 
 
 class SafetyBar(QFrame):
-    """Always-visible top bar: connection, mode, arming, torque, RC, battery, estop."""
+    """Always-visible status bar for safety-critical robot state."""
 
     estop_pressed = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setObjectName("SafetyBar")
-        self.setFixedHeight(72)
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(20, 10, 20, 10)
-        lay.setSpacing(14)
+        self.setFixedHeight(92)
+        lay = QGridLayout(self)
+        lay.setContentsMargins(16, 8, 16, 8)
+        lay.setHorizontalSpacing(14)
+        lay.setVerticalSpacing(4)
 
         self.conn = StatusBadge("CONNECTION")
         self.mode = StatusBadge("MODE")
         self.arming = StatusBadge("ARMING")
-        self.torque = StatusBadge("TORQUE")
+        self.dxl_power = StatusBadge("DXL POWER")
         self.source = StatusBadge("CMD SOURCE")
         self.lock = StatusBadge("MAINT LOCK")
         self.rc = StatusBadge("RC LINK")
@@ -192,20 +194,18 @@ class SafetyBar(QFrame):
             self.conn,
             self.mode,
             self.arming,
-            self.torque,
+            self.dxl_power,
             self.source,
             self.lock,
             self.rc,
             self.battery,
         )
-        for i, b in enumerate(badges):
-            if i:
-                lay.addWidget(_badge_separator())
-            lay.addWidget(b)
-        lay.addStretch(1)
+        for index, badge in enumerate(badges):
+            lay.addWidget(badge, index // 4, index % 4)
+            lay.setColumnStretch(index % 4, 1)
         self.estop = EmergencyStopButton()
         self.estop.clicked.connect(self.estop_pressed)
-        lay.addWidget(self.estop)
+        lay.addWidget(self.estop, 0, 4, 2, 1)
 
         self.conn.set("Disconnected", "idle")
         self.lock.set("none", "idle")
@@ -425,17 +425,17 @@ class TelemetryBanner(QFrame):
         self.show()
 
 
-from ui.widgets.hexapod_view import HexapodView  # noqa: E402  (re-export)
-from ui.widgets.servo_detail import ServoDetailPanel  # noqa: E402  (re-export)
+from ui.widgets.hexapod_view import HexapodView
+from ui.widgets.servo_detail import ServoDetailPanel
 
 __all__ = [
-    "StatusBadge",
-    "StatCard",
-    "FeatureToggleCard",
     "EmergencyStopButton",
-    "SafetyBar",
-    "NavRail",
     "EventStrip",
+    "FeatureToggleCard",
     "HexapodView",
+    "NavRail",
+    "SafetyBar",
     "ServoDetailPanel",
+    "StatCard",
+    "StatusBadge",
 ]

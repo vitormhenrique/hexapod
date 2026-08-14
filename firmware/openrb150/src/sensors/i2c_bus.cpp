@@ -87,6 +87,10 @@ bool I2cBus::begin(uint32_t clock_hz) {
   return initializeHardware();
 }
 
+// The SAMD register driver resynchronizes the SERCOM master on every
+// transaction, so no pre-cleanup is needed before direct-Wire libraries.
+void I2cBus::prepareForDirectWire() {}
+
 bool I2cBus::sendStop() {
   SERCOM0->I2CM.CTRLB.bit.CMD = WIRE_MASTER_ACT_STOP;
   return waitForSync(SERCOM_I2CM_SYNCBUSY_SYSOP);
@@ -186,6 +190,29 @@ bool I2cBus::read(uint8_t addr, uint8_t* data, uint8_t len, bool send_stop) {
 // public contract holds: no call blocks past the driver's internal bound, and
 // errors surface through stats_/return values instead of hanging the task.
 
+namespace {
+
+// The Teensy core's endTransmission() NACK path (WireIMXRT.cpp) clears the
+// FIFOs, queues a STOP command, and returns WITHOUT clearing MSR[NDF]. With
+// NDF latched the LPI2C master freezes command processing, so that STOP stays
+// stuck in the TX FIFO (observed MFSR=1 after every NACK probe). Under
+// FreeRTOS the next transaction then trips MSR[FEF] (command sequence error)
+// and aborts, which made every device probe after a NACK fail even though the
+// bus and devices were healthy. Flush stale commands and latched error flags
+// while the master is idle before starting a new transaction. Wire == LPI2C1
+// on the MicroMod Teensy; this class is the sole owner of that bus.
+void cleanupStaleMaster() {
+  if ((IMXRT_LPI2C1.MSR & LPI2C_MSR_MBF) != 0) return;  // mid-transaction
+  if ((IMXRT_LPI2C1.MFSR & 0x07) != 0 ||
+      (IMXRT_LPI2C1.MSR & (LPI2C_MSR_NDF | LPI2C_MSR_FEF | LPI2C_MSR_ALF |
+                           LPI2C_MSR_PLTF)) != 0) {
+    IMXRT_LPI2C1.MCR |= LPI2C_MCR_RTF | LPI2C_MCR_RRF;  // flush TX/RX FIFOs
+    IMXRT_LPI2C1.MSR = 0x00007F00;                      // clear latched flags
+  }
+}
+
+}  // namespace
+
 bool I2cBus::initializeHardware() {
   Wire.begin();
   Wire.setClock(clock_hz_);
@@ -200,6 +227,8 @@ bool I2cBus::begin(uint32_t clock_hz) {
   return initializeHardware();
 }
 
+void I2cBus::prepareForDirectWire() { cleanupStaleMaster(); }
+
 bool I2cBus::recover() {
   ready_ = false;
   Wire.end();
@@ -211,6 +240,7 @@ bool I2cBus::write(uint8_t addr, const uint8_t* data, uint8_t len,
                    bool send_stop) {
   if (len > 0 && data == nullptr) return false;
   if (!ready_ && !recover()) return false;
+  cleanupStaleMaster();
   Wire.beginTransmission(addr);
   if (len > 0) Wire.write(data, len);
   const uint8_t err = Wire.endTransmission(send_stop);
@@ -228,6 +258,7 @@ bool I2cBus::write(uint8_t addr, const uint8_t* data, uint8_t len,
 bool I2cBus::read(uint8_t addr, uint8_t* data, uint8_t len, bool send_stop) {
   if (data == nullptr || len == 0) return false;
   if (!ready_ && !recover()) return false;
+  cleanupStaleMaster();
   const uint8_t received = Wire.requestFrom(
       addr, len, static_cast<uint8_t>(send_stop ? 1 : 0));
   if (received != len) return fail(kErrorAddressNack, false);

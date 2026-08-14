@@ -13,7 +13,6 @@ import struct
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -69,7 +68,40 @@ def test_set_param_result_reports_verification(qtbot) -> None:
     )
     res = api.DxlJobResult(api.DXL_SLOT_DONE, api.DXL_CODE_OK, data)
     service.dxl_result.emit("set_param", res)
-    assert "verified=True" in page.param_result.text()
+    assert "verified: 950" in page.param_result.text()
+
+
+def test_failed_param_readback_is_reported_as_failure(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    data = (
+        bytes([api.DXL_PARAM_TORQUE_LIMIT, 4])
+        + struct.pack("<i", 950)
+        + struct.pack("<i", 900)
+        + bytes([0])
+    )
+    service.dxl_result.emit(
+        "set_param", api.DxlJobResult(api.DXL_SLOT_DONE, api.DXL_CODE_OK, data)
+    )
+    assert "FAILED verification" in page.param_result.text()
+
+
+def test_parameter_actions_require_ready_maintenance(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    buttons = (
+        page.read_param_btn,
+        page.write_param_btn,
+        page.write_limits_btn,
+        page.read_register_btn,
+        page.write_register_btn,
+    )
+    assert all(not button.isEnabled() for button in buttons)
+
+    service.connected.emit(True)
+    service.maint_lock_changed.emit(True, 7)
+    assert all(not button.isEnabled() for button in buttons)
+
+    service.maintenance_setup_changed.emit(False, True, "ready: 18 servos scanned")
+    assert all(button.isEnabled() for button in buttons)
 
 
 def test_failed_dxl_result_marks_target(qtbot) -> None:
@@ -79,7 +111,7 @@ def test_failed_dxl_result_marks_target(qtbot) -> None:
 
 
 def test_expert_panel_hidden_until_gated(qtbot) -> None:
-    service, page = _make_page(qtbot)
+    _service, page = _make_page(qtbot)
     # isHidden() reflects the explicit hidden flag regardless of parent show state.
     assert page.expert_body.isHidden() is True
     # Direct flag flip (bypassing the confirm dialog) reveals the body.

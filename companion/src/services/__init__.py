@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Optional
 
-from PySide6.QtCore import QObject, QTimer, Signal
-
-from hexapod_protocol import api, config as cfg, telemetry as tlm
+from hexapod_protocol import api
+from hexapod_protocol import config as cfg
+from hexapod_protocol import telemetry as tlm
 from hexapod_protocol.framing import VERSION_MAJOR, VERSION_MINOR, version_compatible
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from diagnostics import print_exception
 from transport import (
@@ -60,6 +60,7 @@ class ConnectionService(QObject):
     config_summary = Signal(object)  # config.ConfigSummary (None on failure)
     config_staged = Signal(bool)  # True if every CFG_SET_BLOCK was acked
     config_result = Signal(str, object)  # kind (validate/commit/reset), api.CfgResult
+    config_save_changed = Signal(bool, str, object)  # busy, phase/detail, readback
     dxl_result = Signal(str, object)  # kind, api.DxlJobResult (None on failure)
     sensor_feature_result = Signal(str, object)  # kind, api.SensorFeatureResult
     contact_threshold_result = Signal(object)  # api.ContactThresholdResult
@@ -69,6 +70,7 @@ class ConnectionService(QObject):
     sensor_status = Signal(object)  # api.SensorStatusResult (None on failure)
     passive_result = Signal(str, object)  # kind, api.PassiveResult
     passive_rate_result = Signal(object)  # api.PassiveRateResult
+    passive_setup_changed = Signal(bool, str)  # busy, phase/detail
     maint_lock_changed = Signal(bool, int)  # held, token
     maintenance_setup_changed = Signal(bool, bool, str)  # busy, ready, detail
     gait_test_changed = Signal(bool, str)  # active, phase/detail
@@ -78,7 +80,7 @@ class ConnectionService(QObject):
 
     def __init__(self) -> None:
         super().__init__()
-        self._client: Optional[ProtocolClient] = None
+        self._client: ProtocolClient | None = None
         self._poll = QTimer(self)
         self._poll.setInterval(1000)
         self._poll.timeout.connect(self._poll_status)
@@ -99,10 +101,11 @@ class ConnectionService(QObject):
         self._maint_token: int = 0
         self._maint_setup_busy = False
         self._maint_setup_ready = False
+        self._config_save_busy = False
         # Maintenance-lock keepalive: the firmware lock TTL is 1 s without a
         # MAINT_HEARTBEAT (AGENTS.md 6.4), so a held lock must be beaten from a
         # background thread or MacMaintenance silently lapses to Disarmed.
-        self._maint_hb_stop: Optional[threading.Event] = None
+        self._maint_hb_stop: threading.Event | None = None
         self._gait_test_active = False
         self._gait_test_busy = False
         self._gait_test_owns_lock = False
@@ -111,10 +114,14 @@ class ConnectionService(QObject):
         # it set up, so passive_exit only unwinds what it created (a user who
         # was already doing bench maintenance is left in maintenance).
         self._passive_owns_setup = False
+        self._passive_busy = False
         self._connecting = False
         self._connect_max_attempts = 5
         self._connect_retry_delay_s = 2.5
         self._hello_attempts_per_link = 3
+        self._stream_leases: dict[object, dict[int, int]] = {}
+        self._effective_stream_rates: dict[int, int] = {}
+        self._inactive_stream_owners: set[object] = set()
 
     # --- discovery --------------------------------------------------------
 
@@ -162,11 +169,11 @@ class ConnectionService(QObject):
 
         def worker() -> None:
             attempt_port = port
-            last_error: Optional[BaseException] = None
+            last_error: BaseException | None = None
             for attempt in range(1, self._connect_max_attempts + 1):
                 if not self._connecting:
                     return
-                client: Optional[ProtocolClient] = None
+                client: ProtocolClient | None = None
                 try:
                     if is_tcp_proxy_endpoint(attempt_port):
                         link = open_tcp_proxy(attempt_port)
@@ -235,7 +242,7 @@ class ConnectionService(QObject):
                         reason = f"{reason}: {client.last_error}"
                     last_error = RuntimeError(reason)
                     raise last_error
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - transport boundary
                     last_error = last_error or exc
                     print_exception(
                         f"connect attempt {attempt}/{self._connect_max_attempts} "
@@ -305,9 +312,82 @@ class ConnectionService(QObject):
 
     # --- commands (safe no-ops when disconnected) ------------------------
 
-    def subscribe(self, stream_id: int, rate_hz: int) -> None:
+    def acquire_stream(self, owner: object, stream_id: int, rate_hz: int) -> None:
+        """Request a stream for one UI owner using max-rate arbitration."""
         if self._simulation_mode and stream_id not in _SIMULATION_STREAMS:
             return
+        requested = self._stream_leases.setdefault(owner, {})
+        rate_hz = max(1, int(rate_hz))
+        if requested.get(stream_id) == rate_hz:
+            return
+        requested[stream_id] = rate_hz
+        self._apply_stream_rate(stream_id)
+
+    def release_streams(self, owner: object) -> None:
+        """Release every stream lease held by one UI owner."""
+        requested = self._stream_leases.pop(owner, {})
+        for stream_id in requested:
+            self._apply_stream_rate(stream_id)
+
+    def release_stream(self, owner: object, stream_id: int) -> None:
+        """Release one stream lease while preserving the owner's other feeds."""
+        requested = self._stream_leases.get(owner)
+        if requested is None or stream_id not in requested:
+            return
+        requested.pop(stream_id)
+        if not requested:
+            self._stream_leases.pop(owner, None)
+        self._apply_stream_rate(stream_id)
+
+    def set_stream_owner_active(self, owner: object, active: bool) -> None:
+        """Include or exclude one owner's leases from effective requests."""
+        was_active = owner not in self._inactive_stream_owners
+        if active == was_active:
+            return
+        if active:
+            self._inactive_stream_owners.discard(owner)
+        else:
+            self._inactive_stream_owners.add(owner)
+        for stream_id in self._stream_leases.get(owner, {}):
+            self._apply_stream_rate(stream_id)
+
+    def _apply_stream_rate(self, stream_id: int) -> None:
+        desired = max(
+            (
+                rates[stream_id]
+                for owner, rates in self._stream_leases.items()
+                if owner not in self._inactive_stream_owners
+                if stream_id in rates
+            ),
+            default=0,
+        )
+        current = self._effective_stream_rates.get(stream_id, 0)
+        if desired == current:
+            return
+        if desired:
+            self._effective_stream_rates[stream_id] = desired
+            self._send_subscribe(stream_id, desired)
+        else:
+            self._effective_stream_rates.pop(stream_id, None)
+            self._send_unsubscribe(stream_id)
+
+    def _restore_stream_leases(self) -> None:
+        self._effective_stream_rates.clear()
+        stream_ids = {
+            stream_id
+            for rates in self._stream_leases.values()
+            for stream_id in rates
+        }
+        for stream_id in stream_ids:
+            self._apply_stream_rate(stream_id)
+
+    def subscribe(self, stream_id: int, rate_hz: int) -> None:
+        """Issue an unowned stream request for CLI and legacy callers."""
+        if self._simulation_mode and stream_id not in _SIMULATION_STREAMS:
+            return
+        self._send_subscribe(stream_id, rate_hz)
+
+    def _send_subscribe(self, stream_id: int, rate_hz: int) -> None:
         if self._client:
             threading.Thread(
                 target=lambda: self._client
@@ -316,6 +396,10 @@ class ConnectionService(QObject):
             ).start()
 
     def unsubscribe(self, stream_id: int) -> None:
+        """Issue an unowned stream cancellation for legacy callers."""
+        self._send_unsubscribe(stream_id)
+
+    def _send_unsubscribe(self, stream_id: int) -> None:
         if self._client:
             threading.Thread(
                 target=lambda: self._client and self._client.unsubscribe(stream_id),
@@ -412,6 +496,50 @@ class ConnectionService(QObject):
     def stop_motion(self) -> None:
         self._run_motion("stop_motion", lambda c: c.stop_motion())
 
+    def command_walk(self, gait: int, vx: float, vy: float, wz: float) -> None:
+        """Select a walking gait, then apply twist in one ordered transaction."""
+        self._run_motion_sequence(
+            (
+                ("set_gait", lambda c: c.set_gait(gait)),
+                ("set_body_twist", lambda c: c.set_body_twist(vx, vy, wz)),
+            )
+        )
+
+    def hold_stand(self) -> None:
+        """Stop motion and return body commands to neutral in firmware order."""
+        self._run_motion_sequence(
+            (
+                ("set_body_twist", lambda c: c.set_body_twist(0.0, 0.0, 0.0)),
+                (
+                    "set_body_pose",
+                    lambda c: c.set_body_pose(0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+                ),
+                ("stop_motion", lambda c: c.stop_motion()),
+            )
+        )
+
+    def command_standing_pose(
+        self,
+        x_mm: float,
+        y_mm: float,
+        z_mm: float,
+        roll_deg: float,
+        pitch_deg: float,
+        yaw_deg: float,
+    ) -> None:
+        """Enter Stand before applying a body-pose command."""
+        self._run_motion_sequence(
+            (
+                ("set_gait", lambda c: c.set_gait(api.GAIT_STAND)),
+                (
+                    "set_body_pose",
+                    lambda c: c.set_body_pose(
+                        x_mm, y_mm, z_mm, roll_deg, pitch_deg, yaw_deg
+                    ),
+                ),
+            )
+        )
+
     def set_feature(self, feature: int, enable: bool) -> None:
         """Enable/disable a feature flag; emit the firmware's reflected state."""
         client = self._client
@@ -444,95 +572,120 @@ class ConnectionService(QObject):
         if client is None:
             self.error.emit("passive enter: not connected")
             return
+        if self._passive_busy:
+            return
+        self._passive_busy = True
+        self.passive_setup_changed.emit(True, "preparing passive mode")
 
         def worker() -> None:
-            # PASSIVE_ENTER is idempotent in firmware. On reconnect while the
-            # robot is already passive there is no maintenance lock to acquire;
-            # just refresh the request and subscription.
-            if self._robot_state == _STATE_PASSIVE:
+            owns_setup = False
+            power_on = False
+            success = False
+            detail = "passive setup failed"
+            try:
+                # PASSIVE_ENTER is idempotent. Reconfirm an already-active
+                # stream without acquiring a maintenance lock.
+                if self._robot_state == _STATE_PASSIVE:
+                    self.passive_setup_changed.emit(True, "refreshing passive mode")
+                    res = client.passive_enter()
+                    if res is None or not res.ok:
+                        detail = "firmware rejected passive refresh"
+                        self.error.emit(f"passive enter: {detail}")
+                        if res is not None:
+                            self.passive_result.emit("enter", res)
+                        return
+                    self.passive_result.emit("enter", res)
+                    success = True
+                    detail = "passive streaming active"
+                    self.event.emit("commit", "passive streaming already active")
+                    return
+
+                had_lock = bool(self._maint_token)
+                self.passive_setup_changed.emit(True, "acquiring maintenance")
+                if not self._acquire_maint_lock(client):
+                    detail = "maintenance lock rejected"
+                    self.error.emit(f"passive enter: {detail}")
+                    return
+                owns_setup = not had_lock
+                self._passive_owns_setup = owns_setup
+                if not self._wait_state(
+                    client, _STATE_MAC_MAINTENANCE, timeout=2.0
+                ):
+                    detail = "did not reach maintenance"
+                    self.error.emit(f"passive enter: {detail}")
+                    return
+
+                self.passive_setup_changed.emit(True, "powering DXL bus")
+                pw = client.dxl_power(True)
+                pr = pw.power() if pw and pw.done else None
+                if pr is None or not pr.power_on:
+                    detail = "DXL power on failed"
+                    self.error.emit(f"passive enter: {detail}")
+                    return
+                power_on = True
+
+                self.passive_setup_changed.emit(True, "discovering 18 servos")
+                servos: list = []
+                for _ in range(4):
+                    time.sleep(1.0)
+                    if self._client is not client:
+                        detail = "connection lost"
+                        return
+                    scan = client.dxl_scan(1, 18)
+                    servos = scan.servos() if scan and scan.done else []
+                    if len(servos) == 18:
+                        break
+                if len(servos) != 18:
+                    detail = f"expected 18 servos, found {len(servos)}"
+                    self.error.emit(f"passive enter: {detail}")
+                    return
+
+                self.passive_setup_changed.emit(True, "confirming torque off")
+                torque = client.dxl_torque(False)
+                torque_off = (
+                    torque is not None
+                    and torque.done
+                    and torque.code == api.DXL_CODE_OK
+                    and len(torque.data) >= 2
+                    and torque.data[0] == 0
+                    and torque.data[1] == 18
+                )
+                if not torque_off:
+                    detail = "torque off not confirmed by all servos"
+                    self.error.emit(f"passive enter: {detail}")
+                    return
+
+                self.passive_setup_changed.emit(True, "entering passive state")
                 res = client.passive_enter()
                 if res is None or not res.ok:
-                    self.error.emit("passive enter: firmware rejected refresh")
+                    detail = "firmware rejected passive mode"
+                    self.error.emit(f"passive enter: {detail}")
                     if res is not None:
                         self.passive_result.emit("enter", res)
                     return
+                if not self._wait_state(client, _STATE_PASSIVE, timeout=2.0):
+                    detail = "did not reach passive state"
+                    self.error.emit(f"passive enter: {detail}")
+                    return
                 self.passive_result.emit("enter", res)
-                client.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
-                self.event.emit("commit", "passive streaming already active")
-                return
-
-            # 1) Maintenance lock (skip if already held) so DXL power + scan are
-            #    accepted by the firmware safety gate.
-            had_lock = bool(self._maint_token)
-            if not self._acquire_maint_lock(client):
-                self.error.emit("passive enter: maintenance lock rejected")
-                return
-            # Only unwind on exit what this flow set up; leave a user who was
-            # already in bench maintenance where they were.
-            self._passive_owns_setup = not had_lock
-            if not self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0):
-                self.error.emit("passive enter: did not reach maintenance")
-                return
-            self.event.emit("commit", "passive: maintenance acquired")
-
-            # 2) Power the DXL bus.
-            pw = client.dxl_power(True)
-            pr = pw.power() if pw and pw.done else None
-            if pr is None or not pr.power_on:
-                self.error.emit("passive enter: DXL power on failed")
-                return
-            self.event.emit("commit", "passive: DXL power on")
-
-            # 3) Scan so present positions exist. Freshly powered MX-28s take
-            #    ~1 s to answer, so retry a few times. Scan 1..18 (not the full
-            #    config space) to avoid the out-of-range scan watchdog trip
-            #    (hexapod_src-29n).
-            servos: list = []
-            for _ in range(4):
-                time.sleep(1.0)
-                if self._client is not client:
-                    return  # disconnected mid-flow
-                scan = client.dxl_scan(1, 18)
-                servos = scan.servos() if scan and scan.done else []
-                if len(servos) == 18:
-                    break
-            if len(servos) != 18:
-                self.error.emit(
-                    f"passive enter: expected 18 servos, found {len(servos)}"
-                )
-                return
-            self.event.emit("commit", f"passive: {len(servos)} servos scanned")
-
-            # 4) Torque off: passive mode requires all torque disabled, and the
-            #    FSM only enters PassivePoseStream once torque is confirmed off.
-            torque = client.dxl_torque(False)
-            torque_off = (
-                torque is not None
-                and torque.done
-                and torque.code == api.DXL_CODE_OK
-                and len(torque.data) >= 2
-                and torque.data[0] == 0
-                and torque.data[1] == 18
-            )
-            if not torque_off:
-                self.error.emit("passive enter: torque off not confirmed by all servos")
-                return
-
-            # 5) Request passive streaming.
-            res = client.passive_enter()
-            if res is None or not res.ok:
-                self.error.emit("passive enter: firmware rejected")
-                if res is not None:
-                    self.passive_result.emit("enter", res)
-                return
-            self.passive_result.emit("enter", res)
-            if not self._wait_state(client, _STATE_PASSIVE, timeout=2.0):
-                self.error.emit("passive enter: did not reach passive state")
-                return
-
-            # 6) Subscribe so joint_state actually streams to the UI.
-            client.subscribe(int(tlm.StreamId.JOINT_STATE), 50)
-            self.event.emit("commit", "passive streaming active")
+                success = True
+                detail = "passive streaming active"
+                self.event.emit("commit", detail)
+            except Exception as exc:  # noqa: BLE001 - worker boundary
+                detail = f"setup failed: {exc}"
+                self.error.emit(f"passive enter: {detail}")
+            finally:
+                if not success and owns_setup:
+                    try:
+                        if power_on:
+                            client.dxl_torque(False)
+                            client.dxl_power(False)
+                        self._release_maint_lock(client)
+                    except Exception as cleanup_error:  # noqa: BLE001
+                        print_exception("passive setup cleanup failed", cleanup_error)
+                    self._passive_owns_setup = False
+                self._passive_busy = False
+                self.passive_setup_changed.emit(False, detail)
 
         threading.Thread(
             target=worker, name="hexapod-passive-enter", daemon=True
@@ -549,20 +702,34 @@ class ConnectionService(QObject):
         if client is None:
             self.error.emit("passive exit: not connected")
             return
+        if self._passive_busy:
+            return
+        self._passive_busy = True
+        self.passive_setup_changed.emit(True, "exiting passive mode")
 
         def worker() -> None:
-            res = client.passive_exit()
-            if res is not None:
+            detail = "passive exit failed"
+            try:
+                res = client.passive_exit()
+                if res is None:
+                    self.error.emit("passive exit: no response")
+                    return
                 self.passive_result.emit("exit", res)
-            client.unsubscribe(int(tlm.StreamId.JOINT_STATE))
-            # Only unwind the power/lock if this flow set them up.
-            if self._passive_owns_setup and self._maint_token:
-                self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0)
-                client.dxl_power(False)
-                self._release_maint_lock(client)
-            self._passive_owns_setup = False
-            if res is None:
-                self.error.emit("passive exit: no response")
+                if not res.ok:
+                    self.error.emit("passive exit: firmware rejected")
+                    return
+                if self._passive_owns_setup and self._maint_token:
+                    self._wait_state(client, _STATE_MAC_MAINTENANCE, timeout=2.0)
+                    client.dxl_power(False)
+                    self._release_maint_lock(client)
+                self._passive_owns_setup = False
+                detail = "passive mode exited"
+            except Exception as exc:  # noqa: BLE001 - worker boundary
+                detail = f"exit failed: {exc}"
+                self.error.emit(f"passive exit: {detail}")
+            finally:
+                self._passive_busy = False
+                self.passive_setup_changed.emit(False, detail)
 
         threading.Thread(
             target=worker, name="hexapod-passive-exit", daemon=True
@@ -632,6 +799,10 @@ class ConnectionService(QObject):
                 self.passive_rate_result.emit(res)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    @property
+    def passive_busy(self) -> bool:
+        return self._passive_busy
 
     def _run_passive(self, kind: str, call) -> None:
         client = self._client
@@ -873,6 +1044,8 @@ class ConnectionService(QObject):
             self._stop_maint_heartbeat()
             res = client.exit_maintenance(token)
             if res is None:
+                if token and token == self._maint_token and self._client is client:
+                    self._start_maint_heartbeat(client, token)
                 self.error.emit("maintenance: no response")
                 return
             if res.ok:
@@ -884,6 +1057,17 @@ class ConnectionService(QObject):
                     False, False, "maintenance exited"
                 )
                 self.event.emit("commit", "maintenance lock released")
+            else:
+                # A rejected token is no longer authoritative. Clear it rather
+                # than leaving the UI enabled with a stopped heartbeat.
+                self._maint_token = 0
+                self._maint_setup_busy = False
+                self._maint_setup_ready = False
+                self.maint_lock_changed.emit(False, 0)
+                self.maintenance_setup_changed.emit(
+                    False, False, "maintenance lock was rejected"
+                )
+                self.error.emit("maintenance: lock release rejected")
             self.maint_result.emit(res)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -920,7 +1104,7 @@ class ConnectionService(QObject):
                     return
                 try:
                     res = client.maint_heartbeat(token)
-                except Exception:
+                except Exception:  # noqa: BLE001 - heartbeat transport boundary
                     return
                 if res is None:
                     misses += 1
@@ -1015,8 +1199,8 @@ class ConnectionService(QObject):
                 if acquired_here:
                     client.dxl_power(False)
                     self._release_maint_lock(client)
-            except Exception:
-                pass
+            except Exception as cleanup_error:  # noqa: BLE001
+                print_exception("gait setup cleanup failed", cleanup_error)
             self._gait_test_active = False
             self._gait_test_busy = False
             self._gait_test_owns_lock = False
@@ -1118,7 +1302,7 @@ class ConnectionService(QObject):
         def guarded_worker() -> None:
             try:
                 worker()
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker boundary
                 fail(f"setup failed: {exc}", acquired_here)
 
         threading.Thread(
@@ -1155,7 +1339,7 @@ class ConnectionService(QObject):
                     client.set_body_twist(0.0, 0.0, 0.0),
                     client.set_gait(api.GAIT_STAND),
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker boundary
                 arming = None
                 results = ()
                 detail = f"simulation setup failed: {exc}"
@@ -1225,7 +1409,7 @@ class ConnectionService(QObject):
                 client.stop_motion()
                 time.sleep(0.35)
                 torque = client.dxl_torque(False)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker boundary
                 self._gait_test_busy = False
                 self.gait_test_busy_changed.emit(False)
                 detail = f"stop failed: {exc}; retry Stop or use ESTOP"
@@ -1276,7 +1460,7 @@ class ConnectionService(QObject):
                     client.stop_motion(),
                 )
                 client.set_arming(False)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - worker boundary
                 results = ()
                 detail = f"simulation stop failed: {exc}"
             else:
@@ -1406,6 +1590,94 @@ class ConnectionService(QObject):
     def commit_config(self) -> None:
         self._run_cfg("commit", lambda c: c.cfg_commit())
 
+    def save_config(self, config) -> None:
+        """Stage, validate, torque-off, commit, and verify one RobotConfig."""
+        client = self._client
+        if client is None:
+            self.error.emit("config save: not connected")
+            return
+        if self._config_save_busy:
+            self.error.emit("config save: another save is already running")
+            return
+        self._config_save_busy = True
+        self.config_save_changed.emit(True, "staging config", None)
+
+        def fail(detail: str) -> None:
+            self.event.emit("error", f"config save failed: {detail}")
+            self.error.emit(f"config save: {detail}")
+
+        def worker() -> None:
+            readback = None
+            detail = "config save failed"
+            try:
+                expected = cfg.encode_robot_config(config)
+                if not client.write_config(config):
+                    detail = "staging failed"
+                    fail(detail)
+                    return
+
+                self.config_save_changed.emit(True, "validating config", None)
+                validation = client.cfg_validate()
+                if validation is None or not validation.ok:
+                    code = getattr(validation, "result", "no response")
+                    detail = f"validation failed ({code})"
+                    fail(detail)
+                    return
+
+                self.config_save_changed.emit(True, "disabling servo torque", None)
+                torque = client.dxl_torque(False)
+                torque_off = (
+                    torque is not None
+                    and torque.done
+                    and torque.code == api.DXL_CODE_OK
+                    and len(torque.data) >= 2
+                    and torque.data[0] == 0
+                    and torque.data[1] == len(config.servos)
+                )
+                if not torque_off:
+                    detail = "torque off was not verified for every servo"
+                    fail(detail)
+                    return
+
+                time.sleep(0.15)
+                self.config_save_changed.emit(True, "committing to OpenLog", None)
+                committed = client.cfg_commit()
+                if committed is None or not committed.ok:
+                    code = getattr(committed, "result", "no response")
+                    detail = f"commit failed ({code})"
+                    fail(detail)
+                    return
+
+                self.config_save_changed.emit(True, "verifying read-back", None)
+                readback = client.read_config()
+                if readback is None:
+                    detail = "read-back failed"
+                    fail(detail)
+                    return
+                if cfg.encode_robot_config(readback) != expected:
+                    detail = "read-back does not match the saved config"
+                    readback = None
+                    fail(detail)
+                    return
+
+                detail = "saved and verified"
+                self.config_loaded.emit(readback)
+                self.event.emit("commit", "config saved and read-back verified")
+            except Exception as exc:  # noqa: BLE001 - transaction boundary
+                detail = f"save failed: {exc}"
+                fail(detail)
+            finally:
+                self._config_save_busy = False
+                self.config_save_changed.emit(False, detail, readback)
+
+        threading.Thread(
+            target=worker, name="hexapod-config-save", daemon=True
+        ).start()
+
+    @property
+    def config_save_busy(self) -> bool:
+        return self._config_save_busy
+
     def reset_config_defaults(self) -> None:
         self._run_cfg("reset", lambda c: c.cfg_reset_defaults())
 
@@ -1429,7 +1701,7 @@ class ConnectionService(QObject):
         threading.Thread(target=worker, daemon=True).start()
 
     @property
-    def client(self) -> Optional[ProtocolClient]:
+    def client(self) -> ProtocolClient | None:
         return self._client
 
     # --- DXL maintenance jobs (submit+poll on a worker thread) -----------
@@ -1720,6 +1992,27 @@ class ConnectionService(QObject):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _run_motion_sequence(self, commands) -> None:
+        """Run dependent motion commands serially and stop on first rejection."""
+        client = self._client
+        if client is None:
+            self.error.emit("motion: not connected")
+            return
+
+        def worker() -> None:
+            for kind, call in commands:
+                res = call(client)
+                if res is None:
+                    self.error.emit(f"{kind}: no response")
+                    return
+                self.motion_result.emit(kind, res)
+                if not res.ok:
+                    return
+
+        threading.Thread(
+            target=worker, name="hexapod-motion-sequence", daemon=True
+        ).start()
+
     def _run_in_worker(self, call) -> None:
         client = self._client
         if client is None:
@@ -1733,8 +2026,10 @@ class ConnectionService(QObject):
         if up:
             self._poll.start()
             self._poll_status()  # first poll immediately, not after 1 s
+            self._restore_stream_leases()
         else:
             self._poll.stop()
+            self._effective_stream_rates.clear()
 
     def _poll_status(self) -> None:
         client = self._client
@@ -1752,7 +2047,7 @@ class ConnectionService(QObject):
         self.telemetry.emit(stream_id, record)
 
     def _on_connection(
-        self, value: bool, client: Optional[ProtocolClient] = None
+        self, value: bool, client: ProtocolClient | None = None
     ) -> None:
         if value:
             return

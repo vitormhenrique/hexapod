@@ -193,14 +193,53 @@ QGroupBox::title {{
     font-weight: 700;
 }}
 
+/* --- Workspace tabs --- */
+QTabWidget::pane {{
+    border: none;
+    background: transparent;
+}}
+QTabBar {{
+    background: transparent;
+    qproperty-drawBase: 0;
+}}
+QTabBar::tab {{
+    background: transparent;
+    color: {DRACULA.comment};
+    font-size: 13px;
+    font-weight: 600;
+    padding: 10px 22px;
+    margin: 6px 4px 0 4px;
+    border: 1px solid transparent;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    min-width: 90px;
+}}
+QTabBar::tab:hover {{
+    background-color: {DRACULA.elevated};
+    color: {DRACULA.foreground};
+}}
+QTabBar::tab:selected {{
+    background-color: {DRACULA.surface_alt};
+    color: {DRACULA.foreground};
+    border: 1px solid {DRACULA.border_soft};
+    border-bottom: 2px solid {DRACULA.purple};
+}}
+QTabBar::tab:disabled {{
+    color: {DRACULA.border_soft};
+}}
+#WorkspaceTabs > QTabBar {{
+    font-size: 13px;
+}}
+
 /* --- Buttons --- */
 QPushButton {{
     background-color: {DRACULA.elevated};
     border: 1px solid {DRACULA.border_soft};
     border-radius: 8px;
-    padding: 8px 18px;
+    padding: 9px 20px;
+    font-size: 13px;
     font-weight: 600;
-    min-height: 18px;
+    min-height: 22px;
 }}
 QPushButton:hover {{
     background-color: {DRACULA.current_line};
@@ -371,5 +410,5 @@ def apply_theme(app) -> None:
     app.setStyleSheet(STYLESHEET)
     try:
         app.setStyle("Fusion")
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - optional style fallback
         pass

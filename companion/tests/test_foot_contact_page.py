@@ -12,7 +12,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 
@@ -69,6 +68,35 @@ def test_feature_result_reports_reason(qtbot) -> None:
     service.sensor_feature_result.emit("contact", res)
     assert "rejected" in page.contact_result.text()
     assert "hardware missing" in page.contact_result.text()
+
+
+def test_feature_cards_reflect_firmware_availability(qtbot) -> None:
+    service, page = _make_page(qtbot)
+    service.feature_list.emit(
+        api.FeatureList(
+            state=2,
+            features=[
+                api.FeatureState(
+                    api.FEATURE_FOOT_CONTACT,
+                    True,
+                    True,
+                    api.FEATURE_REASON_NONE,
+                ),
+                api.FeatureState(
+                    api.FEATURE_TERRAIN_LEVELING,
+                    False,
+                    False,
+                    api.FEATURE_REASON_HARDWARE_MISSING,
+                ),
+            ],
+        )
+    )
+
+    contact = page._feature_cards[api.FEATURE_FOOT_CONTACT]
+    leveling = page._feature_cards[api.FEATURE_TERRAIN_LEVELING]
+    assert contact._btn.isChecked()
+    assert not leveling._btn.isEnabled()
+    assert "hardware missing" in leveling._reason.text()
 
 
 def test_threshold_result_displays_values(qtbot) -> None:

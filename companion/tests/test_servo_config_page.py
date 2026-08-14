@@ -14,7 +14,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 from hexapod_protocol import config as cfg
 
@@ -175,32 +174,40 @@ def test_sensor_baseline_capture_uses_latest_raw_telemetry(qtbot) -> None:
     assert "Copied 6" in page.sensor_capture_lbl.text()
 
 
-def test_staged_ok_updates_base(qtbot) -> None:
+def test_verified_save_updates_active_baseline(qtbot) -> None:
     service, page = _make_page(qtbot)
     _load_default(service, page)
     page.table.item(0, 4).setText("9")
     edited, err = page._read_table()
     assert err is None
     page._edited = edited
-    service.config_staged.emit(True)
+    page._save_pending = True
+    service.config_save_changed.emit(False, "saved and verified", edited)
     assert page._loaded is edited
-    assert "staged ok" in page.action_lbl.text()
+    assert "saved and verified" in page.action_lbl.text()
+    assert "read-back verified" in page.diff_text.toPlainText()
 
 
-def test_staged_failure_message(qtbot) -> None:
+def test_failed_save_preserves_active_baseline(qtbot) -> None:
     service, page = _make_page(qtbot)
-    _load_default(service, page)
-    service.config_staged.emit(False)
-    assert "stage failed" in page.action_lbl.text()
+    active = _load_default(service, page)
+    page._save_pending = True
+    service.config_save_changed.emit(False, "read-back does not match", None)
+    assert page._loaded is active
+    assert "does not match" in page.action_lbl.text()
 
 
-def test_config_result_routing(qtbot) -> None:
+def test_unrelated_config_results_do_not_mutate_page(qtbot) -> None:
     service, page = _make_page(qtbot)
-    _load_default(service, page)
+    active = _load_default(service, page)
     service.config_result.emit("validate", api.CfgResult(api.CFG_OK))
-    assert "validate: ok" in page.action_lbl.text()
+    service.config_staged.emit(True)
+    assert page._loaded is active
+    assert page.action_lbl.text() == "config loaded"
+
+    service.config_result.emit("reset", api.CfgResult(api.CFG_COMMIT_FAILED))
     service.config_result.emit("commit", api.CfgResult(api.CFG_COMMIT_FAILED))
-    assert "commit: failed" in page.action_lbl.text()
+    assert "reset: failed" in page.action_lbl.text()
 
 
 def test_export_import_roundtrip(qtbot, tmp_path) -> None:
@@ -239,7 +246,7 @@ def test_export_import_roundtrip(qtbot, tmp_path) -> None:
 
 
 def test_actions_safe_when_disconnected(qtbot) -> None:
-    service, page = _make_page(qtbot)
+    service, _page = _make_page(qtbot)
     errors = []
     service.error.connect(lambda m: errors.append(m))
     service.load_config()
@@ -250,18 +257,18 @@ def test_actions_safe_when_disconnected(qtbot) -> None:
 
 def test_config_mutation_controls_require_maintenance_lock(qtbot) -> None:
     service, page = _make_page(qtbot)
-    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+    for button in (page.reset_btn, page.save_btn):
         assert not button.isEnabled()
 
     service.connected.emit(True)
-    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+    for button in (page.reset_btn, page.save_btn):
         assert not button.isEnabled()
         assert button.toolTip()
 
     service.maint_lock_changed.emit(True, 42)
-    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+    for button in (page.reset_btn, page.save_btn):
         assert button.isEnabled()
 
     service.maint_lock_changed.emit(False, 0)
-    for button in (page.reset_btn, page.stage_btn, page.commit_btn):
+    for button in (page.reset_btn, page.save_btn):
         assert not button.isEnabled()

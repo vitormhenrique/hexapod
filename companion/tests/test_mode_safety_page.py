@@ -12,7 +12,6 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
-
 from hexapod_protocol import api
 
 pytest.importorskip("PySide6")
@@ -28,16 +27,16 @@ def _make_page(qtbot):
     return service, page
 
 
-def test_feature_cards_reflect_feature_list(qtbot) -> None:
+def test_system_authority_cards_reflect_feature_list(qtbot) -> None:
     service, page = _make_page(qtbot)
     fl = api.FeatureList(
         state=2,
         features=[
             api.FeatureState(
-                api.FEATURE_FOOT_CONTACT, True, True, api.FEATURE_REASON_NONE
+                api.FEATURE_SENSOR_POLLING, True, True, api.FEATURE_REASON_NONE
             ),
             api.FeatureState(
-                api.FEATURE_TERRAIN_LEVELING,
+                api.FEATURE_JETSON_CONTROL,
                 False,
                 False,
                 api.FEATURE_REASON_HARDWARE_MISSING,
@@ -46,17 +45,17 @@ def test_feature_cards_reflect_feature_list(qtbot) -> None:
     )
     service.feature_list.emit(fl)
 
-    foot = page._feature_cards[api.FEATURE_FOOT_CONTACT]
-    terrain = page._feature_cards[api.FEATURE_TERRAIN_LEVELING]
-    assert foot._btn.isChecked() is True
-    assert foot._btn.isEnabled() is True
+    polling = page._feature_cards[api.FEATURE_SENSOR_POLLING]
+    jetson = page._feature_cards[api.FEATURE_JETSON_CONTROL]
+    assert polling._btn.isChecked() is True
+    assert polling._btn.isEnabled() is True
     # Unavailable feature: button disabled + reason shown.
-    assert terrain._btn.isEnabled() is False
-    assert "hardware missing" in terrain._reason.text()
+    assert jetson._btn.isEnabled() is False
+    assert "hardware missing" in jetson._reason.text()
 
 
 def test_control_button_when_disconnected_emits_error(qtbot) -> None:
-    service, page = _make_page(qtbot)
+    service, _page = _make_page(qtbot)
     with qtbot.waitSignal(service.error, timeout=2000) as blocker:
         # Arm is a non-dangerous control (no confirm dialog) -> calls the service.
         service.set_arming(True)
@@ -76,7 +75,7 @@ def test_maint_result_updates_lock_label(qtbot) -> None:
     service, page = _make_page(qtbot)
     granted = api.MaintResultMsg(api.MAINT_OK, 8, 0x1234)
     service.maint_result.emit(granted)
-    assert "1234" in page.lock_lbl.text() or "4660" in page.lock_lbl.text()
+    assert "held" in page.lock_lbl.text()
     released = api.MaintResultMsg(api.MAINT_OK, 2, 0)
     service.maint_result.emit(released)
     assert "none" in page.lock_lbl.text()
