@@ -9,9 +9,9 @@ behavior so a file edited on the companion can be copied back to the card.
 
 from __future__ import annotations
 
+import struct
 from dataclasses import dataclass
 from pathlib import Path
-import struct
 
 from hexapod_protocol import config as cfg
 from hexapod_protocol.crc16 import crc16
@@ -186,13 +186,69 @@ def append_config_record(journal: OpenLogConfigJournal, config: cfg.RobotConfig)
     return journal.raw_text + record.hex().upper().encode("ascii")
 
 
+def activate_config_record(
+    journal: OpenLogConfigJournal, record: JournalRecord
+) -> bytes:
+    """Append an exact copy of ``record`` as the new firmware-active config.
+
+    Firmware selects the valid record with the largest sequence number, not
+    the entry currently highlighted in the companion UI. Reusing an older
+    sequence would therefore be ignored. Appending this record at
+    ``journal.next_sequence`` makes the chosen historical config the one that
+    firmware loads at its next boot.
+    """
+    if record not in journal.records:
+        raise OpenLogConfigError("selected record does not belong to this journal")
+    return append_config_record(journal, record.config)
+
+
+def delete_config_record(journal: OpenLogConfigJournal, record: JournalRecord) -> bytes:
+    """Return the card file with exactly one valid record removed.
+
+    Only the selected record's encoded span is removed. The card's transport
+    prefix and every surviving record retain their original bytes and sequence
+    numbers. Firmware can consequently scan the resulting journal unchanged
+    and boot the highest remaining valid sequence.
+    """
+    if record not in journal.records:
+        raise OpenLogConfigError("selected record does not belong to this journal")
+    if len(journal.records) <= 1:
+        raise OpenLogConfigError("cannot delete the only valid config record")
+    start = record.offset * 2
+    end = record.end_offset * 2
+    if not 0 <= start < end <= len(journal.raw_text):
+        raise OpenLogConfigError("selected record has an invalid encoded range")
+    rendered = journal.raw_text[:start] + journal.raw_text[end:]
+    # Validate the output before presenting it to callers as card-safe.
+    parse_openlog_config(rendered, journal.path)
+    return rendered
+
+
+def _write_journal_text(raw_text: bytes, destination: str | Path) -> Path:
+    target = Path(destination)
+    try:
+        target.write_bytes(raw_text)
+    except OSError as exc:
+        raise OpenLogConfigError(f"cannot write {target}: {exc}") from exc
+    return target
+
+
 def save_openlog_config(
     journal: OpenLogConfigJournal, config: cfg.RobotConfig, destination: str | Path
 ) -> Path:
     """Append an edited record and write a replacement card file."""
-    target = Path(destination)
-    try:
-        target.write_bytes(append_config_record(journal, config))
-    except OSError as exc:
-        raise OpenLogConfigError(f"cannot write {target}: {exc}") from exc
-    return target
+    return _write_journal_text(append_config_record(journal, config), destination)
+
+
+def save_activated_config_record(
+    journal: OpenLogConfigJournal, record: JournalRecord, destination: str | Path
+) -> Path:
+    """Persist a selected historical config as the new highest sequence."""
+    return _write_journal_text(activate_config_record(journal, record), destination)
+
+
+def save_deleted_config_record(
+    journal: OpenLogConfigJournal, record: JournalRecord, destination: str | Path
+) -> Path:
+    """Persist a journal with one selected valid record removed."""
+    return _write_journal_text(delete_config_record(journal, record), destination)

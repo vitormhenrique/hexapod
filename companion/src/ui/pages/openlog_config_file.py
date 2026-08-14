@@ -22,24 +22,25 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSpinBox,
-    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from data.openlog_config import (
+    JournalRecord,
     OpenLogConfigError,
     OpenLogConfigJournal,
     append_config_record,
     load_openlog_config,
-    parse_openlog_config,
+    save_activated_config_record,
+    save_deleted_config_record,
     save_openlog_config,
 )
 from theme import DRACULA
-
-from ui.pages import BasePage  # noqa: E402
+from ui.pages import BasePage
 
 
 class OpenLogConfigFilePage(BasePage):
@@ -97,6 +98,7 @@ class OpenLogConfigFilePage(BasePage):
         self._cfg = cfg
         self._journal: OpenLogConfigJournal | None = None
         self._record_sequence: int | None = None
+        self._selected_record: JournalRecord | None = None
         self._base_config = None
 
         self.content.addWidget(self._source_box())
@@ -122,7 +124,7 @@ class OpenLogConfigFilePage(BasePage):
         form.addRow("Journal", self.file_status_lbl)
 
         actions = QHBoxLayout()
-        open_button = QPushButton("Open CONFIG.TXT")
+        open_button = QPushButton("Open CONFIG.TXT")
         open_button.setProperty("accent", True)
         open_button.clicked.connect(self._open_file)
         actions.addWidget(open_button)
@@ -143,7 +145,7 @@ class OpenLogConfigFilePage(BasePage):
         lay = QVBoxLayout(box)
         self.record_table = QTableWidget(0, 5)
         self.record_table.setHorizontalHeaderLabels(
-            ("Sequence", "Offset", "Schema", "Payload", "Selected")
+            ("Sequence", "Offset", "Schema", "Payload", "Firmware active")
         )
         self.record_table.verticalHeader().setVisible(False)
         self.record_table.setEditTriggers(QTableWidget.NoEditTriggers)
@@ -302,27 +304,33 @@ class OpenLogConfigFilePage(BasePage):
         grid = QGridLayout(box)
         grid.setHorizontalSpacing(12)
         grid.setVerticalSpacing(12)
-        self.append_btn = QPushButton("Append to loaded CONFIG.TXT")
+        self.append_btn = QPushButton("Append edited config")
         self.append_btn.setProperty("accent", True)
         self.append_btn.clicked.connect(self._append_to_loaded_file)
-        self.save_as_btn = QPushButton("Save copy as CONFIG.TXT")
+        self.activate_btn = QPushButton("Activate selected record")
+        self.activate_btn.clicked.connect(self._activate_selected_record)
+        self.delete_btn = QPushButton("Delete selected record")
+        self.delete_btn.clicked.connect(self._delete_selected_record)
+        self.save_as_btn = QPushButton("Save copy as CONFIG.TXT")
         self.save_as_btn.clicked.connect(self._save_copy)
         self.preview_btn = QPushButton("Preview new record")
         self.preview_btn.clicked.connect(self._preview_record)
         grid.addWidget(self.append_btn, 0, 0)
-        grid.addWidget(self.save_as_btn, 0, 1)
-        grid.addWidget(self.preview_btn, 0, 2)
+        grid.addWidget(self.activate_btn, 0, 1)
+        grid.addWidget(self.delete_btn, 0, 2)
+        grid.addWidget(self.save_as_btn, 1, 0)
+        grid.addWidget(self.preview_btn, 1, 1)
         for column in range(3):
             grid.setColumnStretch(column, 1)
         self.action_lbl = QLabel("Open a card file to begin.")
         self.action_lbl.setObjectName("MonoLabel")
         self.action_lbl.setWordWrap(True)
-        grid.addWidget(self.action_lbl, 1, 0, 1, 3)
+        grid.addWidget(self.action_lbl, 2, 0, 1, 3)
         self.preview_text = QPlainTextEdit()
         self.preview_text.setReadOnly(True)
         self.preview_text.setMinimumHeight(100)
         self.preview_text.setPlaceholderText("Record preview appears here.")
-        grid.addWidget(self.preview_text, 2, 0, 1, 3)
+        grid.addWidget(self.preview_text, 3, 0, 1, 3)
         self._apply_gates()
         return box
 
@@ -349,6 +357,7 @@ class OpenLogConfigFilePage(BasePage):
 
     def _load_journal(self, journal: OpenLogConfigJournal) -> None:
         self._journal = journal
+        self._selected_record = None
         self.path_lbl.setText(str(journal.path) if journal.path else "in-memory journal")
         self.file_status_lbl.setText(
             f"{len(journal.records)} valid record(s), prefix {journal.prefix_bytes} decoded byte(s), "
@@ -362,7 +371,7 @@ class OpenLogConfigFilePage(BasePage):
                 record.offset,
                 record.config.schema_version,
                 len(record.payload),
-                "newest" if record.sequence == newest else "",
+                "yes" if record == journal.newest else "",
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -385,11 +394,17 @@ class OpenLogConfigFilePage(BasePage):
             return
         record = self._journal.records[row]
         self._record_sequence = record.sequence
+        self._selected_record = record
         self._base_config = copy.deepcopy(record.config)
         self._populate_editor(self._base_config)
-        self.sequence_lbl.setText(f"{record.sequence} (new writes use {self._journal.next_sequence})")
+        active_sequence = self._journal.newest.sequence
+        self.sequence_lbl.setText(
+            f"selected {record.sequence}; firmware boots {active_sequence}"
+        )
         self.action_lbl.setText(
-            f"Loaded record {record.sequence}; edits append sequence {self._journal.next_sequence}."
+            f"Selected record {record.sequence}; edits append sequence "
+            f"{self._journal.next_sequence}. Activate copies this exact record "
+            "to the next sequence for firmware boot selection."
         )
         self.preview_text.clear()
         self._apply_gates()
@@ -613,10 +628,61 @@ class OpenLogConfigFilePage(BasePage):
         if not self._confirm(
             "Append config record to card",
             f"Append sequence {journal.next_sequence} to {journal.path.name}? "
-            "The old records stay intact; copy this file back to the robot card.",
+            "Firmware will select this new highest sequence at boot. Old records stay intact.",
         ):
             return
         self._save_to_path(journal.path)
+
+    def _activate_selected_record(self) -> None:
+        journal = self._require_journal_or_warn()
+        record = self._require_selected_record_or_warn()
+        if journal is None or record is None or journal.path is None:
+            return
+        if not self._confirm(
+            "Activate selected config record",
+            f"Copy sequence {record.sequence} as new sequence {journal.next_sequence}? "
+            "Firmware loads the highest valid sequence, so this makes the selected "
+            "historical config active on the next boot.",
+        ):
+            return
+        try:
+            saved = save_activated_config_record(journal, record, journal.path)
+            reloaded = load_openlog_config(saved)
+        except OpenLogConfigError as exc:
+            self.action_lbl.setText(f"activate blocked: {exc}")
+            return
+        self._load_journal(reloaded)
+        self.action_lbl.setText(
+            f"activated sequence {record.sequence} as sequence "
+            f"{reloaded.newest.sequence}; readback verified"
+        )
+
+    def _delete_selected_record(self) -> None:
+        journal = self._require_journal_or_warn()
+        record = self._require_selected_record_or_warn()
+        if journal is None or record is None or journal.path is None:
+            return
+        if len(journal.records) <= 1:
+            self.action_lbl.setText("cannot delete the only valid config record")
+            return
+        if not self._confirm(
+            "Delete selected config record",
+            f"Delete sequence {record.sequence} from {journal.path.name}? "
+            "The remaining journal bytes stay unchanged. Firmware will boot the "
+            "highest remaining valid sequence.",
+        ):
+            return
+        try:
+            saved = save_deleted_config_record(journal, record, journal.path)
+            reloaded = load_openlog_config(saved)
+        except OpenLogConfigError as exc:
+            self.action_lbl.setText(f"delete blocked: {exc}")
+            return
+        self._load_journal(reloaded)
+        self.action_lbl.setText(
+            f"deleted sequence {record.sequence}; firmware now boots sequence "
+            f"{reloaded.newest.sequence}; readback verified"
+        )
 
     def _save_copy(self) -> None:
         journal = self._require_journal_or_warn()
@@ -656,6 +722,12 @@ class OpenLogConfigFilePage(BasePage):
             self.action_lbl.setText(str(exc))
             return None
 
+    def _require_selected_record_or_warn(self) -> JournalRecord | None:
+        if self._selected_record is None:
+            self.action_lbl.setText("select a valid journal record first")
+            return None
+        return self._selected_record
+
     def _confirm(self, title: str, text: str) -> bool:
         return QMessageBox.question(
             self,
@@ -668,5 +740,11 @@ class OpenLogConfigFilePage(BasePage):
     def _apply_gates(self) -> None:
         editable = self._journal is not None and self._base_config is not None
         self.append_btn.setEnabled(editable and self._journal.path is not None)
+        self.activate_btn.setEnabled(editable and self._journal.path is not None)
+        self.delete_btn.setEnabled(
+            editable
+            and self._journal.path is not None
+            and len(self._journal.records) > 1
+        )
         self.save_as_btn.setEnabled(editable)
         self.preview_btn.setEnabled(editable)

@@ -7,9 +7,9 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from hexapod_protocol import config as cfg
 
 from data.openlog_config import encode_record, load_openlog_config, parse_openlog_config
-from hexapod_protocol import config as cfg
 
 pytest.importorskip("PySide6")
 
@@ -29,6 +29,21 @@ def _make_page(qtbot):
 def _journal():
     config = cfg.default_robot_config()
     return parse_openlog_config(PREFIX + encode_record(config, 6).hex().upper().encode("ascii"))
+
+
+def _two_record_file(path):
+    older = cfg.default_robot_config()
+    older.robot_name = "Older"
+    newer = cfg.default_robot_config()
+    newer.robot_name = "Newer"
+    path.write_bytes(
+        PREFIX
+        + (encode_record(older, 5) + encode_record(newer, 6))
+        .hex()
+        .upper()
+        .encode("ascii")
+    )
+    return older, newer
 
 
 def test_load_journal_populates_human_readable_editor(qtbot) -> None:
@@ -86,3 +101,35 @@ def test_save_writes_a_reloadable_next_record(qtbot, tmp_path) -> None:
     assert reloaded.newest.sequence == 7
     assert reloaded.newest.config.robot_name == "CardEdit"
     assert "readback verified" in page.action_lbl.text()
+
+
+def test_activate_selected_history_entry_makes_it_firmware_active(qtbot, tmp_path, monkeypatch) -> None:
+    source = tmp_path / "CONFIG.TXT"
+    older, _newer = _two_record_file(source)
+    page = _make_page(qtbot)
+    page._load_journal(load_openlog_config(source))
+    page.record_table.selectRow(0)
+    monkeypatch.setattr(page, "_confirm", lambda *_args: True)
+
+    page._activate_selected_record()
+
+    reloaded = load_openlog_config(source)
+    assert [record.sequence for record in reloaded.records] == [5, 6, 7]
+    assert reloaded.newest.config.robot_name == older.robot_name
+    assert "activated sequence 5 as sequence 7" in page.action_lbl.text()
+
+
+def test_delete_selected_history_entry_preserves_firmware_valid_record(qtbot, tmp_path, monkeypatch) -> None:
+    source = tmp_path / "CONFIG.TXT"
+    older, _newer = _two_record_file(source)
+    page = _make_page(qtbot)
+    page._load_journal(load_openlog_config(source))
+    page.record_table.selectRow(1)
+    monkeypatch.setattr(page, "_confirm", lambda *_args: True)
+
+    page._delete_selected_record()
+
+    reloaded = load_openlog_config(source)
+    assert [record.sequence for record in reloaded.records] == [5]
+    assert reloaded.newest.config.robot_name == older.robot_name
+    assert "firmware now boots sequence 5" in page.action_lbl.text()
