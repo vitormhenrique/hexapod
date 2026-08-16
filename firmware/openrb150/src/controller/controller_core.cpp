@@ -147,12 +147,20 @@ void ControllerCore::step(const RobotState& state,
     arbiter_.jetsonHeartbeat(time.now_ms);
   }
   arbiter_.setHostEstop(intent.host_estop);
+  const bool maintenance_failsafe_recovery =
+      intent.maintenance.lock_held && intent.maintenance.recovery_lock &&
+      intent.rc.ever_seen && intent.rc.kill && intent.rc.failsafe &&
+      !intent.rc.armed && !intent.host_estop && config_usable &&
+      state.battery.valid && state.battery.millivolts >= 10000u &&
+      !state.watchdog_fault && !state.dxl.hard_fault;
   arbiter_.setExternalMacLock(intent.maintenance.lock_held,
-                              intent.maintenance.lock_token);
+                              intent.maintenance.lock_token,
+                              maintenance_failsafe_recovery);
 
   safety::RcInputs rc_inputs;
   rc_inputs.ever_seen = intent.rc.ever_seen;
   rc_inputs.kill = intent.rc.kill;
+  rc_inputs.failsafe = intent.rc.failsafe;
   rc_inputs.armed = intent.rc.armed;
   rc_inputs.autonomy_enabled = intent.rc.autonomy_enabled;
   const safety::ArbiterOutput& arbiter =
@@ -196,6 +204,7 @@ void ControllerCore::step(const RobotState& state,
   safety_inputs.mac_lock_held =
       arbiter_.macLockHeld(time.now_ms) || intent.maintenance.lock_held;
   safety_inputs.maintenance_request = intent.maintenance.lock_held;
+  safety_inputs.maintenance_failsafe_recovery = maintenance_failsafe_recovery;
   safety_inputs.passive_request = intent.passive_requested;
   safety_inputs.torque_off = state.dxl.torque_off;
   safety_inputs.contact_enabled = intent.features.foot_contact_enabled;

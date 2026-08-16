@@ -26,11 +26,14 @@ void MaintenanceApi::reset() {
   ttl_ms_ = kDefaultTtlMs;
   now_ms_ = 0;
   live_state_ = 0;
+  failsafe_recovery_allowed_ = false;
+  recovery_lock_ = false;
 }
 
 void MaintenanceApi::revoke() {
   locked_ = false;
   token_ = 0;
+  recovery_lock_ = false;
 }
 
 bool MaintenanceApi::writeResult(MaintResult r, uint8_t* out, size_t out_cap,
@@ -58,6 +61,7 @@ bool MaintenanceApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len
   if (locked_ && (now_ms_ - last_hb_ms_) > ttl_ms_) {
     locked_ = false;
     token_ = 0;
+    recovery_lock_ = false;
   }
 
   switch (msg_id) {
@@ -75,6 +79,7 @@ bool MaintenanceApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len
       token_ = next_token_++;
       if (next_token_ == 0) next_token_ = 1;  // never hand out 0
       locked_ = true;
+      recovery_lock_ = live_state_ == maintstate::kEstop;
       last_hb_ms_ = now_ms_;
       if (out_cap < 6) {
         return writeResult(MaintResult::BadRequest, out, out_cap, out_len,
@@ -99,6 +104,7 @@ bool MaintenanceApi::handle(uint8_t msg_id, const uint8_t* req, uint16_t req_len
       }
       locked_ = false;
       token_ = 0;
+      recovery_lock_ = false;
       return writeResult(MaintResult::Ok, out, out_cap, out_len, out_flags);
     }
     case maintmsg::kHeartbeat: {

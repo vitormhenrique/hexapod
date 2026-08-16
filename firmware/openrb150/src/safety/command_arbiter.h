@@ -44,6 +44,7 @@ struct ArbiterParams {
 struct RcInputs {
   bool ever_seen = false;        // any valid RC frame seen since boot
   bool kill = false;             // kill switch OR failsafe (hard stop)
+  bool failsafe = false;         // no fresh RC frame within the timeout
   bool armed = false;            // arm switch high and not failsafe
   bool autonomy_enabled = false; // AUX switch granting Jetson authority
 };
@@ -80,11 +81,14 @@ class CommandArbiter {
   // Mirror of the USB MaintenanceApi lock (the live ENTER/EXIT/HEARTBEAT
   // token+TTL owner). The control task republishes its state each cycle so
   // the arbiter can grant MacMaintenance motion authority to the real bench
-  // lock, not only to its own (legacy, test-only) token machinery. Kill /
-  // host-estop handling in update() still overrides a mirrored lock.
-  void setExternalMacLock(bool held, uint32_t token) {
+  // lock, not only to its own (legacy, test-only) token machinery. A recovery
+  // lock is separately gated and can bypass only a stale failsafe, never a
+  // live RC kill or host E-stop.
+  void setExternalMacLock(bool held, uint32_t token,
+                          bool failsafe_recovery = false) {
     ext_mac_held_ = held;
     ext_mac_token_ = held ? token : 0;
+    ext_mac_failsafe_recovery_ = held && failsafe_recovery;
   }
 
   // --- Jetson heartbeat -----------------------------------------------------
@@ -117,6 +121,7 @@ class CommandArbiter {
   // External (MaintenanceApi) lock mirror; see setExternalMacLock().
   bool ext_mac_held_ = false;
   uint32_t ext_mac_token_ = 0;
+  bool ext_mac_failsafe_recovery_ = false;
 
   bool host_estop_ = false;
   bool last_kill_ = true;   // start safe (killed)

@@ -13,6 +13,7 @@ void CommandArbiter::reset() {
   next_token_ = 1;
   ext_mac_held_ = false;
   ext_mac_token_ = 0;
+  ext_mac_failsafe_recovery_ = false;
   host_estop_ = false;
   last_kill_ = true;
   last_armed_ = false;
@@ -71,7 +72,14 @@ void CommandArbiter::releaseMacLock(uint32_t token) {
 
 const ArbiterOutput& CommandArbiter::update(const RcInputs& rc,
                                             uint32_t now_ms) {
-  const bool kill_active = rc.kill || host_estop_;
+  // A USB maintenance-recovery lock is created only while the control task
+  // observes a stale CRSF link, torque-off servos, and healthy non-RC safety
+  // inputs. It can suppress the synthetic failsafe kill, never a live RC kill
+  // (rc.failsafe == false) or a host E-stop.
+  const bool stale_failsafe_recovery =
+      ext_mac_held_ && ext_mac_failsafe_recovery_ && rc.ever_seen &&
+      rc.kill && rc.failsafe && !rc.armed;
+  const bool kill_active = (rc.kill && !stale_failsafe_recovery) || host_estop_;
   last_kill_ = kill_active;
   last_armed_ = rc.armed;
 
@@ -82,6 +90,7 @@ const ArbiterOutput& CommandArbiter::update(const RcInputs& rc,
     revokeMacLock();
     ext_mac_held_ = false;  // the MaintenanceApi is force-revoked in parallel
     ext_mac_token_ = 0;
+    ext_mac_failsafe_recovery_ = false;
     out_.source = CommandSource::None;
     out_.motion_authorized = false;
     out_.mac_lock_held = false;

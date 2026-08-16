@@ -113,6 +113,28 @@ void test_enter_rejected_in_unsafe_state() {
   TEST_ASSERT_FALSE(m.lockHeld(1000));
 }
 
+void test_failsafe_recovery_gate_allows_only_estop_entry() {
+  MaintenanceApi m;
+  m.reset();
+  m.setNow(1000);
+  m.setLiveState(12);  // Estop
+  m.setFailsafeRecoveryAllowed(true);
+  Header h;
+  uint8_t pl[kMaxPayload];
+  size_t n = 0;
+  runMaint(m, maintmsg::kEnter, 1, nullptr, 0, &h, pl, &n);
+  TEST_ASSERT_EQUAL_UINT(6, n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintResult::Ok), pl[0]);
+  TEST_ASSERT_TRUE(m.lockHeld(1000));
+  TEST_ASSERT_TRUE(m.recoveryLockHeld(1000));
+
+  m.revoke();
+  m.setNow(1010);
+  m.setLiveState(4);  // StandReady must remain rejected even with the gate.
+  runMaint(m, maintmsg::kEnter, 2, nullptr, 0, &h, pl, &n);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintResult::Rejected), pl[0]);
+}
+
 void test_enter_rejected_while_rc_is_armed_in_stand_ready() {
   MaintenanceApi m;
   m.reset();
@@ -143,10 +165,10 @@ void test_enter_busy_when_already_held() {
 void test_heartbeat_refreshes_ttl() {
   MaintenanceApi m;
   m.reset();
-  const uint32_t tok = doEnter(m, 1000, 2);  // ttl default 1000
-  TEST_ASSERT_TRUE(m.lockHeld(1900));
-  // Heartbeat at 1900 refreshes the window to [1900, 2900].
-  m.setNow(1900);
+  const uint32_t tok = doEnter(m, 1000, 2);  // ttl default 2000
+  TEST_ASSERT_TRUE(m.lockHeld(2900));
+  // Heartbeat at 2900 refreshes the window to [2900, 4900].
+  m.setNow(2900);
   m.setLiveState(2);
   uint8_t tb[4];
   putU32(tb, tok);
@@ -155,8 +177,8 @@ void test_heartbeat_refreshes_ttl() {
   size_t n = 0;
   runMaint(m, maintmsg::kHeartbeat, 3, tb, 4, &h, pl, &n);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(MaintResult::Ok), pl[0]);
-  TEST_ASSERT_TRUE(m.lockHeld(2800));
-  TEST_ASSERT_FALSE(m.lockHeld(3000));
+  TEST_ASSERT_TRUE(m.lockHeld(4800));
+  TEST_ASSERT_FALSE(m.lockHeld(5000));
 }
 
 void test_heartbeat_bad_token() {
@@ -214,7 +236,7 @@ void test_ttl_expiry_allows_new_enter_with_new_token() {
   m.reset();
   const uint32_t tok1 = doEnter(m, 1000, 2);
   // Past the TTL window the lock has lapsed; ENTER grants a fresh token.
-  const uint32_t tok2 = doEnter(m, 3000, 2);
+  const uint32_t tok2 = doEnter(m, 4000, 2);
   TEST_ASSERT_TRUE(tok2 != 0);
   TEST_ASSERT_TRUE(tok2 != tok1);
 }
@@ -270,6 +292,7 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_enter_grants_token_in_safe_state);
   RUN_TEST(test_enter_rejected_in_unsafe_state);
+  RUN_TEST(test_failsafe_recovery_gate_allows_only_estop_entry);
   RUN_TEST(test_enter_rejected_while_rc_is_armed_in_stand_ready);
   RUN_TEST(test_enter_busy_when_already_held);
   RUN_TEST(test_heartbeat_refreshes_ttl);

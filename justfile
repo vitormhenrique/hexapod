@@ -9,7 +9,7 @@ firmware_dir := root / "firmware/openrb150"
 protocol_dir := root / "protocol"
 ros_simulation_dir := root / "robot_ros_simulation"
 pio := env_var_or_default("PIO", env_var("HOME") + "/.platformio/penv/bin/pio")
-openrb_port_finder := root / "tools/find_openrb_port.py"
+board_detector := root / "tools/detect_firmware_board.py"
 
 # List all available recipes.
 default: list
@@ -87,27 +87,54 @@ jetson-relay *args:
 companion-hil *args:
     cd "{{companion_dir}}" && uv run hexapod-hil {{args}}
 
-# Build firmware for the real OpenRB-150 target.
-firmware-build:
-    cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150
+# Build firmware for the connected board (auto-detects OpenRB-150 vs Teensy).
+# With no board connected, builds both targets. Override: just firmware-build teensymm
+firmware-build env="":
+    #!/usr/bin/env zsh
+    env="{{env}}"
+    if [[ -z "$env" ]]; then
+        env="$(python3 "{{board_detector}}" --env-only "{{pio}}" 2>/dev/null || true)"
+    fi
+    cd "{{firmware_dir}}"
+    if [[ -n "$env" ]]; then
+        echo "Building $env"
+        "{{pio}}" run -e "$env"
+    else
+        echo "No board detected; building both targets"
+        "{{pio}}" run -e openrb150 -e teensymm
+    fi
 
 # Alias for firmware-build.
 build: firmware-build
 
-# Compile both OpenRB-150 and MKR Zero target environments.
+# Compile both supported target environments.
 firmware-check:
-    cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -e mkrzero
+    cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -e teensymm
 
 # Run native firmware unit tests.
 firmware-test:
     cd "{{firmware_dir}}" && "{{pio}}" test -e native
 
-# Upload firmware to the connected OpenRB-150.
-firmware-upload:
+# Upload firmware to the connected board (auto-detects OpenRB-150 vs Teensy).
+# Override when the board cannot be detected: just firmware-upload teensymm
+firmware-upload env="":
     #!/usr/bin/env zsh
-    port="$(python3 "{{openrb_port_finder}}" "{{pio}}")"
-    echo "Uploading OpenRB-150 on $port"
-    cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -t upload --upload-port "$port"
+    env="{{env}}"
+    port=""
+    if [[ -z "$env" ]]; then
+        read -r env port <<< "$(python3 "{{board_detector}}" "{{pio}}")"
+    fi
+    cd "{{firmware_dir}}"
+    if [[ "$env" == teensymm ]]; then
+        # The Teensy loader autodetects its own device (including bootloader
+        # mode, which has no serial port), so no --upload-port is passed.
+        echo "Uploading teensymm (Teensy loader autodetects the board)"
+        "{{pio}}" run -e teensymm -t upload
+    else
+        [[ -z "$port" ]] && port="$(python3 "{{board_detector}}" --port-only "{{pio}}")"
+        echo "Uploading $env on $port"
+        "{{pio}}" run -e "$env" -t upload --upload-port "$port"
+    fi
 
 # Alias matching the project command convention.
 firmware-flash: firmware-upload
@@ -115,10 +142,10 @@ firmware-flash: firmware-upload
 # Alias for firmware-upload.
 upload: firmware-upload
 
-# Open the OpenRB-150 USB serial monitor (default 115200 baud).
+# Open the connected board's USB serial monitor (default 115200 baud).
 firmware-monitor baud="115200":
     #!/usr/bin/env zsh
-    port="$(python3 "{{openrb_port_finder}}" "{{pio}}")"
+    port="$(python3 "{{board_detector}}" --port-only "{{pio}}")"
     cd "{{firmware_dir}}" && "{{pio}}" device monitor --port "$port" -b {{baud}}
 
 # Remove PlatformIO firmware build artifacts.
@@ -128,9 +155,9 @@ firmware-clean:
 # Alias for firmware-clean.
 clean: firmware-clean
 
-# Print the unique USB CDC port belonging to the connected OpenRB-150.
+# Print the detected board environment and USB CDC port.
 firmware-port:
-    @python3 "{{openrb_port_finder}}" "{{pio}}"
+    @python3 "{{board_detector}}" "{{pio}}"
 
 # Run shared protocol tests and golden-vector checks.
 protocol-test:

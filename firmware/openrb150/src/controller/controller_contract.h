@@ -112,6 +112,9 @@ struct FeatureSnapshot {
 // never raw host-provided ticks.
 struct MaintenanceIntent {
   bool lock_held = false;
+  // True only for a USB maintenance lock granted to recover from a stale CRSF
+  // failsafe E-stop. It is never a general host-arm signal.
+  bool recovery_lock = false;
   uint32_t lock_token = 0;
   protocol::MaintControlMode control_mode =
       protocol::MaintControlMode::JointTargets;

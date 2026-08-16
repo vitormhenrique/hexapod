@@ -43,6 +43,10 @@ struct BusStats {
 
 class DxlBus {
  public:
+  // Called by long per-servo operations after a bounded transaction. The DXL
+  // task installs a hook that yields to peer tasks and refreshes its watchdog
+  // heartbeat; the bus abstraction stays usable without an RTOS hook.
+  using CooperativeServiceHook = void (*)();
   // Storage for every physical actuator in this fixed 6-leg, 3-DOF robot.
   static constexpr uint8_t kMaxServos = config::kNumServos;
   static constexpr uint8_t kMaxServoId = 252;  // 253/0xFE is broadcast
@@ -66,6 +70,9 @@ class DxlBus {
   void begin(uint32_t baud = kDefaultBaud);
   bool isReady() const { return ready_; }
   uint32_t baud() const { return baud_; }
+  void setCooperativeServiceHook(CooperativeServiceHook hook) {
+    cooperative_service_hook_ = hook;
+  }
 
   // Ping a single ID, trying Protocol 2.0 then 1.0, and classify it. Returns
   // true and fills `out` on success. Maintenance-safe (no torque/goal writes).
@@ -153,6 +160,7 @@ class DxlBus {
   uint32_t baud_ = kDefaultBaud;
   bool ready_ = false;
   uint8_t status_rr_ = 0;  // round-robin cursor for bounded position reads
+  CooperativeServiceHook cooperative_service_hook_ = nullptr;
 
   // Library scratch params for grouped Sync Write. Kept as a member (not on
   // the stack) because it is large and this class has a single owning task.

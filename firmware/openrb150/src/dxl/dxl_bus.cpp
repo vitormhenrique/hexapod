@@ -10,6 +10,19 @@ namespace {
 // Protocol versions to try during a ping, most likely first. MX-28AT ships on
 // the legacy Protocol 1.0 table by default, so try 1.0 before 2.0.
 constexpr float kProtoTryOrder[] = {1.0f, 2.0f};
+// A half-duplex TTL response can be lost transiently while the bus settles
+// after another servo responds. One complete retry still bounds discovery to
+// four pings per ID, but prevents a single dropped packet from making a safe
+// 18-servo arming scan fail.
+constexpr uint8_t kPingPasses = 2;
+// Torque enable seeds every servo with Goal := Present. A single transient
+// status loss must not make that all-or-nothing safety transaction fail when a
+// second bounded read can prove the same position safely.
+constexpr uint8_t kStatusReadAttempts = 2;
+// Torque enable remains all-or-nothing at the transaction level, but one
+// dropped half-duplex status response should not leave a healthy servo out of
+// an otherwise verified 18-servo seed-and-enable operation.
+constexpr uint8_t kTorqueWriteAttempts = 2;
 }  // namespace
 
 DxlBus::DxlBus(HardwareSerial& port, int16_t dir_pin)
@@ -45,27 +58,29 @@ bool DxlBus::ping(uint8_t id, ServoProfile& out) {
     return false;
   }
 
-  for (float proto : kProtoTryOrder) {
-    dxl_.setPortProtocolVersion(proto);
-    if (!dxl_.ping(id)) {
-      continue;
+  for (uint8_t pass = 0; pass < kPingPasses; ++pass) {
+    for (float proto : kProtoTryOrder) {
+      dxl_.setPortProtocolVersion(proto);
+      if (!dxl_.ping(id)) {
+        continue;
+      }
+
+      const uint16_t model = dxl_.getModelNumber(id);
+      int32_t fw = 0;
+      readItem(FIRMWARE_VERSION, id, fw);  // best-effort
+
+      fillProfileFromModel(out, model, static_cast<uint8_t>(fw));
+      out.id = id;
+      out.present = true;
+      // Record the protocol actually used to reach the servo, which can differ
+      // from the table-implied default (e.g. a legacy MX flashed to Protocol 2).
+      out.protocol_version = (proto >= 2.0f) ? 2 : 1;
+      out.torque_enabled = dxl_.getTorqueEnableStat(id);
+      out.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+
+      stats_.pings_ok++;
+      return true;
     }
-
-    const uint16_t model = dxl_.getModelNumber(id);
-    int32_t fw = 0;
-    readItem(FIRMWARE_VERSION, id, fw);  // best-effort
-
-    fillProfileFromModel(out, model, static_cast<uint8_t>(fw));
-    out.id = id;
-    out.present = true;
-    // Record the protocol actually used to reach the servo, which can differ
-    // from the table-implied default (e.g. a legacy MX flashed to Protocol 2).
-    out.protocol_version = (proto >= 2.0f) ? 2 : 1;
-    out.torque_enabled = dxl_.getTorqueEnableStat(id);
-    out.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
-
-    stats_.pings_ok++;
-    return true;
   }
 
   stats_.pings_fail++;
@@ -173,14 +188,19 @@ uint8_t DxlBus::setTorqueAll(bool on) {
     // Dynamixel2Arduino's torqueOn/torqueOff helpers use a 100 ms default
     // timeout. Across 18 servos, enable plus failure rollback can exceed the
     // 2 s hardware watchdog before dxlTask reaches its scheduler yield.
-    const bool ok = dxl_.writeControlTableItem(
-        TORQUE_ENABLE, p.id, on ? 1 : 0, kWriteTimeoutMs);
+    bool ok = false;
+    for (uint8_t attempt = 0; attempt < kTorqueWriteAttempts; ++attempt) {
+      ok = dxl_.writeControlTableItem(TORQUE_ENABLE, p.id, on ? 1 : 0,
+                                      kWriteTimeoutMs);
+      if (ok) break;
+    }
     if (ok) {
       ++acked;
       p.torque_enabled = on;  // track commanded torque for allTorqueOff (lmt.6)
     } else {
       stats_.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
     }
+    if (cooperative_service_hook_ != nullptr) cooperative_service_hook_();
   }
   return acked;
 }
@@ -254,14 +274,16 @@ uint8_t DxlBus::syncReadStatus(ServoStatus* out, uint8_t out_cap) {
 
   uint8_t buf[4] = {0, 0, 0, 0};
   const uint8_t len = posLen(profile.table_kind);
-  const int32_t received =
-      dxl_.read(profile.id, posAddr(profile.table_kind), len, buf, sizeof(buf),
-                kReadTimeoutMs);
-  if (received >= static_cast<int32_t>(len)) {
-    out[index].present_position = decodePosition(profile.table_kind, buf);
-    out[index].ok = true;
-    stats_.reads_ok++;
-    return 1;
+  for (uint8_t attempt = 0; attempt < kStatusReadAttempts; ++attempt) {
+    const int32_t received = dxl_.read(
+        profile.id, posAddr(profile.table_kind), len, buf, sizeof(buf),
+        kReadTimeoutMs);
+    if (received >= static_cast<int32_t>(len)) {
+      out[index].present_position = decodePosition(profile.table_kind, buf);
+      out[index].ok = true;
+      stats_.reads_ok++;
+      return 1;
+    }
   }
 
   out[index].ok = false;

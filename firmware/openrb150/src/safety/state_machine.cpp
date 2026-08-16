@@ -135,6 +135,9 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
   const bool batt_unsafe =
       batt_low_active_ &&
       (now_ms - batt_low_since_ms_) >= params_.battery_low_debounce_ms;
+    const bool stale_failsafe_maintenance_recovery =
+      in.maintenance_failsafe_recovery && in.maintenance_request &&
+      in.mac_lock_held && in.rc_ever_seen && in.rc_kill && in.rc_failsafe;
   // Failsafe counts only once an RC link has existed (same rationale as the
   // rc_kill guard below): with no receiver attached the bridge holds failsafe
   // permanently, and without the ever_seen gate any transient Estop entry
@@ -142,11 +145,13 @@ State StateMachine::update(const StateInputs& in, uint32_t now_ms) {
   // CLEAR_FAULT useless on the bench (AGENTS.md mode 4). A link that existed
   // and then dropped keeps ever_seen latched, so in-flight loss still stops.
   const bool failsafe_stop = in.rc_failsafe && in.rc_ever_seen &&
-                             (isOperational(state_) || state_ == State::Estop);
+                             (isOperational(state_) || state_ == State::Estop) &&
+                             !stale_failsafe_maintenance_recovery;
   FaultReason estop_reason = FaultReason::None;
   if (in.host_estop) {
     estop_reason = FaultReason::HostEstop;
-  } else if (in.rc_kill && in.rc_ever_seen) {
+  } else if (in.rc_kill && in.rc_ever_seen &&
+             !stale_failsafe_maintenance_recovery) {
     // RC kill counts only once an RC link has existed: the bridge's failsafe
     // hold synthesises kill when no receiver is attached at all, which must
     // not lock a bench robot out of Disarmed (Mac development mode needs

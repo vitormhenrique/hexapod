@@ -752,6 +752,14 @@ inline void tick(watchdog::TaskId id) {
   watchdog::checkIn(id);
 }
 
+// A full all-servo torque seed performs up to 18 bounded writes. Service the
+// DXL heartbeat and yield between them so the 500 ms health window measures
+// actual progress rather than treating intentional serial work as a stall.
+void cooperativeDxlService() {
+  tick(watchdog::TaskId::Dxl);
+  vTaskDelay(pdMS_TO_TICKS(1));
+}
+
 // --- Telemetry payload encoding -------------------------------------------
 // Little-endian writers for building telemetry frame payloads in place.
 inline uint16_t put16(uint8_t* p, uint16_t v) {
@@ -1526,6 +1534,7 @@ bool refreshDiscoveredPositions() {
     if (g_dxlBus.syncReadStatus(g_servoStatus, dxl::DxlBus::kMaxServos) != 1) {
       return false;
     }
+    cooperativeDxlService();
   }
   g_servoStatusCount = count;
   publishServoReadiness();
@@ -1610,6 +1619,7 @@ __attribute__((noinline)) void collectControllerState(uint32_t now_ms) {
 }
 
 __attribute__((noinline)) void collectControllerIntent(bool maintenance_held,
+                                                        bool maintenance_recovery,
                                                         bool host_disarm) {
   controller::ControllerIntent& intent = g_controllerIntent;
   intent = kDefaultControllerIntent;
@@ -1632,6 +1642,7 @@ __attribute__((noinline)) void collectControllerIntent(bool maintenance_held,
   }
   intent.motion = g_motionApi.intent();
   intent.maintenance.lock_held = maintenance_held;
+  intent.maintenance.recovery_lock = maintenance_recovery;
   intent.maintenance.lock_token = g_maintApi.token();
   intent.maintenance.control_mode = g_maintTargetApi.controlMode();
   intent.maintenance.targets = g_maintTargetApi.target();
@@ -1988,6 +1999,7 @@ void controlTask(void*) {
       }
     }
     const bool maint_held = g_maintApi.lockHeld(now_ms);
+    const bool maint_recovery = g_maintApi.recoveryLockHeld(now_ms);
 
     refreshControllerConfigSnapshot();
   #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
@@ -1997,7 +2009,7 @@ void controlTask(void*) {
     consumeHilTraceRequests(hil::outputGuard().status());
   #endif
     collectControllerState(now_ms);
-    collectControllerIntent(maint_held, host_disarm);
+    collectControllerIntent(maint_held, maint_recovery, host_disarm);
 
     watchdog::markControlProgress(80);
     g_controllerCore.step(g_controllerState, g_controllerIntent,
@@ -2510,6 +2522,7 @@ void dxlTask(void*) {
   // enable DXL power (board HAL owns that) or servo torque, so it is safe at
   // boot. Scanning is deferred to a maintenance command once power is on.
   g_dxlBus.begin();
+  g_dxlBus.setCooperativeServiceHook(cooperativeDxlService);
   TickType_t next = xTaskGetTickCount();
   bool prev_authorized = false;
   bool arming_discovery_started = false;
@@ -3152,6 +3165,18 @@ void apiTask(void*) {
       // control task.
       g_maintApi.setNow(st.uptime_ms);
       g_maintApi.setLiveState(g_safetyState);
+        // Serial maintenance can recover only a stale CRSF-link E-stop. This is
+        // deliberately stricter than the state/fault check: the board must be
+        // torque-off, battery/config healthy, and free of host/DXL/watchdog
+        // faults. A live RC kill has failsafe=false and is never eligible.
+        const bool maintenance_recovery_allowed =
+          g_safetyState == static_cast<uint8_t>(safety::State::Estop) &&
+          g_faultReason == static_cast<uint8_t>(safety::FaultReason::RcKill) &&
+          g_ctrlCmd.ever_seen && g_ctrlCmd.failsafe && g_configReady &&
+          g_batteryValid && g_batteryMv >= 10000u && g_dxlTorqueOff &&
+          !g_dxlHardFault && !watchdog::criticalStalled() &&
+          !g_controlApi.estopActive();
+        g_maintApi.setFailsafeRecoveryAllowed(maintenance_recovery_allowed);
 
       const bool config_lock =
           g_safetyState == static_cast<uint8_t>(safety::State::MacMaintenance) &&

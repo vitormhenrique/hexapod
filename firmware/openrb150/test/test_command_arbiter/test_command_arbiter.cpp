@@ -212,6 +212,27 @@ void test_kill_overrides_external_mac_lock() {
   TEST_ASSERT_FALSE(o2.mac_lock_held);
 }
 
+void test_stale_failsafe_recovery_lock_grants_maintenance_only() {
+  CommandArbiter a = makeArbiter();
+  a.setExternalMacLock(true, 7, true);
+  RcInputs stale = rc(true, true, false, false);
+  stale.failsafe = true;
+  const ArbiterOutput& o = a.update(stale, 100);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandSource::MacMaintenance),
+                          static_cast<uint8_t>(o.source));
+  TEST_ASSERT_TRUE(o.motion_authorized);
+  TEST_ASSERT_FALSE(o.kill_active);
+
+  // A fresh RC kill must override and revoke the recovery lock immediately.
+  a.setExternalMacLock(true, 7, true);
+  stale.failsafe = false;
+  const ArbiterOutput& live_kill = a.update(stale, 110);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(CommandSource::None),
+                          static_cast<uint8_t>(live_kill.source));
+  TEST_ASSERT_TRUE(live_kill.kill_active);
+  TEST_ASSERT_FALSE(live_kill.mac_lock_held);
+}
+
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_disarmed_has_no_authority);
@@ -228,5 +249,6 @@ int main(int, char**) {
   RUN_TEST(test_no_rc_link_denies_motion);
   RUN_TEST(test_external_mac_lock_grants_maintenance_authority);
   RUN_TEST(test_kill_overrides_external_mac_lock);
+  RUN_TEST(test_stale_failsafe_recovery_lock_grants_maintenance_only);
   return UNITY_END();
 }

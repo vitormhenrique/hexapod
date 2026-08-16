@@ -8,8 +8,10 @@
 // low-authority bench control (MacMaintenance). The lock is a token + TTL:
 //
 //   ENTER_MAINTENANCE (0x50): grant a fresh nonzero token when the robot is in
-//                             a safe entry state (Disarmed) and no
-//                             other valid lock is held. Response carries token.
+//                             a safe entry state (Disarmed), or when the
+//                             control task explicitly authorizes recovery
+//                             from a stale RC failsafe E-stop, and no other
+//                             valid lock is held. Response carries token.
 //   EXIT_MAINTENANCE  (0x51): release the lock if the request token matches.
 //   MAINT_HEARTBEAT   (0x52): refresh the lock TTL (token must match + valid).
 //
@@ -53,13 +55,16 @@ enum class MaintResult : uint8_t {
 namespace maintstate {
 constexpr uint8_t kDisarmed = 2;
 constexpr uint8_t kMacMaintenance = 8;
+constexpr uint8_t kEstop = 12;
 }  // namespace maintstate
 
 class MaintenanceApi {
  public:
   // Default lock TTL: a heartbeat must arrive within this window or the lock
-  // lapses (AGENTS.md 6.4 "Lock expires unless heartbeat is fresh").
-  static constexpr uint32_t kDefaultTtlMs = 1000;
+  // lapses (AGENTS.md 6.4 "Lock expires unless heartbeat is fresh"). Two
+  // seconds covers the bounded 18-servo read/hold-goal/torque seed, during
+  // which the owning DXL task cannot yield to process a host heartbeat.
+  static constexpr uint32_t kDefaultTtlMs = 2000;
 
   MaintenanceApi() { reset(); }
 
@@ -73,12 +78,23 @@ class MaintenanceApi {
   // responses can echo it.
   void setLiveState(uint8_t state) { live_state_ = state; }
 
+  // The control task may permit one explicit USB maintenance recovery from an
+  // RC failsafe E-stop. It sets this only when torque is off and all other
+  // safety checks pass. A live RC kill, host E-stop, low battery, DXL fault,
+  // or watchdog fault never enables this gate.
+  void setFailsafeRecoveryAllowed(bool allowed) {
+    failsafe_recovery_allowed_ = allowed;
+  }
+
   void setTtlMs(uint32_t ttl_ms) { ttl_ms_ = ttl_ms; }
 
   // --- State consumed by the control task ----------------------------------
   // True while a valid (unexpired) maintenance lock is held at `now_ms`.
   bool lockHeld(uint32_t now_ms) const {
     return locked_ && (now_ms - last_hb_ms_) <= ttl_ms_;
+  }
+  bool recoveryLockHeld(uint32_t now_ms) const {
+    return lockHeld(now_ms) && recovery_lock_;
   }
   // Refresh the TTL without a host MAINT_HEARTBEAT frame. Used by controlTask
   // while a DXL maintenance job is pending/running: the job's bus busy-waits
@@ -105,7 +121,8 @@ class MaintenanceApi {
  private:
   bool canEnter() const {
     return live_state_ == maintstate::kDisarmed ||
-           live_state_ == maintstate::kMacMaintenance;
+           live_state_ == maintstate::kMacMaintenance ||
+           (failsafe_recovery_allowed_ && live_state_ == maintstate::kEstop);
   }
   // Common short responses: [result, state] (+ optional trailing token).
   bool writeResult(MaintResult r, uint8_t* out, size_t out_cap,
@@ -118,6 +135,8 @@ class MaintenanceApi {
   uint32_t ttl_ms_ = kDefaultTtlMs;
   uint32_t now_ms_ = 0;
   uint8_t live_state_ = 0;
+  bool failsafe_recovery_allowed_ = false;
+  bool recovery_lock_ = false;
 };
 
 }  // namespace protocol

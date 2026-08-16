@@ -254,6 +254,30 @@ void test_kill_without_rc_ever_seen_stays_disarmed() {
   TEST_ASSERT_EQUAL(FaultReason::RcKill, m.faultReason());
 }
 
+void test_stale_failsafe_recovery_enters_maintenance_not_rc_motion() {
+  StateMachine m = makeMachine();
+  StateInputs in = healthy();
+  in.rc_ever_seen = true;
+  in.rc_kill = true;
+  in.rc_failsafe = true;
+  m.update(in, 0);   // Boot -> ConfigLoad
+  m.update(in, 10);  // ConfigLoad -> Disarmed
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 20));
+
+  in.maintenance_request = true;
+  in.mac_lock_held = true;
+  in.maintenance_failsafe_recovery = true;
+  // Clearing the stale source drops through Disarmed for one control cycle.
+  TEST_ASSERT_EQUAL(State::Disarmed, m.update(in, 30));
+  TEST_ASSERT_EQUAL(State::MacMaintenance, m.update(in, 40));
+  TEST_ASSERT_TRUE(stateAllowsMotion(State::MacMaintenance));
+
+  // A live kill is never bypassed by the recovery bit.
+  in.rc_failsafe = false;
+  TEST_ASSERT_EQUAL(State::Estop, m.update(in, 50));
+  TEST_ASSERT_EQUAL(FaultReason::RcKill, m.faultReason());
+}
+
 void test_host_estop_forces_estop() {
   StateMachine m = atStandReady();
   StateInputs in = healthy();
@@ -560,6 +584,7 @@ int main(int, char**) {
   RUN_TEST(test_disarm_returns_from_motion);
   RUN_TEST(test_kill_forces_estop_and_recovers);
   RUN_TEST(test_kill_without_rc_ever_seen_stays_disarmed);
+  RUN_TEST(test_stale_failsafe_recovery_enters_maintenance_not_rc_motion);
   RUN_TEST(test_host_estop_forces_estop);
   RUN_TEST(test_last_fault_survives_estop_auto_release);
   RUN_TEST(test_estop_recovers_on_bench_with_failsafe_held);

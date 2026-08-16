@@ -88,6 +88,9 @@ struct StateInputs {
   bool rc_autonomy = false;  // RC grants autonomy authority
   bool mac_lock_held = false;
   bool maintenance_request = false;  // explicit enter-maintenance command
+  // Explicit USB recovery from a stale RC failsafe. The controller core sets
+  // this only after validating non-RC safety conditions and torque-off state.
+  bool maintenance_failsafe_recovery = false;
 
   // Passive pose streaming.
   bool passive_request = false;
