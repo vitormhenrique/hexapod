@@ -111,6 +111,55 @@ build: firmware-build
 firmware-check:
     cd "{{firmware_dir}}" && "{{pio}}" run -e openrb150 -e teensymm
 
+# Build the instrumented benchmark image for the connected board. With no
+# board connected, build both images for later flashing. Override with the base
+# board name: `just firmware-benchmark-build teensymm`.
+firmware-benchmark-build env="":
+    #!/usr/bin/env zsh
+    env="{{env}}"
+    if [[ -z "$env" ]]; then
+        env="$(python3 "{{board_detector}}" --env-only "{{pio}}" 2>/dev/null || true)"
+    fi
+    cd "{{firmware_dir}}"
+    if [[ -n "$env" ]]; then
+        echo "Building ${env}_benchmark"
+        "{{pio}}" run -e "${env}_benchmark"
+    else
+        echo "No board detected; building both benchmark targets"
+        "{{pio}}" run -e openrb150_benchmark -e teensymm_benchmark
+    fi
+
+# Flash the build-gated benchmark image to the detected board. The Teensy
+# loader detects its device itself; OpenRB-150 requires its selected CDC port.
+firmware-benchmark-upload env="":
+    #!/usr/bin/env zsh
+    env="{{env}}"
+    port=""
+    if [[ -z "$env" ]]; then
+        read -r env port <<< "$(python3 "{{board_detector}}" "{{pio}}")"
+    fi
+    cd "{{firmware_dir}}"
+    if [[ "$env" == teensymm ]]; then
+        echo "Uploading teensymm_benchmark"
+        "{{pio}}" run -e teensymm_benchmark -t upload
+    else
+        [[ -z "$port" ]] && port="$(python3 "{{board_detector}}" --port-only "{{pio}}")"
+        echo "Uploading ${env}_benchmark on $port"
+        "{{pio}}" run -e "${env}_benchmark" -t upload --upload-port "$port"
+    fi
+
+# Collect the current benchmark snapshot over USB. Flash the matching
+# *_benchmark image first; run once per board and compare the printed metrics.
+firmware-benchmark seconds="15" rate="5" port="":
+    #!/usr/bin/env zsh
+    port="{{port}}"
+    if [[ -z "$port" ]]; then
+        if ! port="$(python3 "{{board_detector}}" --port-only "{{pio}}")"; then
+            exit 1
+        fi
+    fi
+    cd "{{companion_dir}}" && uv run hexapod-cli benchmark --seconds {{seconds}} --rate {{rate}} --port "$port"
+
 # Run native firmware unit tests.
 firmware-test:
     cd "{{firmware_dir}}" && "{{pio}}" test -e native

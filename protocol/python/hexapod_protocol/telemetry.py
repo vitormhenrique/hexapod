@@ -14,7 +14,7 @@ from enum import IntEnum
 
 NUM_FEET = 6
 NUM_CHANNELS = 16
-NUM_STREAMS = 13
+NUM_STREAMS = 14
 
 
 class StreamId(IntEnum):
@@ -31,6 +31,7 @@ class StreamId(IntEnum):
     CONTROLLER_STATE = 10
     RC_DIAGNOSTICS = 11
     HIL_STATUS = 12
+    BENCHMARK = 13
 
 
 STREAM_NAMES = {
@@ -47,6 +48,7 @@ STREAM_NAMES = {
     StreamId.CONTROLLER_STATE: "controller_state",
     StreamId.RC_DIAGNOSTICS: "rc_diagnostics",
     StreamId.HIL_STATUS: "hil_status",
+    StreamId.BENCHMARK: "benchmark",
 }
 
 _NAME_TO_ID = {name: sid for sid, name in STREAM_NAMES.items()}
@@ -173,6 +175,30 @@ class HealthTelemetry:
         return FAULT_REASON_NAMES.get(
             self.last_fault_reason, f"0x{self.last_fault_reason:02X}"
         )
+
+
+@dataclass
+class BenchmarkMetric:
+    count: int = 0
+    mean_us: int = 0
+    max_us: int = 0
+    max_release_jitter_us: int = 0
+    overruns: int = 0
+
+
+@dataclass
+class BenchmarkTelemetry:
+    enabled: bool = False
+    board: str = "unknown"
+    cpu_mhz: int = 0
+    snapshot_ms: int = 0
+    tasks: list[BenchmarkMetric] = field(default_factory=list)
+    control_step: BenchmarkMetric = field(default_factory=BenchmarkMetric)
+    motion_control_step: BenchmarkMetric = field(default_factory=BenchmarkMetric)
+    motion_dxl_cycle: BenchmarkMetric = field(default_factory=BenchmarkMetric)
+    i2c_oled: BenchmarkMetric = field(default_factory=BenchmarkMetric)
+    i2c_imu: BenchmarkMetric = field(default_factory=BenchmarkMetric)
+    i2c_storage: BenchmarkMetric = field(default_factory=BenchmarkMetric)
 
 
 @dataclass
@@ -506,6 +532,51 @@ def decode_health(p: bytes) -> HealthTelemetry:
     )
 
 
+def decode_benchmark(p: bytes) -> BenchmarkTelemetry:
+    """Decode build-gated task and movement timing telemetry."""
+    if not p or not p[0]:
+        return BenchmarkTelemetry()
+    if len(p) < 8:
+        return BenchmarkTelemetry(enabled=True)
+
+    board = {1: "openrb150", 2: "teensymm"}.get(p[1], "unknown")
+    out = BenchmarkTelemetry(
+        enabled=True,
+        board=board,
+        cpu_mhz=_u16(p, 2),
+        snapshot_ms=_u32(p, 4),
+    )
+    metrics: list[BenchmarkMetric] = []
+    offset = 8
+    for _ in range(12):
+        if offset + 20 > len(p):
+            break
+        metrics.append(
+            BenchmarkMetric(
+                count=_u32(p, offset),
+                mean_us=_u32(p, offset + 4),
+                max_us=_u32(p, offset + 8),
+                max_release_jitter_us=_u32(p, offset + 12),
+                overruns=_u32(p, offset + 16),
+            )
+        )
+        offset += 20
+    out.tasks = metrics[:6]
+    if len(metrics) > 6:
+        out.control_step = metrics[6]
+    if len(metrics) > 7:
+        out.motion_control_step = metrics[7]
+    if len(metrics) > 8:
+        out.motion_dxl_cycle = metrics[8]
+    if len(metrics) > 9:
+        out.i2c_oled = metrics[9]
+    if len(metrics) > 10:
+        out.i2c_imu = metrics[10]
+    if len(metrics) > 11:
+        out.i2c_storage = metrics[11]
+    return out
+
+
 def decode_control_state(p: bytes) -> ControlStateTelemetry:
     return ControlStateTelemetry(
         command_source=p[0],
@@ -821,6 +892,7 @@ _DECODERS = {
     StreamId.CONTROLLER_STATE: decode_controller_state,
     StreamId.RC_DIAGNOSTICS: decode_rc_diagnostics,
     StreamId.HIL_STATUS: decode_hil_status,
+    StreamId.BENCHMARK: decode_benchmark,
 }
 
 

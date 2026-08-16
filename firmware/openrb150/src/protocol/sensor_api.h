@@ -89,6 +89,7 @@ struct TopologySnapshot {
   uint8_t valid;          // 0 until i2cTask has published a scan
   uint8_t mux_present;
   uint8_t eeprom_present;  // wire-compatible legacy name: config storage present
+  uint8_t oled_present;    // debug OLED responded to initialization
   uint8_t num_channels;   // up to kSensorNumChannels
   struct Channel {
     uint8_t scanned;

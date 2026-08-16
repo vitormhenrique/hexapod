@@ -1,0 +1,31 @@
+# Hexapod Firmware Benchmark Result
+#
+# Board: ROBOTIS OpenRB-150 (SAMD21G18A)
+# Firmware environment: openrb150_benchmark (OLED disabled to retain SAMD21 benchmark SRAM margin)
+# Protocol: 0.4
+# Benchmark mode: idle, 15 seconds, 5 Hz snapshot stream
+# USB port: /dev/cu.usbmodem2101
+#
+# The normal OLED-enabled image was separately flashed and verified API-stable
+# with OpenLog and TCA9548A mux detection before this benchmark image.
+#
+board=openrb150 cpu_mhz=48 snapshot_ms=22553
+control count=1500 mean_us=838 max_us=1652 jitter_us=7 overruns=0
+dxl     count=750 mean_us=35 max_us=42 jitter_us=7 overruns=0
+rc      count=1500 mean_us=203 max_us=210 jitter_us=64 overruns=0
+api     count=2999 mean_us=130 max_us=5219 jitter_us=5209 overruns=1
+i2c     count=750 mean_us=161 max_us=168 jitter_us=7 overruns=0
+health  count=150 mean_us=10 max_us=20 jitter_us=7 overruns=0
+control_step   count=1500 mean_us=330 max_us=336 overruns=0
+motion_control count=0 mean_us=0 max_us=0 overruns=0
+motion_dxl     count=0 mean_us=0 max_us=0 overruns=0
+i2c_oled       count=0 mean_us=0 max_us=0 overruns=0
+i2c_imu        count=0 mean_us=0 max_us=0 overruns=0
+i2c_storage    count=0 mean_us=0 max_us=0 overruns=0
+
+# Post-run status
+OpenRB150-Hex  fw 0.1.0  proto 0.4
+  state=DISARMED uptime=23808 ms  dxl_power=False battery=12147 mV  watchdog_missed=0x0 reset_cause=0x40(SYST) last_reset_watchdog_missed=0x0 last_reset_dxl_progress=0 last_reset_control_progress=0 last_reset_state=0 dxl_power_transitions=0 last_fault=NONE last_fault_time_ms=0
+  stack_free_words: control=99 dxl=254
+  feature_bits=0x0000001C
+  features_available=sensor_polling, jetson_control, passive_pose

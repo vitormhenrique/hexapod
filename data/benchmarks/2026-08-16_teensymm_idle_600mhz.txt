@@ -1,0 +1,30 @@
+# Hexapod Firmware Benchmark Result
+#
+# Board: SparkFun MicroMod Teensy (IMXRT1062)
+# Firmware environment: teensymm_benchmark
+# Protocol: 0.4
+# Benchmark mode: idle, 15 seconds, 5 Hz snapshot stream
+# USB port: /dev/cu.usbmodem200302201
+#
+# The remaining content is produced by `hexapod-cli benchmark` after the
+# benchmark subscription resets the firmware metrics.
+board=teensymm cpu_mhz=600 snapshot_ms=905043
+control count=1500 mean_us=108 max_us=1004 jitter_us=33 overruns=0
+dxl     count=750 mean_us=10 max_us=10 jitter_us=0 overruns=0
+rc      count=1500 mean_us=2 max_us=2 jitter_us=33 overruns=0
+api     count=3000 mean_us=998 max_us=1001 jitter_us=11 overruns=0
+i2c     count=750 mean_us=675 max_us=36011 jitter_us=19996 overruns=14
+health  count=150 mean_us=4 max_us=32 jitter_us=0 overruns=0
+control_step   count=1500 mean_us=5 max_us=6 overruns=0
+motion_control count=0 mean_us=0 max_us=0 overruns=0
+motion_dxl     count=0 mean_us=0 max_us=0 overruns=0
+i2c_oled       count=14 mean_us=35995 max_us=36008 overruns=0
+i2c_imu        count=0 mean_us=0 max_us=0 overruns=0
+i2c_storage    count=0 mean_us=0 max_us=0 overruns=0
+
+# Post-run status
+OpenRB150-Hex  fw 0.1.0  proto 0.4
+  state=DISARMED uptime=906273 ms  dxl_power=False battery=12080 mV  watchdog_missed=0x0 reset_cause=0x01(POR) last_reset_watchdog_missed=0x0 last_reset_dxl_progress=0 last_reset_control_progress=0 last_reset_state=0 dxl_power_transitions=2 last_fault=NONE last_fault_time_ms=0
+  stack_free_words: control=122 dxl=219
+  feature_bits=0x00000018
+  features_available=jetson_control, passive_pose

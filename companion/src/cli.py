@@ -242,6 +242,191 @@ def stream(
 
 
 @app.command()
+def benchmark(
+    seconds: float = typer.Option(15.0, "--seconds", "-s", min=1.0),
+    rate: int = typer.Option(5, "--rate", "-r", min=1, max=10),
+    port: Optional[str] = typer.Option(None, "--port", "-p"),
+    baud: int = typer.Option(115200, "--baud"),
+) -> None:
+    """Collect and summarize build-gated task/motion benchmark telemetry."""
+    client = _connect(port, baud)
+    latest = {"record": None}
+
+    def on_tel(stream_id: int, record: object, _header) -> None:
+        if stream_id == int(tlm.StreamId.BENCHMARK):
+            latest["record"] = record
+
+    client.on_telemetry(on_tel)
+    try:
+        result = client.subscribe(int(tlm.StreamId.BENCHMARK), rate)
+        if result is None or not result.ok:
+            raise RuntimeError(f"benchmark subscription failed: {result}")
+        time.sleep(seconds)
+        record = latest["record"]
+        if record is None:
+            raise RuntimeError("no benchmark telemetry received")
+        if not record.enabled:
+            raise RuntimeError(
+                "firmware was not built with HEXAPOD_BENCHMARK; flash a "
+                "*_benchmark environment first"
+            )
+        typer.echo(
+            f"board={record.board} cpu_mhz={record.cpu_mhz} "
+            f"snapshot_ms={record.snapshot_ms}"
+        )
+        labels = ("control", "dxl", "rc", "api", "i2c", "health")
+        for label, metric in zip(labels, record.tasks):
+            typer.echo(
+                f"{label:7} count={metric.count} mean_us={metric.mean_us} "
+                f"max_us={metric.max_us} jitter_us={metric.max_release_jitter_us} "
+                f"overruns={metric.overruns}"
+            )
+        for label, metric in (
+            ("control_step", record.control_step),
+            ("motion_control", record.motion_control_step),
+            ("motion_dxl", record.motion_dxl_cycle),
+            ("i2c_oled", record.i2c_oled),
+            ("i2c_imu", record.i2c_imu),
+            ("i2c_storage", record.i2c_storage),
+        ):
+            typer.echo(
+                f"{label:14} count={metric.count} mean_us={metric.mean_us} "
+                f"max_us={metric.max_us} overruns={metric.overruns}"
+            )
+    finally:
+        client.unsubscribe(int(tlm.StreamId.BENCHMARK))
+        client.stop()
+
+
+@app.command("benchmark-motion")
+def benchmark_motion(
+    seconds: float = typer.Option(10.0, "--seconds", "-s", min=1.0),
+    rate: int = typer.Option(5, "--rate", "-r", min=1, max=10),
+    vx: float = typer.Option(0.15, "--vx", min=-0.25, max=0.25),
+    port: Optional[str] = typer.Option(None, "--port", "-p"),
+    baud: int = typer.Option(115200, "--baud"),
+) -> None:
+    """Run the standard low-speed maintenance gait benchmark safely.
+
+    The command requires the robot to be mechanically supported. It enters the
+    TTL-bound maintenance lock, verifies IDs 1..18, centers the calibrated
+    joints, runs a conservative wave gait, prints benchmark timing, then always
+    stops motion, disables torque, and cuts DYNAMIXEL power.
+    """
+    client = _connect(port, baud)
+    latest = {"record": None}
+    maintenance_token = 0
+
+    def on_tel(stream_id: int, record: object, _header) -> None:
+        if stream_id == int(tlm.StreamId.BENCHMARK):
+            latest["record"] = record
+
+    def heartbeat() -> None:
+        result = client.maint_heartbeat(maintenance_token)
+        status = client.get_status()
+        if result is None or not result.ok or status.state != 8 or not status.dxl_power:
+            raise RuntimeError(
+                f"maintenance session lost: heartbeat={result} status={status}"
+            )
+
+    client.on_telemetry(on_tel)
+    try:
+        subscribed = client.subscribe(int(tlm.StreamId.BENCHMARK), rate)
+        if subscribed is None or not subscribed.ok:
+            raise RuntimeError(f"benchmark subscription failed: {subscribed}")
+
+        entered = client.enter_maintenance()
+        if entered is None or not entered.ok or entered.token == 0:
+            raise RuntimeError(f"maintenance entry failed: {entered}")
+        maintenance_token = entered.token
+        for _ in range(20):
+            time.sleep(0.05)
+            result = client.maint_heartbeat(maintenance_token)
+            status = client.get_status()
+            if result is not None and result.ok and status.state == 8:
+                break
+        else:
+            raise RuntimeError("maintenance state did not become active")
+
+        powered = _require_done(client.dxl_power(True))
+        if powered.code != 0:
+            raise RuntimeError(f"DXL power failed: {powered}")
+        scanned = _require_done(client.dxl_scan(1, 18))
+        found_ids = [servo.id for servo in scanned.servos()]
+        if found_ids != list(range(1, 19)):
+            raise RuntimeError(f"expected IDs 1..18, found {found_ids}")
+        centered = client.set_all_joint_targets([0] * 18)
+        if (
+            centered is None
+            or not centered.ok
+            or centered.stored_count != 18
+            or centered.clamp_mask != 0
+        ):
+            raise RuntimeError(f"calibrated center target rejected: {centered}")
+        heartbeat()
+        torque = _require_done(client.dxl_torque(True))
+        if torque.code != 0:
+            raise RuntimeError(f"DXL torque enable failed: {torque}")
+
+        mode = client.set_maint_control_mode(api.MAINT_CONTROL_GAIT_PIPELINE)
+        gait = client.set_gait(api.GAIT_WAVE)
+        params = client.set_gait_params(100, 20, 15, 230, 60)
+        twist = client.set_body_twist(vx, 0.0, 0.0)
+        if not (
+            mode
+            and mode.ok
+            and gait
+            and gait.ok
+            and gait.motion_allowed
+            and params
+            and params.ok
+            and params.motion_allowed
+            and twist
+            and twist.ok
+            and twist.motion_allowed
+        ):
+            raise RuntimeError("gait command was not authorized")
+
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            heartbeat()
+            time.sleep(0.20)
+        stopped = client.stop_motion()
+        if stopped is None or not stopped.ok:
+            raise RuntimeError(f"STOP_MOTION failed: {stopped}")
+        heartbeat()
+        time.sleep(max(0.25, 1.0 / rate))
+
+        record = latest["record"]
+        if record is None or not record.enabled:
+            raise RuntimeError("no enabled benchmark telemetry received")
+        typer.echo(
+            f"board={record.board} cpu_mhz={record.cpu_mhz} "
+            f"movement_seconds={seconds} vx={vx}"
+        )
+        for label, metric in (
+            ("control_step", record.control_step),
+            ("motion_control", record.motion_control_step),
+            ("motion_dxl", record.motion_dxl_cycle),
+        ):
+            typer.echo(
+                f"{label:14} count={metric.count} mean_us={metric.mean_us} "
+                f"max_us={metric.max_us} overruns={metric.overruns}"
+            )
+    finally:
+        if maintenance_token:
+            try:
+                client.dxl_torque(False)
+            finally:
+                try:
+                    client.dxl_power(False)
+                finally:
+                    client.exit_maintenance(maintenance_token)
+        client.unsubscribe(int(tlm.StreamId.BENCHMARK))
+        client.stop()
+
+
+@app.command()
 def log(
     streams: str = typer.Option(
         "health,servo_status,contact_state,i2c_sensors_raw,rc_input",

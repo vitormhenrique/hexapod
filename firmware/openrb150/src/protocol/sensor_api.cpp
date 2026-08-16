@@ -66,9 +66,11 @@ bool SensorApi::applyFeature(Feature f, bool enable, uint8_t* out,
 
 bool SensorApi::encodeTopology(uint8_t* out, size_t out_cap, uint16_t* out_len) {
   // [mux_present, config_storage_present, num_channels,
-  //  {scanned, vcnl, lps, device_count, state} x num_channels].
+  //  {scanned, vcnl, lps, device_count, state} x num_channels,
+  //  oled_initialized]. The OLED tail is additive so older hosts retain the
+  // legacy topology layout unchanged.
   const uint8_t n = kSensorNumChannels;
-  const size_t need = 3u + static_cast<size_t>(n) * 5u;
+  const size_t need = 4u + static_cast<size_t>(n) * 5u;
   if (out_cap < need) {
     out[0] = static_cast<uint8_t>(SensorResult::Rejected);
     *out_len = 1;
@@ -87,6 +89,7 @@ bool SensorApi::encodeTopology(uint8_t* out, size_t out_cap, uint16_t* out_len) 
       out[o++] = c.device_count;
       out[o++] = c.state;
     }
+    out[o++] = topo_->oled_present;
   } else {
     // No snapshot yet: report an all-absent topology so the host gets a
     // well-formed (if empty) response rather than an error.
@@ -100,6 +103,7 @@ bool SensorApi::encodeTopology(uint8_t* out, size_t out_cap, uint16_t* out_len) 
       out[o++] = 0;
       out[o++] = 0;
     }
+    out[o++] = 0;
   }
   *out_len = o;
   return true;

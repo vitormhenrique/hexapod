@@ -1,6 +1,7 @@
 #include "tasks.h"
 
 #include "rtos.h"
+#include "benchmark.h"
 
 #include <Arduino.h>
 #include <math.h>
@@ -197,6 +198,9 @@ constexpr uint32_t kBatterySamplePeriodMs = 100;
 // Telemetry subscription manager. apiTask routes the telemetry command range to
 // it and walks the streams each loop, emitting due telemetry frames over USB.
 protocol::SubscriptionManager g_subs;
+#if defined(HEXAPOD_BENCHMARK)
+bool g_benchmarkSessionActive = false;
+#endif
 
 // USB frame reader + rx-health counters (hexapod_src-lv6). Owned exclusively by
 // apiTask (which also builds api_stats telemetry, so no cross-task access):
@@ -752,6 +756,19 @@ inline void tick(watchdog::TaskId id) {
   watchdog::checkIn(id);
 }
 
+#if defined(HEXAPOD_BENCHMARK)
+inline uint32_t benchmarkNowUs() { return micros(); }
+
+inline void finishBenchmarkTask(benchmark::Task task, uint32_t started_us,
+                                uint32_t period_ms) {
+  benchmark::g_collector.recordTask(task, started_us, micros(),
+                                    period_ms * 1000u);
+}
+#else
+inline uint32_t benchmarkNowUs() { return 0; }
+inline void finishBenchmarkTask(benchmark::Task, uint32_t, uint32_t) {}
+#endif
+
 // A full all-servo torque seed performs up to 18 bounded writes. Service the
 // DXL heartbeat and yield between them so the 500 ms health window measures
 // actual progress rather than treating intentional serial work as a stall.
@@ -1246,6 +1263,53 @@ uint16_t buildTelemetry(protocol::StreamId stream, uint8_t* p,
       }
       break;
     }
+        case StreamId::Benchmark: {
+      // Build-gated benchmark payload. Layout:
+      // enabled(1), board(1: SAMD=1, Teensy=2), cpu_mhz(u16), snapshot_ms(u32),
+      // then 12 metrics x [count, mean_us, max_us, max_jitter_us, overruns] u32.
+      // Metrics are the six task loops followed by control_step,
+      // motion_control_step, motion_dxl_cycle, i2c_oled, i2c_imu, and
+      // i2c_storage. The normal image emits only enabled=0 so a host can
+      // distinguish an unsupported benchmark build.
+    #if defined(HEXAPOD_BENCHMARK)
+      p[o++] = 1;
+    #if defined(ARDUINO_TEENSY_MICROMOD)
+      p[o++] = 2;
+      o += put16(&p[o], static_cast<uint16_t>(F_CPU_ACTUAL / 1000000u));
+    #elif defined(ARDUINO_ARCH_SAMD)
+      p[o++] = 1;
+      o += put16(&p[o], static_cast<uint16_t>(F_CPU / 1000000u));
+    #else
+      p[o++] = 0;
+      o += put16(&p[o], 0);
+    #endif
+      o += put32(&p[o], now_ms);
+      benchmark::Snapshot snap;
+      taskENTER_CRITICAL();
+      snap = benchmark::g_collector.snapshot();
+      taskEXIT_CRITICAL();
+      const benchmark::Metric* metrics[] = {
+          &snap.tasks[0], &snap.tasks[1], &snap.tasks[2],
+          &snap.tasks[3], &snap.tasks[4], &snap.tasks[5],
+          &snap.control_step, &snap.motion_control_step,
+          &snap.motion_dxl_cycle, &snap.i2c_oled, &snap.i2c_imu,
+          &snap.i2c_storage,
+      };
+      for (const benchmark::Metric* metric : metrics) {
+        const uint32_t mean_us = metric->count == 0
+                 ? 0
+                 : metric->total_us / metric->count;
+        o += put32(&p[o], metric->count);
+        o += put32(&p[o], mean_us);
+        o += put32(&p[o], metric->max_us);
+        o += put32(&p[o], metric->max_release_jitter_us);
+        o += put32(&p[o], metric->overruns);
+      }
+    #else
+      p[o++] = 0;
+    #endif
+      break;
+        }
   }
   return o;
 }
@@ -1964,6 +2028,7 @@ void controlTask(void*) {
   g_controllerConfigRevision = 0xFFFFFFFFu;
 
   for (;;) {
+    const uint32_t benchmark_task_started_us = benchmarkNowUs();
     tick(watchdog::TaskId::Control);
 
     const controller::ControllerTime cycle_time =
@@ -2012,8 +2077,15 @@ void controlTask(void*) {
     collectControllerIntent(maint_held, maint_recovery, host_disarm);
 
     watchdog::markControlProgress(80);
+  #if defined(HEXAPOD_BENCHMARK)
+    const uint32_t benchmark_step_started_us = micros();
+  #endif
     g_controllerCore.step(g_controllerState, g_controllerIntent,
-                          g_controllerConfig, cycle_time, g_controllerCommand);
+                g_controllerConfig, cycle_time, g_controllerCommand);
+  #if defined(HEXAPOD_BENCHMARK)
+    benchmark::g_collector.recordControlStep(
+      micros() - benchmark_step_started_us, g_controllerCommand.motion_gate);
+  #endif
     watchdog::markControlProgress(81);
   #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
     // This is the parity capture point: the portable core has produced final
@@ -2024,6 +2096,8 @@ void controlTask(void*) {
                  hil::outputGuard().status());
   #endif
     publishControllerCommand(now_ms);
+    finishBenchmarkTask(benchmark::Task::Control, benchmark_task_started_us,
+              period_ms::kControl);
 
     // --- Feature flags: publish availability and consume host intent --------
     // Reflect what the current hardware/state permits so FEATURE_SET can only
@@ -2535,6 +2609,7 @@ void dxlTask(void*) {
   constexpr uint16_t kDxlBusFailLimit = 50;  // ~1 s at the 50 Hz dxl period
   dxl::FaultMonitor servo_fault_monitor;
   for (;;) {
+    const uint32_t benchmark_task_started_us = benchmarkNowUs();
     tick(watchdog::TaskId::Dxl);
 
     const uint32_t now_ms =
@@ -2853,6 +2928,13 @@ void dxlTask(void*) {
         next = now_ticks;  // schedule slipped a full period; rebase
       }
     }
+  #if defined(HEXAPOD_BENCHMARK)
+    const uint32_t benchmark_task_finished_us = micros();
+    benchmark::g_collector.recordDxlCycle(
+      benchmark_task_finished_us - benchmark_task_started_us, g_motionGate);
+  #endif
+    finishBenchmarkTask(benchmark::Task::Dxl, benchmark_task_started_us,
+              period_ms::kDxl);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kDxl));
   }
 }
@@ -2877,6 +2959,7 @@ void rcTask(void*) {
   uint32_t last_attitude_tx_ms = 0;
   uint32_t last_battery_tx_ms = 0;
   for (;;) {
+    const uint32_t benchmark_task_started_us = benchmarkNowUs();
     tick(watchdog::TaskId::Rc);
     const uint32_t now_ms =
         static_cast<uint32_t>(xTaskGetTickCount()) * portTICK_PERIOD_MS;
@@ -3029,6 +3112,8 @@ void rcTask(void*) {
         static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kRc))) {
       next = now_ticks;
     }
+    finishBenchmarkTask(benchmark::Task::Rc, benchmark_task_started_us,
+              period_ms::kRc);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kRc));
   }
 }
@@ -3057,6 +3142,7 @@ void apiTask(void*) {
   constexpr uint8_t kMaxFramesPerCycle = 4;
   constexpr uint16_t kMaxBytesPerCycle = protocol::kMaxWireFrame;
   for (;;) {
+    const uint32_t benchmark_task_started_us = benchmarkNowUs();
     tick(watchdog::TaskId::Api);
 
     const uint32_t api_loop_now_ms =
@@ -3264,6 +3350,21 @@ void apiTask(void*) {
     // when the USB CDC TX buffer cannot accept a frame we count a backlog drop
     // instead of blocking the task (AGENTS.md 6.3 rate-limited subscriptions).
     const uint32_t now_ms = api_loop_now_ms;
+#if defined(HEXAPOD_BENCHMARK)
+    // A benchmark subscription defines one comparable measurement interval.
+    // Reset exactly once on its rising edge so boot discovery/config/OLED work
+    // does not contaminate steady-state board comparisons.
+    if (g_subs.enabled(protocol::StreamId::Benchmark)) {
+      if (!g_benchmarkSessionActive) {
+        taskENTER_CRITICAL();
+        benchmark::g_collector.reset();
+        taskEXIT_CRITICAL();
+        g_benchmarkSessionActive = true;
+      }
+    } else {
+      g_benchmarkSessionActive = false;
+    }
+#endif
   #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
     // The trace transport has priority and never runs from controlTask. A
     // failed fragment turns into an explicit terminal failure; it never causes
@@ -3305,6 +3406,8 @@ void apiTask(void*) {
         static_cast<int32_t>(pdMS_TO_TICKS(period_ms::kApi))) {
       next = now_ticks;
     }
+    finishBenchmarkTask(benchmark::Task::Api, benchmark_task_started_us,
+              period_ms::kApi);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kApi));
   }
 }
@@ -3318,6 +3421,7 @@ void publishTopologySnapshot() {
   // Keep the wire position stable; this legacy field now reports whether the
   // replacement config storage (Qwiic OpenLog) is present and SD-ready.
   s.eeprom_present = g_i2cTopology.openlog_present ? 1 : 0;
+  s.oled_present = g_i2cTopology.oled_present ? 1 : 0;
   s.num_channels = protocol::kSensorNumChannels;
   for (uint8_t i = 0; i < protocol::kSensorNumChannels; ++i) {
     const i2c::ChannelInfo& c = g_i2cTopology.channels[i];
@@ -3353,6 +3457,63 @@ void publishStatusSnapshot() {
     s.feet[i].flags = flags;
   }
   s.valid = 1;
+}
+
+constexpr uint8_t kAllDebugOledPages =
+    static_cast<uint8_t>((1u << sensors::QwiicDebugOled::kPageCount) - 1u);
+
+uint8_t debugOledDirtyPages(const sensors::DebugDisplayState& latest,
+                            const sensors::DebugDisplayState& displayed,
+                            bool have_displayed) {
+  if (!have_displayed || latest.view != displayed.view) {
+    return kAllDebugOledPages;
+  }
+
+  uint8_t dirty = 0;
+  const auto mark = [&dirty](uint8_t page) {
+    dirty = static_cast<uint8_t>(dirty | (1u << page));
+  };
+  if ((latest.view % sensors::QwiicDebugOled::kViewCount) == 0) {
+    if (latest.capture_recording != displayed.capture_recording) mark(0);
+    if (latest.safety_state != displayed.safety_state) mark(1);
+    if (latest.fault_reason != displayed.fault_reason ||
+        latest.rc_failsafe != displayed.rc_failsafe ||
+        latest.rc_seen != displayed.rc_seen) mark(2);
+    if (latest.battery_mv != displayed.battery_mv ||
+        latest.battery_valid != displayed.battery_valid ||
+        latest.rc_armed != displayed.rc_armed) mark(3);
+    if (latest.servo_count != displayed.servo_count ||
+        latest.dxl_power != displayed.dxl_power ||
+        latest.dxl_hard_fault != displayed.dxl_hard_fault) mark(4);
+    if (latest.i2c_error != displayed.i2c_error ||
+        latest.foot_present_mask != displayed.foot_present_mask) mark(5);
+    if (latest.mux_present != displayed.mux_present ||
+        latest.config_storage != displayed.config_storage) mark(6);
+    if (latest.gait != displayed.gait ||
+        latest.capture_recording != displayed.capture_recording ||
+        latest.capture_samples != displayed.capture_samples) mark(7);
+  } else {
+    if (latest.gait != displayed.gait) mark(1);
+    if (latest.body_height_mm != displayed.body_height_mm ||
+        latest.stride_mm != displayed.stride_mm) mark(2);
+    if (latest.step_height_mm != displayed.step_height_mm ||
+        latest.duty_x255 != displayed.duty_x255) mark(3);
+    if (latest.speed_x255 != displayed.speed_x255) mark(4);
+    if (latest.trim_roll_cdeg != displayed.trim_roll_cdeg ||
+        latest.trim_pitch_cdeg != displayed.trim_pitch_cdeg) mark(5);
+    if (latest.tune_active != displayed.tune_active ||
+        latest.tune_param != displayed.tune_param) mark(6);
+    if (latest.capture_recording != displayed.capture_recording ||
+        latest.capture_samples != displayed.capture_samples) mark(7);
+  }
+  return dirty;
+}
+
+uint8_t firstDebugOledPage(uint8_t pages) {
+  for (uint8_t page = 0; page < sensors::QwiicDebugOled::kPageCount; ++page) {
+    if ((pages & static_cast<uint8_t>(1u << page)) != 0) return page;
+  }
+  return sensors::QwiicDebugOled::kPageCount;
 }
 
 void i2cTask(void*) {
@@ -3429,6 +3590,7 @@ void i2cTask(void*) {
   // nominal 50 Hz; a host rate request derives and clamps a new period below.
   uint32_t i2c_period_ms = period_ms::kI2c;
   for (;;) {
+    const uint32_t benchmark_task_started_us = benchmarkNowUs();
     tick(watchdog::TaskId::I2c);
     bool storage_io_this_pass = false;
 
@@ -3470,6 +3632,7 @@ void i2cTask(void*) {
         g_i2cTopology.oled_present = false;
       }
       g_oledInitPending = false;
+      publishTopologySnapshot();
       storage_io_this_pass = true;
     }
 
@@ -3884,7 +4047,13 @@ void i2cTask(void*) {
         (sensor_now_ms - last_imu_sample_ms) >= 50) {
       last_imu_sample_ms = sensor_now_ms;
       if (g_i2cTopology.mux_present) g_i2cBus.selectNone();
+    #if defined(HEXAPOD_BENCHMARK)
+      const uint32_t benchmark_imu_started_us = micros();
+    #endif
       const sensors::ImuSample sample = g_bno085.read();
+    #if defined(HEXAPOD_BENCHMARK)
+      benchmark::g_collector.recordI2cImu(micros() - benchmark_imu_started_us);
+    #endif
       taskENTER_CRITICAL();
       g_imuSnapshot.present = true;
       g_imuSnapshot.valid = sample.ok;
@@ -3913,7 +4082,8 @@ void i2cTask(void*) {
       g_debugOled.ready()) {
       static sensors::DebugDisplayState displayed;
       static sensors::DebugDisplayState pending;
-      static uint8_t next_page = sensors::QwiicDebugOled::kPageCount;
+      static bool have_displayed = false;
+      static uint8_t pending_pages = 0;
       static uint32_t last_refresh_ms = 0;
       sensors::DebugDisplayState latest;
       taskENTER_CRITICAL();
@@ -3934,27 +4104,49 @@ void i2cTask(void*) {
       const bool display_allowed =
           g_safetyState != static_cast<uint8_t>(safety::State::ArmingChecks);
       if (display_allowed &&
-          next_page >= sensors::QwiicDebugOled::kPageCount &&
+          pending_pages == 0 &&
           (last_refresh_ms == 0 ||
-           (display_now_ms - last_refresh_ms) >= 1000u) &&
-          memcmp(&latest, &displayed, sizeof(latest)) != 0) {
-        pending = latest;
-        next_page = 0;
+           (display_now_ms - last_refresh_ms) >= 1000u)) {
+        const uint8_t dirty =
+            debugOledDirtyPages(latest, displayed, have_displayed);
+        if (dirty != 0) {
+          pending = latest;
+          pending_pages = dirty;
+        }
       }
         if (display_allowed && !storage_io_this_pass &&
-          next_page < sensors::QwiicDebugOled::kPageCount) {
+          pending_pages != 0) {
+        const uint8_t next_page = firstDebugOledPage(pending_pages);
+  #if defined(HEXAPOD_BENCHMARK)
+          const uint32_t benchmark_oled_started_us = micros();
+  #endif
         if (g_debugOled.drawPage(next_page, pending)) {
-          ++next_page;
-          if (next_page == sensors::QwiicDebugOled::kPageCount) {
+  #if defined(HEXAPOD_BENCHMARK)
+            benchmark::g_collector.recordI2cOled(
+                micros() - benchmark_oled_started_us);
+  #endif
+          pending_pages = static_cast<uint8_t>(
+              pending_pages & ~static_cast<uint8_t>(1u << next_page));
+          if (pending_pages == 0) {
             displayed = pending;
+            have_displayed = true;
             last_refresh_ms = display_now_ms;
           }
         } else {
           g_i2cTopology.oled_present = false;
+          publishTopologySnapshot();
         }
       }
     }
 
+    finishBenchmarkTask(benchmark::Task::I2c, benchmark_task_started_us,
+              i2c_period_ms);
+  #if defined(HEXAPOD_BENCHMARK)
+    if (storage_io_this_pass) {
+      benchmark::g_collector.recordI2cStorage(
+        micros() - benchmark_task_started_us);
+    }
+  #endif
     vTaskDelayUntil(&next, pdMS_TO_TICKS(i2c_period_ms));
   }
 }
@@ -3963,6 +4155,7 @@ void healthTask(void*) {
   TickType_t next = xTaskGetTickCount();
   uint32_t last_watchdog_eval_ms = 0;
   for (;;) {
+    const uint32_t benchmark_task_started_us = benchmarkNowUs();
     tick(watchdog::TaskId::Health);
 
     const uint32_t now_ms =
@@ -3987,6 +4180,8 @@ void healthTask(void*) {
       board::setRgbStatusLed(c.r, c.g, c.b);
     }
 
+    finishBenchmarkTask(benchmark::Task::Health, benchmark_task_started_us,
+              period_ms::kHealth);
     vTaskDelayUntil(&next, pdMS_TO_TICKS(period_ms::kHealth));
   }
 }
@@ -3997,6 +4192,7 @@ void setResetCause(uint8_t cause) { g_resetCause = cause; }
 
 void start() {
   watchdog::init(g_resetCause);
+  benchmark::g_collector.reset();
   initDeviceInfo();
 
   // Sync primitives for the apiTask <-> i2cTask config commit hand-off. Created

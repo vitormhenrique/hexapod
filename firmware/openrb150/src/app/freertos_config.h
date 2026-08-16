@@ -17,9 +17,15 @@
 #define configMAX_PRIORITIES 5
 #define configMINIMAL_STACK_SIZE ((unsigned short)150)
 // Sized by the static_assert in tasks.cpp: task stacks + TCBs + semaphores +
-// 512-byte reserve. Reduced with the kApi/kHealth stack cuts (2026-08) to
-// return 512 bytes of SRAM to the main-stack/C-heap region.
+// 512-byte reserve. The normal SAMD image uses tightened DXL/API allocations
+// (384/576 words) to recover 1 KB for the main/interrupt stack; without this,
+// the OLED-enabled build left only ~168 bytes at a USB setup HardFault. The
+// output-disabled HIL image keeps its larger API task allocation and heap.
+#if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 #define configTOTAL_HEAP_SIZE ((size_t)(12 * 1024 + 320))
+#else
+#define configTOTAL_HEAP_SIZE ((size_t)(11 * 1024 + 576))
+#endif
 #define configMAX_TASK_NAME_LEN 8
 #define configUSE_TRACE_FACILITY 1
 #define configUSE_16_BIT_TICKS 0

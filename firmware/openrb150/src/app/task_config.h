@@ -30,9 +30,15 @@ constexpr uint16_t kControl = 448;
 // dxl: Dynamixel2Arduino call chains (syncRead/readControlTableItem parsing)
 // plus the 160-byte maintenance-job result buffer run on this stack; 256 words
 // hard-faulted the MCU on the first status cycle after a real-servo scan
-// (HIL hexapod_src-2e8 bring-up). Health-task high-water marks verify actual
-// usage.
+// (HIL hexapod_src-2e8 bring-up). The SAMD21 build uses 384 words: it retains
+// a 128-word margin over the observed loaded path and returns 512 bytes to the
+// main/interrupt stack, which the OLED-enabled image needs for USB setup ISR
+// nesting. The Teensy has ample SRAM and keeps the more conservative 512.
+#if defined(ARDUINO_ARCH_SAMD)
+constexpr uint16_t kDxl = 384;
+#else
 constexpr uint16_t kDxl = 512;
+#endif
 // CRSF parsing, controller decoding, calibration handoff, and telemetry share
 // this task. A retained FreeRTOS overflow record captured a receiver-triggered
 // failure at 192 words, so reserve enough headroom for the complete frame path.
@@ -43,8 +49,14 @@ constexpr uint16_t kRc = 320;
 // deserializeRobotConfig() which is now a flash-image copy (config_schema.cpp
 // kZeroRobotConfig), cutting the measured worst case to ~450 words. 640 keeps
 // >180 words of margin over that.
+// The SAMD21 production image keeps 576 words: after the RobotConfig
+// deserialization temporary was removed, measured worst-case use is 450 words.
+// This recovers a further 256 bytes of main-stack headroom while keeping 126
+// words for call-depth variation. HIL retains 768 and the Teensy retains 640.
 #if defined(HEXAPOD_HIL_OUTPUT_DISABLED)
 constexpr uint16_t kApi = 768;
+#elif defined(ARDUINO_ARCH_SAMD)
+constexpr uint16_t kApi = 576;
 #else
 constexpr uint16_t kApi = 640;
 #endif

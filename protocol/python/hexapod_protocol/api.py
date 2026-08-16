@@ -1342,6 +1342,7 @@ class I2cTopologyResult:
     mux_present: bool
     eeprom_present: bool
     channels: List[TopologyChannel]
+    oled_present: bool = False
 
 
 def parse_i2c_topology_result(payload: bytes) -> I2cTopologyResult:
@@ -1366,7 +1367,8 @@ def parse_i2c_topology_result(payload: bytes) -> I2cTopologyResult:
             )
         )
         off += 5
-    return I2cTopologyResult(mux, eeprom, channels)
+    oled_present = bool(payload[off]) if off < len(payload) else False
+    return I2cTopologyResult(mux, eeprom, channels, oled_present)
 
 
 @dataclass
