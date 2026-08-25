@@ -59,6 +59,10 @@ class QwiicDebugOled {
   explicit QwiicDebugOled(i2c::I2cBus& bus) : bus_(bus) {}
 
   bool begin(uint8_t address);
+  // Render every page selected by `pages` into the official library's
+  // framebuffer, then flush once. Batching dirty rows avoids an I2C display
+  // transfer per row when a system-state update changes several lines.
+  bool drawPages(uint8_t pages, const DebugDisplayState& state);
   bool drawPage(uint8_t page, const DebugDisplayState& state);
   bool ready() const { return ready_; }
 

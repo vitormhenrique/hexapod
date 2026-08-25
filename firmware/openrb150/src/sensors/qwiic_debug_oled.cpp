@@ -187,23 +187,34 @@ void QwiicDebugOled::formatLine(uint8_t page,
   }
 }
 
-bool QwiicDebugOled::drawPage(uint8_t page,
-                              const DebugDisplayState& state) {
+bool QwiicDebugOled::drawPages(uint8_t pages,
+                               const DebugDisplayState& state) {
 #if !HEXAPOD_DEBUG_OLED_AVAILABLE
-  (void)page;
+  (void)pages;
   (void)state;
   return false;
 #else
-  if (!ready_ || page >= kPageCount) return false;
+  if (!ready_) return false;
+  pages &= static_cast<uint8_t>((1u << kPageCount) - 1u);
+  if (pages == 0) return true;
   bus_.prepareForDirectWire();
-  char line[22];
-  formatLine(page, state, line);
-  const uint8_t y = static_cast<uint8_t>(page * 8u);
-  oled_.rectangleFill(0, y, 128, 8, COLOR_BLACK);
-  oled_.text(0, y, line, COLOR_WHITE);
+  for (uint8_t page = 0; page < kPageCount; ++page) {
+    if ((pages & static_cast<uint8_t>(1u << page)) == 0) continue;
+    char line[22];
+    formatLine(page, state, line);
+    const uint8_t y = static_cast<uint8_t>(page * 8u);
+    oled_.rectangleFill(0, y, 128, 8, COLOR_BLACK);
+    oled_.text(0, y, line, COLOR_WHITE);
+  }
   oled_.display();
   return true;
 #endif
+}
+
+bool QwiicDebugOled::drawPage(uint8_t page,
+                              const DebugDisplayState& state) {
+  if (page >= kPageCount) return false;
+  return drawPages(static_cast<uint8_t>(1u << page), state);
 }
 
 }  // namespace sensors

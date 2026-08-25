@@ -42,7 +42,7 @@ reserved, or ground contacts defined by the MicroMod standard).
 | 11 | BOOT | BOOT pushbutton | Active low; processor-specific boot function |
 | 12 | I2C SDA | J7 and EYESPI J6 | Shared I2C bus, 3.3 V |
 | 14 | I2C SCL | J7 and EYESPI J6 | Shared I2C bus, 3.3 V |
-| 16 | I2C_INT | EYESPI J6 pin 15 | Capacitive-touch interrupt when fitted |
+| 16 | I2C_INT | EYESPI J6 pin 4 | Capacitive-touch interrupt when fitted |
 | 17 | UART1 TX | J8 pin 4 | 3.3 V UART output, named from processor perspective |
 | 18 | D1 / CAM_TRIG | EYESPI reset | Display reset control |
 | 19 | UART1 RX | J8 pin 3 | 3.3 V UART input, named from processor perspective |
@@ -60,9 +60,9 @@ reserved, or ground contacts defined by the MicroMod standard).
 | 47 | PWM1 | Onboard NeoPixel data | PWM/GPIO output through 33 ohms |
 | 48 | G4 / BUS4 | EYESPI memory chip select | Dedicated to EYESPI while J6 is in use |
 | 55 | SPI CS | EYESPI display chip select | Dedicated display CS |
-| 57 | SPI SCK | EYESPI J6 pin 4 | Shared display/SD/memory/touch SPI clock |
-| 59 | SPI SDO | EYESPI J6 pin 5 | SPI MOSI/COPI from the processor |
-| 61 | SPI SDI | EYESPI J6 pin 6 | SPI MISO/CIPO into the processor |
+| 57 | SPI SCK | EYESPI J6 pin 15 | Shared display/SD/memory/touch SPI clock |
+| 59 | SPI SDO | EYESPI J6 pin 14 | SPI MOSI/COPI from the processor |
+| 61 | SPI SDI | EYESPI J6 pin 13 | SPI MISO/CIPO into the processor |
 | 67 | G8 | J9 pin 7 | Expansion GPIO, 3.3 V |
 | 69 | G7 / BUS7 | J9 pin 8 | Expansion GPIO/bus signal, 3.3 V |
 | 71 | G6 / BUS6 | J9 pin 9 | Expansion GPIO/bus signal, 3.3 V |
@@ -159,9 +159,14 @@ J4 and J5 are electrically parallel three-pin Molex `22-05-7035` connectors.
 
 | Pin | Net | Meaning |
 | ---: | --- | --- |
-| 1 | GND | Servo return |
+| 1 | `DXL_TTL` | Shared half-duplex TTL data |
 | 2 | `DXL_VDD` | Selected servo supply |
-| 3 | `DXL_TTL` | Shared half-duplex TTL data |
+| 3 | GND | Servo return |
+
+Rev A errata: pins 1 and 3 were swapped (GND on pin 1, data on pin 3),
+reversed relative to the actual DYNAMIXEL harness orientation. Rev A boards
+need reworked/flipped cables; `DXL_VDD` stays on the center pin either way,
+so a reversed harness swaps only data and ground.
 
 JP1 selects the source for `DXL_VDD`:
 
@@ -174,30 +179,37 @@ Never bridge both JP1 sides. That would tie the battery rail to `+5V_SYS`.
 
 ### J6: EYESPI 18-Pin FPC
 
-J6 is a Hirose `FH12-18S-0.5SH(55)` EYESPI connector. All active-low display
-chip-select and reset lines have connector-side 100 kohm pull-ups, so they
-remain inactive while the processor is reset or absent.
+J6 is a Hirose `FH12-18S-0.5SH(55)` EYESPI connector. The EYESPI FFC is an
+A-B type cable (contacts on opposite sides at each end), which mirrors the
+pin order end-to-end: carrier pin `n` mates with display pin `19 - n`. The
+carrier-side assignment below is therefore the reverse of the display-side
+EYESPI numbering. All active-low display chip-select and reset lines have
+connector-side 100 kohm pull-ups, so they remain inactive while the processor
+is reset or absent.
+
+Rev A errata: J6 was assigned in display order (3V3 on pin 1), which only
+mates through an A-A cable. Rev B reverses the order as tabulated here.
 
 | Pin | EYESPI signal | MicroMod function / notes |
 | ---: | --- | --- |
-| 1 | 3V3 | `+3V3` supply |
-| 2 | LITE | PWM0 backlight control |
-| 3 | GND | Ground |
-| 4 | SCK | Primary SPI SCK |
-| 5 | MOSI | Primary SPI SDI |
-| 6 | MISO | Primary SPI SDO |
-| 7 | DC | D0, display data/command |
-| 8 | RESET | D1, display reset |
-| 9 | TCS | Primary SPI CS, display chip select |
-| 10 | SDCS | G0, SD card chip select |
-| 11 | MEMCS | G4, onboard-memory chip select |
-| 12 | TSCS | G1, touch-controller chip select |
-| 13 | SCL | Shared I2C SCL |
-| 14 | SDA | Shared I2C SDA |
-| 15 | INT | I2C_INT, touch interrupt |
-| 16 | BUSY | G5, display busy input |
-| 17 | GP1 | Not connected |
-| 18 | GP2 | Not connected |
+| 1 | GP2 | Not connected |
+| 2 | GP1 | Not connected |
+| 3 | BUSY | G5, display busy input |
+| 4 | INT | I2C_INT, touch interrupt |
+| 5 | SDA | Shared I2C SDA |
+| 6 | SCL | Shared I2C SCL |
+| 7 | TSCS | G1, touch-controller chip select |
+| 8 | MEMCS | G4, onboard-memory chip select |
+| 9 | SDCS | G0, SD card chip select |
+| 10 | TCS | Primary SPI CS, display chip select |
+| 11 | RESET | D1, display reset |
+| 12 | DC | D0, display data/command |
+| 13 | MISO | Primary SPI SDI, CIPO into the processor |
+| 14 | MOSI | Primary SPI SDO, COPI from the processor |
+| 15 | SCK | Primary SPI SCK |
+| 16 | GND | Ground |
+| 17 | LITE | PWM0 backlight control |
+| 18 | 3V3 | `+3V3` supply |
 
 ### J7: Qwiic / I2C
 

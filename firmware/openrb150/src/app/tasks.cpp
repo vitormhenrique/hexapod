@@ -61,6 +61,10 @@
 #include "controller_time_adapter.h"
 #include "status_led.h"
 
+#ifndef HEXAPOD_I2C_CLOCK_HZ
+#define HEXAPOD_I2C_CLOCK_HZ 100000UL
+#endif
+
 namespace app {
 namespace {
 
@@ -1941,29 +1945,44 @@ __attribute__((noinline)) void publishControllerCommand(uint32_t now_ms) {
   // Staged at file scope, not on the controlTask stack: this frame sits on the
   // same stack as the armed gait/IK path, and the extra ~52 words pushed the
   // 448-word stack to a 43-word high-water margin (overflow on arming).
-  // Only controlTask writes this staging copy, so no lock is needed here.
+  // The I2C renderer is rate-limited, so rebuilding this non-motion snapshot
+  // every 10 ms only adds control-loop work. Sample it at 10 Hz, but publish
+  // safety/fault transitions immediately so the OLED never lags a stop.
   static sensors::DebugDisplayState display;
-  const controller::ControllerCommand& rc = g_controllerIntent.rc.command;
-  display.body_height_mm = diag.applied_body_height_mm;
-  display.stride_mm = diag.applied_stride_mm;
-  display.step_height_mm = diag.applied_step_height_mm;
-  display.duty_x255 = diag.applied_duty_x255;
-  display.speed_x255 = diag.applied_speed_x255;
-  display.gait = rc.gait_index == 0 ? static_cast<uint8_t>(config::GaitId::Wave)
-         : rc.gait_index == 1
-           ? static_cast<uint8_t>(config::GaitId::Ripple)
-           : static_cast<uint8_t>(config::GaitId::Tripod);
-  display.safety_state = g_safetyState;
-  display.fault_reason = g_faultReason;
-  display.battery_mv = g_controllerState.battery.millivolts;
-  display.battery_valid = g_controllerState.battery.valid;
-  display.rc_seen = rc.ever_seen;
-  display.rc_failsafe = rc.failsafe;
-  display.rc_armed = rc.arm_request;
-  display.tune_param = diag.gait_tune_param;
-  display.tune_active = diag.gait_tune_active;
-  display.trim_roll_cdeg = static_cast<int16_t>(rc.trim_roll * 5729.578f);
-  display.trim_pitch_cdeg = static_cast<int16_t>(rc.trim_pitch * 5729.578f);
+  static uint32_t last_display_sample_ms = 0;
+  static uint8_t last_display_safety = 0xFF;
+  static uint8_t last_display_fault = 0xFF;
+  constexpr uint32_t kDisplaySnapshotPeriodMs = 100;
+  const bool display_transition = g_safetyState != last_display_safety ||
+                                  g_faultReason != last_display_fault;
+  if (display_transition ||
+      (now_ms - last_display_sample_ms) >= kDisplaySnapshotPeriodMs) {
+    const controller::ControllerCommand& rc = g_controllerIntent.rc.command;
+    display.body_height_mm = diag.applied_body_height_mm;
+    display.stride_mm = diag.applied_stride_mm;
+    display.step_height_mm = diag.applied_step_height_mm;
+    display.duty_x255 = diag.applied_duty_x255;
+    display.speed_x255 = diag.applied_speed_x255;
+    display.gait = rc.gait_index == 0
+                       ? static_cast<uint8_t>(config::GaitId::Wave)
+                       : rc.gait_index == 1
+                           ? static_cast<uint8_t>(config::GaitId::Ripple)
+                           : static_cast<uint8_t>(config::GaitId::Tripod);
+    display.safety_state = g_safetyState;
+    display.fault_reason = g_faultReason;
+    display.battery_mv = g_controllerState.battery.millivolts;
+    display.battery_valid = g_controllerState.battery.valid;
+    display.rc_seen = rc.ever_seen;
+    display.rc_failsafe = rc.failsafe;
+    display.rc_armed = rc.arm_request;
+    display.tune_param = diag.gait_tune_param;
+    display.tune_active = diag.gait_tune_active;
+    display.trim_roll_cdeg = static_cast<int16_t>(rc.trim_roll * 5729.578f);
+    display.trim_pitch_cdeg = static_cast<int16_t>(rc.trim_pitch * 5729.578f);
+    last_display_sample_ms = now_ms;
+    last_display_safety = g_safetyState;
+    last_display_fault = g_faultReason;
+  }
 
   taskENTER_CRITICAL();
   g_radioStatus = radio;
@@ -3509,13 +3528,6 @@ uint8_t debugOledDirtyPages(const sensors::DebugDisplayState& latest,
   return dirty;
 }
 
-uint8_t firstDebugOledPage(uint8_t pages) {
-  for (uint8_t page = 0; page < sensors::QwiicDebugOled::kPageCount; ++page) {
-    if ((pages & static_cast<uint8_t>(1u << page)) != 0) return page;
-  }
-  return sensors::QwiicDebugOled::kPageCount;
-}
-
 void i2cTask(void*) {
   // fault_capture::init() copied the retained previous-reset record before any
   // peripheral or RTOS work. Check it before discovery so the first possible
@@ -3526,7 +3538,7 @@ void i2cTask(void*) {
 
   // Bring up only the root bus first. Channel scans, config bootstrap, sensors,
   // and OLED initialization are lower priority than retained crash persistence.
-  g_i2cBus.begin();
+  g_i2cBus.begin(HEXAPOD_I2C_CLOCK_HZ);
   i2c::initTopology(g_i2cTopology);
   g_i2cBus.scanRoot(g_i2cTopology);
   if (g_i2cTopology.openlog_present) {
@@ -4116,22 +4128,18 @@ void i2cTask(void*) {
       }
         if (display_allowed && !storage_io_this_pass &&
           pending_pages != 0) {
-        const uint8_t next_page = firstDebugOledPage(pending_pages);
   #if defined(HEXAPOD_BENCHMARK)
           const uint32_t benchmark_oled_started_us = micros();
   #endif
-        if (g_debugOled.drawPage(next_page, pending)) {
+        if (g_debugOled.drawPages(pending_pages, pending)) {
   #if defined(HEXAPOD_BENCHMARK)
             benchmark::g_collector.recordI2cOled(
                 micros() - benchmark_oled_started_us);
   #endif
-          pending_pages = static_cast<uint8_t>(
-              pending_pages & ~static_cast<uint8_t>(1u << next_page));
-          if (pending_pages == 0) {
-            displayed = pending;
-            have_displayed = true;
-            last_refresh_ms = display_now_ms;
-          }
+          pending_pages = 0;
+          displayed = pending;
+          have_displayed = true;
+          last_refresh_ms = display_now_ms;
         } else {
           g_i2cTopology.oled_present = false;
           publishTopologySnapshot();
