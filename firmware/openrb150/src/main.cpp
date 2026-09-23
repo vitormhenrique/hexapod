@@ -5,19 +5,16 @@
 #include "safety/fault_capture.h"
 
 // ---------------------------------------------------------------------------
-// OpenRB-150 firmware entry point.
+// Hexapod firmware entry point for the MicroMod Teensy carrier and OpenRB-150.
 //
-// Build/flash with the default env: `pio run -e openrb150 -t upload`. That env
-// uses the bundled custom board (boards/openrb150.json) + variant
-// (variants/OpenRB-150) so Serial1 = DXL bus, Serial3 = CRSF, optional Serial2
-// is enabled with HEXAPOD_ENABLE_SERIAL2, and
-// BDPIN_DXL_PWR_EN is the real power FET. See doc/mkrzero-vs-openrb150.md.
+// Build/flash the default MicroMod Teensy target with
+// `pio run -e teensymm -t upload`. Board-specific pin maps select Serial2,
+// G2 direction, and G3 switched servo power on the carrier, or the original
+// Serial1/automatic-direction/power-FET wiring on OpenRB-150.
 //
-// Phase 1 (rbg.3) state: board HAL safe boot + FreeRTOS task skeleton. After
-// init, setup() starts the scheduler which runs the six Phase 1 tasks (control,
-// dxl, rc, api, i2c, health). DYNAMIXEL power stays OFF at boot; the health task
-// reports stack high-water marks, loop counts, and the software watchdog mask
-// over USB CDC. No motion / servo bus / I2C traffic yet.
+// setup() starts the six control, DXL, RC, API, I2C, and health tasks.
+// DYNAMIXEL direction and switched power remain LOW until the bounded arming
+// sequence validates the battery, configured servos, status, and hold pose.
 // ---------------------------------------------------------------------------
 
 void setup() {

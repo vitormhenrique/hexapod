@@ -175,6 +175,13 @@ void DxlBus::selectProtocol(TableKind kind) {
 }
 
 uint8_t DxlBus::setTorqueAll(bool on) {
+#if defined(HEXAPOD_DXL_POWER_ONLY)
+  // Power-rail diagnostic image: the power FET, discovery, and read-only
+  // status traffic remain active, but no servo can be stiffened. Reporting
+  // success lets the normal arming path continue for a representative power-on
+  // transient without turning its retry/fault handling into the test signal.
+  if (on) return count_;
+#endif
   if (!hil::outputGuard().allowTorque(on)) {
     return 0;
   }
@@ -209,6 +216,11 @@ bool DxlBus::writeGoalPositions(const GoalTarget* targets, uint8_t count) {
   if (!ready_ || targets == nullptr || count == 0) {
     return false;
   }
+#if defined(HEXAPOD_DXL_POWER_ONLY)
+  // Do not preload goals in the power-only diagnostic. The remaining DXL
+  // traffic is discovery and present-position telemetry, both read-only.
+  return true;
+#endif
   if (!hil::outputGuard().allowGoalWrite(count)) {
     for (uint8_t i = 0; i < count; ++i) {
       hil::outputGuard().recordBlockedGoal(i, targets[i].id, targets[i].tick);
@@ -323,6 +335,15 @@ bool DxlBus::readRegister(uint8_t id, TableKind table, uint16_t addr,
 
 bool DxlBus::writeRegister(uint8_t id, TableKind table, uint16_t addr,
                            uint8_t len, int32_t value) {
+#if defined(HEXAPOD_DXL_POWER_ONLY)
+  // Maintenance writes are deliberately inert in the power-only image.
+  (void)id;
+  (void)table;
+  (void)addr;
+  (void)len;
+  (void)value;
+  return true;
+#endif
   if (!hil::outputGuard().allowDxlWrite()) {
     return false;
   }
@@ -345,6 +366,14 @@ bool DxlBus::writeRegister(uint8_t id, TableKind table, uint16_t addr,
 }
 
 bool DxlBus::setTorqueOne(uint8_t id, TableKind table, bool on) {
+#if defined(HEXAPOD_DXL_POWER_ONLY)
+  // Do not allow maintenance mode to bypass the all-servo torque-on guard.
+  if (on) {
+    (void)id;
+    (void)table;
+    return true;
+  }
+#endif
   if (!hil::outputGuard().allowTorque(on)) {
     return false;
   }

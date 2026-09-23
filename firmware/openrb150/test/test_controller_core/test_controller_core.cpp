@@ -29,6 +29,7 @@ controller::RobotState readyState(
   state.dxl.configured_servo_coverage = true;
   state.dxl.config_revision = config_snapshot.revision;
   state.dxl.pose_known_mask = (1u << config::kNumServos) - 1u;
+  state.dxl.arming_ready = true;
   state.dxl.torque_off = false;
   for (uint8_t index = 0; index < config::kNumServos; ++index) {
     state.dxl.servos[index].id = config_snapshot.robot.servos[index].id;
@@ -96,6 +97,28 @@ void test_rc_stand_produces_clamped_servo_goals() {
   for (uint8_t index = 0; index < command.goals.count; ++index) {
     TEST_ASSERT_TRUE(command.goals.joints[index].tick <= config::kServoMaxTick);
   }
+}
+
+void test_complete_scan_without_verified_dxl_arm_stays_in_arming_checks() {
+  const controller::ControllerConfigSnapshot config_snapshot =
+      defaultConfigSnapshot();
+  controller::RobotState state = readyState(config_snapshot);
+  state.dxl.arming_ready = false;
+  controller::ControllerIntent intent = safeRcIntent();
+  controller::ControllerCore core;
+  controller::RobotCommand command;
+
+  core.step(state, intent, config_snapshot, timeAt(0), command);
+  core.step(state, intent, config_snapshot, timeAt(10), command);
+  core.step(state, intent, config_snapshot, timeAt(20), command);
+  intent.rc.armed = true;
+  core.step(state, intent, config_snapshot, timeAt(30), command);
+  core.step(state, intent, config_snapshot, timeAt(40), command);
+
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(safety::State::ArmingChecks),
+                          static_cast<uint8_t>(command.safety_state));
+  TEST_ASSERT_FALSE(command.motion_gate);
+  TEST_ASSERT_FALSE(command.allow_torque);
 }
 
 void test_rc_gait_input_advances_the_same_portable_goal_path() {
@@ -304,6 +327,7 @@ void test_rc_gait_switch_maps_only_moving_gaits() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_rc_stand_produces_clamped_servo_goals);
+  RUN_TEST(test_complete_scan_without_verified_dxl_arm_stays_in_arming_checks);
   RUN_TEST(test_rc_gait_input_advances_the_same_portable_goal_path);
   RUN_TEST(test_rc_twist_step_reaches_pipeline_through_accel_limiter);
   RUN_TEST(test_estop_clears_motion_and_requests_adapter_cleanup);

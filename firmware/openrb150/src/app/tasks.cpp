@@ -126,6 +126,7 @@ volatile uint8_t g_servoStatusCount = 0;
 volatile bool g_configuredServoCoverage = false;
 volatile uint32_t g_poseKnownMask = 0;
 volatile uint32_t g_servoReadinessConfigRev = 0;
+volatile bool g_dxlArmingReady = false;
 constexpr uint32_t kAllServoPosesKnown =
   (1u << config::kNumServos) - 1u;
 // CRSF/ExpressLRS RC input state. Owned exclusively by rcTask (Serial3).
@@ -1621,6 +1622,22 @@ bool verifyDiscoveredTorqueOff() {
   return true;
 }
 
+bool verifyDiscoveredTorqueOn() {
+#if defined(HEXAPOD_DXL_POWER_ONLY)
+  return true;
+#else
+  const uint8_t count = g_dxlBus.servoCount();
+  for (uint8_t i = 0; i < count; ++i) {
+    const dxl::ServoProfile& profile = g_dxlBus.profile(i);
+    bool on = false;
+    if (!g_dxlBus.torqueState(profile.id, profile.table_kind, on) || !on) {
+      return false;
+    }
+  }
+  return count == config::kNumServos;
+#endif
+}
+
 __attribute__((noinline)) bool refreshControllerConfigSnapshot() {
   const uint32_t revision = g_configApi.revision();
   if (g_controllerConfig.valid &&
@@ -1672,6 +1689,7 @@ __attribute__((noinline)) void collectControllerState(uint32_t now_ms) {
   state.dxl.configured_servo_coverage = g_configuredServoCoverage;
   state.dxl.pose_known_mask = g_poseKnownMask;
   state.dxl.config_revision = g_servoReadinessConfigRev;
+  state.dxl.arming_ready = g_dxlArmingReady;
   state.dxl.torque_off = g_dxlTorqueOff;
   state.dxl.hard_fault = g_dxlHardFault;
   for (uint8_t index = 0; index < servo_count; ++index) {
@@ -2605,6 +2623,7 @@ void runQueuedDxlJob() {
 void clearServoStatusSnapshot() {
   g_servoStatusCount = 0;
   g_poseKnownMask = 0;
+  g_dxlArmingReady = false;
   for (uint8_t i = 0; i < dxl::DxlBus::kMaxServos; ++i) {
     g_servoStatus[i] = dxl::ServoStatus{};
   }
@@ -2621,7 +2640,10 @@ void dxlTask(void*) {
   bool arming_discovery_started = false;
   bool arming_discovery_finished = false;
   bool arming_event_noted = false;
+  bool arming_torque_off_verified = false;
+  bool arming_hold_seeded = false;
   uint8_t arming_discovery_index = 0;
+  uint32_t arming_status_checked_mask = 0;
   uint32_t arming_power_on_ms = 0;
   constexpr uint16_t kServoBootDelayMs = 500;
   // Sustained dead-bus window before declaring a hard bus fault (lmt.5).
@@ -2637,10 +2659,11 @@ void dxlTask(void*) {
         static_cast<safety::State>(g_safetyState);
     const bool arming = live_state == safety::State::ArmingChecks;
 
-    // RC arming owns a bounded torque-off bring-up sequence. Power the bus,
-    // wait for the servos to boot, discover exactly the configured IDs once,
-    // then let the normal status reader populate fresh present positions. The
-    // safety FSM remains in ArmingChecks until all 18 IDs and poses are known.
+    // RC arming owns the complete bounded bring-up sequence. Power the bus,
+    // wait for boot, discover the configured IDs, read status, explicitly
+    // disable and verify torque, seed Goal Position from measured positions,
+    // then enable and verify torque. The safety FSM remains in ArmingChecks
+    // until this transaction has completed for all configured servos.
     // The arming event is queued for best-effort persistence (i2cTask drains
     // g_persistentEvents); arming NEVER waits on storage. Written straight to
     // the persistence queue at Info severity so it is not announced as an
@@ -2663,7 +2686,10 @@ void dxlTask(void*) {
         arming_power_on_ms = now_ms;
         arming_discovery_started = false;
         arming_discovery_finished = false;
+        arming_torque_off_verified = false;
+        arming_hold_seeded = false;
         arming_discovery_index = 0;
+        arming_status_checked_mask = 0;
         clearServoStatusSnapshot();
       }
       if ((now_ms - arming_power_on_ms) >= kServoBootDelayMs) {
@@ -2686,6 +2712,15 @@ void dxlTask(void*) {
           if (!g_dxlBus.discoverId(discover_id)) {
             noteError(safety::ErrorCode::DxlDiscoveryIncomplete, discover_id,
                       safety::ErrorSeverity::Error, now_ms);
+          } else {
+            const dxl::ServoProfile* profile =
+                g_dxlBus.profileById(discover_id);
+            if (profile == nullptr ||
+                !g_dxlBus.setTorqueOne(discover_id, profile->table_kind,
+                                       false)) {
+              noteError(safety::ErrorCode::DxlWriteFailed, discover_id,
+                        safety::ErrorSeverity::Error, now_ms);
+            }
           }
           ++arming_discovery_index;
           if (arming_discovery_index >= config::kNumServos) {
@@ -2696,12 +2731,77 @@ void dxlTask(void*) {
         if (!arming_discovery_started) {
           publishServoReadiness();
         }
+
+        if (arming_discovery_finished && g_configuredServoCoverage &&
+            arming_status_checked_mask != kAllServoPosesKnown) {
+          for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
+            const uint32_t bit = uint32_t{1} << i;
+            if ((arming_status_checked_mask & bit) != 0) continue;
+            const dxl::ServoProfile& profile = g_dxlBus.profile(i);
+            watchdog::markProgress(12);
+            if (g_dxlBus.readStatus(profile.id, g_servoStatus[i])) {
+              g_servoStatus[i].id = profile.id;
+              servo_fault_monitor.observe(
+                  i, profile.table_kind, g_servoStatus[i].hardware_error);
+              arming_status_checked_mask |= bit;
+              g_servoStatusCount = g_dxlBus.servoCount();
+              publishServoReadiness();
+            } else {
+              noteError(safety::ErrorCode::DxlReadFailed, profile.id,
+                        safety::ErrorSeverity::Warning, now_ms);
+            }
+            break;
+          }
+        }
+
+        const bool status_checked =
+            arming_status_checked_mask == kAllServoPosesKnown;
+        const bool poses_known = g_poseKnownMask == kAllServoPosesKnown;
+        if (status_checked && poses_known && !servo_fault_monitor.faulted() &&
+            !arming_torque_off_verified) {
+          watchdog::markProgress(13);
+          const uint8_t acked = g_dxlBus.setTorqueAll(false);
+          arming_torque_off_verified =
+              acked == config::kNumServos && verifyDiscoveredTorqueOff();
+          if (!arming_torque_off_verified) {
+            noteError(safety::ErrorCode::DxlWriteFailed, 0,
+                      safety::ErrorSeverity::Error, now_ms);
+          }
+        } else if (arming_torque_off_verified && !arming_hold_seeded) {
+          static dxl::GoalTarget arming_hold[config::kNumServos];
+          watchdog::markProgress(14);
+          arming_hold_seeded =
+              buildConfiguredHoldTargets(arming_hold) &&
+              g_dxlBus.writeGoalPositions(arming_hold, config::kNumServos);
+          if (!arming_hold_seeded) {
+            noteError(safety::ErrorCode::DxlWriteFailed, 0,
+                      safety::ErrorSeverity::Error, now_ms);
+          }
+        } else if (arming_hold_seeded && !g_dxlArmingReady) {
+          watchdog::markProgress(15);
+          const uint8_t acked = g_dxlBus.setTorqueAll(true);
+          if (acked == config::kNumServos && verifyDiscoveredTorqueOn()) {
+            g_dxlArmingReady = true;
+          } else {
+            g_dxlBus.setTorqueAll(false);
+            arming_torque_off_verified = false;
+            arming_hold_seeded = false;
+            arming_status_checked_mask = 0;
+            clearServoStatusSnapshot();
+            noteError(safety::ErrorCode::DxlWriteFailed, 0,
+                      safety::ErrorSeverity::Critical, now_ms);
+          }
+        }
       }
     } else {
       arming_discovery_started = false;
       arming_discovery_finished = false;
+      arming_torque_off_verified = false;
+      arming_hold_seeded = false;
       arming_discovery_index = 0;
+      arming_status_checked_mask = 0;
       arming_event_noted = false;
+      g_dxlArmingReady = false;
     }
 
     // Execute at most one bounded DXL maintenance operation per cycle. A scan
@@ -2723,6 +2823,7 @@ void dxlTask(void*) {
     if (board::dxlPowerEnabled() &&
         !safety::stateAllowsDxlPower(live_state)) {
       board::setDxlPower(false);
+      g_dxlArmingReady = false;
       clearServoStatusSnapshot();
     }
 

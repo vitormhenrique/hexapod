@@ -196,7 +196,7 @@ void ControllerCore::step(const RobotState& state,
   safety_inputs.rc_armed = intent.rc.armed;
   safety_inputs.arming_checks_pass =
       config_usable && state.battery.valid && servo_coverage && pose_known &&
-      !state.dxl.hard_fault;
+      state.dxl.arming_ready && !state.dxl.hard_fault;
   safety_inputs.host_disarm = intent.host_disarm;
   safety_inputs.command_source = static_cast<uint8_t>(arbiter.source);
   safety_inputs.jetson_fresh = arbiter_.jetsonFresh(time.now_ms);

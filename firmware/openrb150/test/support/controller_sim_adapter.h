@@ -46,6 +46,7 @@ class ControllerSimAdapter {
     state.dxl.configured_servo_coverage = true;
     state.dxl.config_revision = input_.config.revision;
     state.dxl.pose_known_mask = (1u << config::kNumServos) - 1u;
+    state.dxl.arming_ready = true;
     state.dxl.torque_off = true;
     state.dxl.hard_fault = false;
     for (uint8_t index = 0; index < config::kNumServos; ++index) {

@@ -17,6 +17,7 @@ inline RobotState readyState(const ControllerConfigSnapshot& config_snapshot) {
   state.dxl.configured_servo_coverage = true;
   state.dxl.config_revision = config_snapshot.revision;
   state.dxl.pose_known_mask = (1u << config::kNumServos) - 1u;
+  state.dxl.arming_ready = true;
   state.dxl.torque_off = true;
   for (uint8_t index = 0; index < config::kNumServos; ++index) {
     state.dxl.servos[index].id = config_snapshot.robot.servos[index].id;

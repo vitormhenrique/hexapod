@@ -93,11 +93,17 @@ void ws2812Show(uint32_t grb) {
 void init() {
   hil::outputGuard().reset();
 
-  // --- DYNAMIXEL power: force OFF first, before anything else. -------------
+  // --- DYNAMIXEL direction and power: force both LOW before UART setup. -----
+  // The MicroMod carrier uses an explicit half-duplex direction GPIO. Preload
+  // receive before enabling the output so reset cannot briefly drive the bus.
+  if (pins::kDxlDirPin >= 0) {
+    digitalWrite(static_cast<uint8_t>(pins::kDxlDirPin), LOW);
+    pinMode(static_cast<uint8_t>(pins::kDxlDirPin), OUTPUT);
+  }
   // Safety invariant (AGENTS.md 1.1): servos stay unpowered at boot.
   if (pins::kHasDxlPowerControl) {
-    pinMode(pins::kDxlPowerEnable, OUTPUT);
     digitalWrite(pins::kDxlPowerEnable, LOW);
+    pinMode(pins::kDxlPowerEnable, OUTPUT);
   }
   g_dxlPowerOn = false;
   g_dxlPowerTransitions = 0;
@@ -169,6 +175,9 @@ void setDxlPower(bool on) {
     // No FET on this build/variant: cannot actually gate servo power.
     g_dxlPowerOn = false;
     return;
+  }
+  if (pins::kDxlDirPin >= 0 && (on != g_dxlPowerOn || !on)) {
+    digitalWrite(static_cast<uint8_t>(pins::kDxlDirPin), LOW);
   }
   if (on == g_dxlPowerOn) return;
   digitalWrite(pins::kDxlPowerEnable, on ? HIGH : LOW);

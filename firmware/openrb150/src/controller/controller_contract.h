@@ -63,8 +63,9 @@ struct BatterySnapshot {
 };
 
 // Status acquired from the DXL adapter. `configured_servo_coverage`,
-// `pose_known_mask`, and `config_revision` preserve the current arming
-// evidence contract: only status read against the active config can authorize
+// `pose_known_mask`, `config_revision`, and `arming_ready` preserve the arming
+// evidence contract: only status read against the active config followed by a
+// verified torque-off, hold-goal seed, and torque-on transaction can authorize
 // a normal arming path.
 struct DxlSnapshot {
   dxl::ServoStatus servos[config::kNumServos] = {};
@@ -73,6 +74,7 @@ struct DxlSnapshot {
   bool configured_servo_coverage = false;
   uint32_t pose_known_mask = 0;
   uint32_t config_revision = 0;
+  bool arming_ready = false;
   bool torque_off = true;
   bool hard_fault = false;
 };

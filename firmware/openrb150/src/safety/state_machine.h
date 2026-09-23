@@ -48,7 +48,8 @@ struct StateParams {
   // active maintenance session the instant DXL power is enabled (HIL bug 7).
   // A genuinely dying pack stays low, so debouncing only filters transients.
   uint16_t battery_low_debounce_ms = 250;
-  // Maximum time for torque-off DXL discovery and fresh pose collection.
+  // Maximum time for DXL discovery, status checks, torque-off verification,
+  // hold-goal seeding, and torque-on verification.
   uint16_t arming_timeout_ms = 10000;
   // Idle auto-disarm: an ARMED robot (StandReady / RC / contact / Jetson
   // states) with no motion activity for this long drops to Disarmed, which
@@ -79,7 +80,7 @@ struct StateInputs {
   // Arming.
   bool rc_ever_seen = false;
   bool rc_armed = false;          // RC arm switch asserted
-  bool arming_checks_pass = false;  // battery + DXL scan + config + pose ok
+  bool arming_checks_pass = false;  // battery + config + verified DXL arm ok
   bool host_disarm = false;       // host SET_ARMING(disarm): force Disarmed
 
   // Command authority (from CommandArbiter).
