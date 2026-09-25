@@ -1801,6 +1801,64 @@ class ConnectionService(QObject):
 
         threading.Thread(target=worker, name="hexapod-center-all", daemon=True).start()
 
+    def set_all_joint_targets_with_torque(self, angles_cdeg: list[int]) -> None:
+        """Enable all configured servos, then atomically apply 18 joint targets."""
+        client = self._client
+        if client is None:
+            self.error.emit("all joint targets: not connected")
+            return
+        expected_count = cfg.NUM_LEGS * cfg.JOINTS_PER_LEG
+        if len(angles_cdeg) != expected_count:
+            self.error.emit(
+                f"all joint targets: expected {expected_count}, got {len(angles_cdeg)}"
+            )
+            return
+        targets = list(angles_cdeg)
+
+        def worker() -> None:
+            robot_config = client.read_config()
+            if robot_config is None:
+                self.error.emit("all joint targets: failed to read active config")
+                self.joint_target_result.emit(None)
+                return
+            mode = client.set_maint_control_mode(api.MAINT_CONTROL_JOINT_TARGETS)
+            if mode is None or not mode.ok:
+                self.error.emit("all joint targets: failed to select joint-target mode")
+                self.joint_target_result.emit(None)
+                return
+            torque = client.dxl_torque(True)
+            torque_ok = (
+                torque is not None
+                and torque.done
+                and torque.code == api.DXL_CODE_OK
+                and len(torque.data) >= 2
+                and torque.data[0] == 1
+                and torque.data[1] == len(robot_config.servos)
+            )
+            if not torque_ok:
+                self.error.emit("all joint targets: failed to enable every servo")
+                self.joint_target_result.emit(None)
+                return
+            for servo in robot_config.servos:
+                self.servo_torque_changed.emit(servo.id, True, True)
+            result = client.set_all_joint_targets(targets)
+            if result is None:
+                self.error.emit("all joint targets: rejected or timed out")
+            elif result.ok:
+                self.event.emit(
+                    "commit",
+                    f"all joint targets: {result.stored_count}/{expected_count} accepted",
+                )
+            else:
+                self.error.emit(
+                    f"all joint targets: rejected (result {result.result})"
+                )
+            self.joint_target_result.emit(result)
+
+        threading.Thread(
+            target=worker, name="hexapod-all-joint-targets", daemon=True
+        ).start()
+
     def set_joint_targets_raw_ticks(
         self,
         targets: list[tuple[int, int, int]],
@@ -1926,6 +1984,66 @@ class ConnectionService(QObject):
             self.servo_torque_changed.emit(servo_id, enabled, verified)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def set_dxl_positions_with_torque(
+        self, targets: list[tuple[int, int]]
+    ) -> None:
+        """Write verified raw goal ticks, then enable each targeted servo.
+
+        This path is intentionally independent of the configured leg/joint map.
+        Each tuple is ``(servo_id, goal_tick)`` from the latest DXL scan. Goal
+        writes complete before any torque enable, so staged multi-servo commands
+        cannot energize against stale register values.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("DXL positions: not connected")
+            return
+        staged = [(int(servo_id), int(tick)) for servo_id, tick in targets]
+        if not staged:
+            return
+
+        def worker() -> None:
+            for servo_id, tick in staged:
+                result = client.dxl_set_param(
+                    servo_id, api.DXL_PARAM_GOAL_POSITION, tick
+                )
+                value = result.set_param() if result is not None else None
+                if (
+                    result is None
+                    or not result.done
+                    or result.code != api.DXL_CODE_OK
+                    or value is None
+                    or not value.verified
+                ):
+                    detail = f"servo {servo_id} goal write failed"
+                    self.error.emit(f"DXL positions: {detail}")
+                    self.dxl_result.emit(
+                        "goal_positions", {"ok": False, "detail": detail}
+                    )
+                    return
+            for servo_id, _tick in staged:
+                torque = client.dxl_set_param(
+                    servo_id, api.DXL_PARAM_TORQUE_ENABLE, 1
+                )
+                verified = self._torque_write_verified(torque, True)
+                self.servo_torque_changed.emit(servo_id, True, verified)
+                if not verified:
+                    detail = f"servo {servo_id} torque enable failed"
+                    self.error.emit(f"DXL positions: {detail}")
+                    self.dxl_result.emit(
+                        "goal_positions", {"ok": False, "detail": detail}
+                    )
+                    return
+            detail = f"commanded {len(staged)} servo(s)"
+            self.event.emit("commit", f"DXL positions: {detail}")
+            self.dxl_result.emit(
+                "goal_positions", {"ok": True, "detail": detail}
+            )
+
+        threading.Thread(
+            target=worker, name="hexapod-dxl-positions", daemon=True
+        ).start()
 
     @staticmethod
     def _torque_write_verified(result, enabled: bool) -> bool:

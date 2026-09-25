@@ -47,6 +47,36 @@ def test_servo_status_populates_table(qtbot) -> None:
     assert page.table.rowCount() == 2
 
 
+def test_rescan_clears_stale_servos_until_scan_finishes(qtbot, monkeypatch) -> None:
+    service, page = _make_page(qtbot)
+    record = tlm.ServoStatusTelemetry(
+        [tlm.ServoStatus(1, 2048, 0, 5, 11700, 38, 0x00, True)]
+    )
+    service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), record)
+    assert page.table.rowCount() == 1
+
+    scans = []
+    monkeypatch.setattr(service, "dxl_scan", lambda: scans.append(True))
+    service.connected.emit(True)
+    service.maint_lock_changed.emit(True, 7)
+    service.maintenance_setup_changed.emit(False, True, "ready: 18 servos scanned")
+    page.rescan_btn.click()
+
+    assert scans == [True]
+    assert page.table.rowCount() == 0
+    service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), record)
+    assert page.table.rowCount() == 0
+
+    records = bytes([1, 29, 0, 1, 2, 1])
+    service.dxl_result.emit(
+        "scan", api.DxlJobResult(api.DXL_SLOT_DONE, api.DXL_CODE_OK, b"\x01" + records)
+    )
+    service.telemetry.emit(int(tlm.StreamId.SERVO_STATUS), record)
+    assert page.table.rowCount() == 1
+    assert page.table.item(0, 0).text() == "1"
+    assert page.table.item(0, 7).text() == "ON"
+
+
 def test_get_param_result_updates_value(qtbot) -> None:
     service, page = _make_page(qtbot)
     # DONE GET_PARAM blob: [param, table, len, value(i32)].

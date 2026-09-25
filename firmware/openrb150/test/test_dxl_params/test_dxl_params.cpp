@@ -50,6 +50,12 @@ void test_legacy_addresses() {
   TEST_ASSERT_EQUAL(static_cast<int>(ParamRegion::Ram),
                     static_cast<int>(d.region));
 
+  d = desc(t, LogicalParam::GoalPosition);
+  TEST_ASSERT_EQUAL_UINT16(30, d.address);
+  TEST_ASSERT_EQUAL_UINT8(2, d.length);
+  TEST_ASSERT_EQUAL(static_cast<int>(ParamRegion::Ram),
+                    static_cast<int>(d.region));
+
   // Legacy PID gains are single-byte at D26/I27/P28.
   TEST_ASSERT_EQUAL_UINT16(28, desc(t, LogicalParam::PidP).address);
   TEST_ASSERT_EQUAL_UINT8(1, desc(t, LogicalParam::PidP).length);
@@ -100,6 +106,12 @@ void test_v2_addresses() {
 
   d = desc(t, LogicalParam::TorqueEnable);
   TEST_ASSERT_EQUAL_UINT16(64, d.address);
+  TEST_ASSERT_EQUAL(static_cast<int>(ParamRegion::Ram),
+                    static_cast<int>(d.region));
+
+  d = desc(t, LogicalParam::GoalPosition);
+  TEST_ASSERT_EQUAL_UINT16(116, d.address);
+  TEST_ASSERT_EQUAL_UINT8(4, d.length);
   TEST_ASSERT_EQUAL(static_cast<int>(ParamRegion::Ram),
                     static_cast<int>(d.region));
 

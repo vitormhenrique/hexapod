@@ -103,8 +103,11 @@ implementation page in the navigation rail:
 
 - **Dashboard**: connection, robot readiness, safety, and authority.
 - **Operate**: gait testing, contact/leveling, and torque-off passive posing.
-- **Configure**: Foot IK, Bench Joints, fixture calibration, Robot Config, and
-  verified DXL settings.
+- **Configure**: Foot IK, DXL Commands, fixture calibration, Robot Config, and
+  verified DXL settings. DXL Commands scans the bus and creates one generic row
+  per discovered servo ID; it does not depend on the configured leg map. It
+  supports explicit single-servo Set actions and one-click submission of
+  multiple staged positions; typing never sends a target by itself.
 - **Analyze**: live/replay trends and one Pose screen with 2D and 3D modes.
 - **Diagnose**: foot-sensor hardware, radio/link health, protocol faults, and
   offline OpenLog card recovery.

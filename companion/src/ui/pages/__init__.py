@@ -9,7 +9,7 @@ from hexapod_protocol import api
 from hexapod_protocol import telemetry as tlm
 from hexapod_protocol.framing import MsgType
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIntValidator
+from PySide6.QtGui import QDoubleValidator, QIntValidator
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -226,8 +226,14 @@ class ConnectPage(BasePage):
             score = 0
             if "openrb" in haystack:
                 score += 100
+            if "teensy" in haystack or "vid:pid=16c0:0483" in haystack:
+                score += 100
+            if "usbmodem" in haystack:
+                score += 40
             if str(p.device).startswith("/dev/cu."):
                 score += 20
+            if "debug-console" in haystack or "bluetooth" in haystack or "-bt_" in haystack:
+                score -= 100
             if score > best_score:
                 best_index = i
                 best_score = score
@@ -1047,7 +1053,7 @@ class LegLabPage(BasePage):
     title = "Foot IK"
     subtitle = (
         "Preview and command one foot in body coordinates with live reach and "
-        "clamp feedback. Use Bench Joints for individual joints."
+        "clamp feedback. Use DXL Commands for individual joints."
     )
 
     def build(self) -> None:
@@ -2155,6 +2161,7 @@ class ServoTuningPage(BasePage):
         self._lock_held = self.service.maint_lock_held
         self._setup_busy = self.service.maintenance_setup_busy
         self._setup_ready = self.service.maintenance_setup_ready
+        self._scan_in_progress = False
 
         self.content.addWidget(self._maintenance_controls())
         self.content.addWidget(self._status_table())
@@ -2186,11 +2193,14 @@ class ServoTuningPage(BasePage):
         self.enter_maint_btn = QPushButton("Prepare Maintenance")
         self.enter_maint_btn.setProperty("accent", True)
         self.enter_maint_btn.clicked.connect(self.service.enter_maintenance)
+        self.rescan_btn = QPushButton("Rescan servos")
+        self.rescan_btn.clicked.connect(self._rescan)
         self.exit_maint_btn = QPushButton("End Maintenance")
         self.exit_maint_btn.clicked.connect(self.service.exit_maintenance)
         self.setup_lbl = QLabel("Not prepared")
         self.setup_lbl.setObjectName("MonoLabel")
         row.addWidget(self.enter_maint_btn)
+        row.addWidget(self.rescan_btn)
         row.addWidget(self.exit_maint_btn)
         row.addWidget(self.setup_lbl, 1)
         return box
@@ -2347,11 +2357,8 @@ class ServoTuningPage(BasePage):
             self.request_stream(int(tlm.StreamId.SERVO_STATUS), 20)
             self.request_stream(int(tlm.StreamId.SERVO_GOALS), 20)
         else:
-            self.table.setRowCount(0)
-            self._rows.clear()
-            self._last_status.clear()
-            self._goal_ticks.clear()
-            self.detail.select_servo(None)
+            self._clear_servo_list()
+            self._scan_in_progress = False
             self._lock_held = False
             self._setup_busy = False
             self._setup_ready = False
@@ -2364,6 +2371,9 @@ class ServoTuningPage(BasePage):
         self._apply_gates()
 
     def _on_setup_changed(self, busy: bool, ready: bool, detail: str) -> None:
+        if busy and detail == "scanning servos" and not self._scan_in_progress:
+            self._clear_servo_list()
+            self._scan_in_progress = True
         self._setup_busy = busy
         self._setup_ready = ready
         self.setup_lbl.setText(detail)
@@ -2385,6 +2395,12 @@ class ServoTuningPage(BasePage):
         self.exit_maint_btn.setEnabled(
             self._connected and self._lock_held and not self._setup_busy
         )
+        self.rescan_btn.setEnabled(
+            self._connected
+            and self._lock_held
+            and not self._setup_busy
+            and not self._scan_in_progress
+        )
         for button in (
             self.read_param_btn,
             self.write_param_btn,
@@ -2400,6 +2416,8 @@ class ServoTuningPage(BasePage):
             self._on_servo_goals(record)
             return
         if stream_id != int(tlm.StreamId.SERVO_STATUS):
+            return
+        if self._scan_in_progress:
             return
         for s in record.servos:
             self._last_status[s.id] = s
@@ -2422,6 +2440,21 @@ class ServoTuningPage(BasePage):
             for col, text in enumerate(values):
                 self.table.setItem(row, col, QTableWidgetItem(text))
             self.detail.update_status(s)
+
+    def _clear_servo_list(self) -> None:
+        self.table.clearSelection()
+        self.table.setRowCount(0)
+        self._rows.clear()
+        self._last_status.clear()
+        self._goal_ticks.clear()
+        self.detail.select_servo(None)
+
+    def _rescan(self) -> None:
+        self._clear_servo_list()
+        self._scan_in_progress = True
+        self.setup_lbl.setText("scanning servos")
+        self._apply_gates()
+        self.service.dxl_scan()
 
     def _on_servo_goals(self, record) -> None:
         """Map each commanded (leg, joint) goal back to a servo id + target tick."""
@@ -2533,6 +2566,12 @@ class ServoTuningPage(BasePage):
     # --- result routing ---------------------------------------------------
 
     def _on_dxl_result(self, kind: str, res) -> None:
+        if kind == "scan":
+            self._scan_in_progress = False
+            count = len(res.servos()) if res is not None and res.done else 0
+            self.setup_lbl.setText(f"servo scan: {count} found")
+            self._apply_gates()
+            return
         if res is None:
             target = {
                 "get_param": self.param_result,
@@ -4839,6 +4878,10 @@ class JointMatrixCell(QWidget):
         self._staged = False
 
     @property
+    def staged(self) -> bool:
+        return self._staged
+
+    @property
     def released(self) -> bool:
         return self._released
 
@@ -4858,11 +4901,381 @@ class JointMatrixCell(QWidget):
         self.value.setText(str(self.value_int()))
 
 
-class JointMatrixPage(BasePage):
-    title = "Bench Joints"
+class DxlCommandCell(QWidget):
+    """Explicit target editor for one discovered DXL servo."""
+
+    def __init__(self, servo_id: int, send, parent=None) -> None:
+        super().__init__(parent)
+        self.servo_id = servo_id
+        self._ticks_mode = False
+        self._staged = False
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(6)
+        self.value = QLineEdit("180")
+        self.value.setAlignment(Qt.AlignRight)
+        self.value.setValidator(QDoubleValidator(0.0, 360.0, 2, self))
+        self.value.textEdited.connect(self._mark_staged)
+        self.set_btn = QPushButton("Set")
+        self.set_btn.clicked.connect(lambda: send(self.servo_id))
+        layout.addWidget(self.value, 1)
+        layout.addWidget(self.set_btn)
+
+    @property
+    def staged(self) -> bool:
+        return self._staged
+
+    def set_ticks_mode(self, ticks_mode: bool) -> None:
+        if ticks_mode == self._ticks_mode:
+            return
+        tick = self.target_tick()
+        self._ticks_mode = ticks_mode
+        if ticks_mode:
+            self.value.setValidator(QIntValidator(0, 4095, self))
+            self.value.setText(str(tick if tick is not None else 2048))
+        else:
+            self.value.setValidator(QDoubleValidator(0.0, 360.0, 2, self))
+            shown = 180.0 if tick is None else tick * 360.0 / 4095.0
+            self.value.setText(f"{shown:.2f}".rstrip("0").rstrip("."))
+
+    def target_tick(self) -> int | None:
+        if not self.value.hasAcceptableInput():
+            return None
+        try:
+            raw = float(self.value.text())
+        except ValueError:
+            return None
+        if self._ticks_mode:
+            return max(0, min(4095, round(raw)))
+        return max(0, min(4095, round(raw * 4095.0 / 360.0)))
+
+    def set_present_tick(self, tick: int) -> None:
+        if self._staged or self.value.hasFocus():
+            return
+        if self._ticks_mode:
+            self.value.setText(str(tick))
+        else:
+            angle = tick * 360.0 / 4095.0
+            self.value.setText(f"{angle:.2f}".rstrip("0").rstrip("."))
+
+    def clear_staged(self) -> None:
+        self._staged = False
+
+    def _mark_staged(self, _text: str) -> None:
+        self._staged = True
+
+
+class DxlCommandsPage(BasePage):
+    title = "DXL Commands"
     subtitle = (
-        "Six-leg maintenance targets with calibrated angle/tick conversion, "
-        "individual torque release, and live position feedback."
+        "Discover and command DYNAMIXEL servos directly by ID without using "
+        "the robot leg map."
+    )
+
+    COLUMNS: ClassVar = [
+        "ID",
+        "Model",
+        "Firmware",
+        "Protocol",
+        "Table",
+        "Present",
+        "Torque",
+        "Target",
+        "Torque action",
+    ]
+
+    def build(self) -> None:
+        self._connected = False
+        self._lock_held = self.service.maint_lock_held
+        self._setup_busy = self.service.maintenance_setup_busy
+        self._setup_ready = self.service.maintenance_setup_ready
+        self._scan_in_progress = False
+        self._ticks_mode = False
+        self._rows: dict[int, int] = {}
+        self._editors: dict[int, DxlCommandCell] = {}
+
+        self.content.addWidget(self._controls())
+        self.content.addWidget(self._servo_table())
+        self.content.addWidget(self._status_panel())
+
+        self.service.connected.connect(self._on_connected)
+        self.service.maint_lock_changed.connect(self._on_lock_changed)
+        self.service.maintenance_setup_changed.connect(self._on_setup_changed)
+        self.service.dxl_result.connect(self._on_dxl_result)
+        self.service.servo_torque_changed.connect(self._on_servo_torque_changed)
+        self.service.telemetry.connect(self._on_telemetry)
+        self._apply_gates()
+
+    def _controls(self) -> QGroupBox:
+        box = QGroupBox("Generic DXL bus controls")
+        form = QFormLayout(box)
+        actions = QHBoxLayout()
+        self.enter_maint_btn = QPushButton("Enter Maintenance and Scan")
+        self.enter_maint_btn.setProperty("accent", True)
+        self.enter_maint_btn.clicked.connect(self.service.enter_maintenance)
+        self.rescan_btn = QPushButton("Rescan all IDs")
+        self.rescan_btn.clicked.connect(self._rescan)
+        self.enable_all_btn = QPushButton("Enable all torque")
+        self.enable_all_btn.clicked.connect(lambda: self.service.dxl_torque(True))
+        self.disable_all_btn = QPushButton("Disable all torque")
+        self.disable_all_btn.clicked.connect(lambda: self.service.dxl_torque(False))
+        self.exit_maint_btn = QPushButton("Exit Maintenance")
+        self.exit_maint_btn.clicked.connect(self.service.exit_maintenance)
+        for button in (
+            self.enter_maint_btn,
+            self.rescan_btn,
+            self.enable_all_btn,
+            self.disable_all_btn,
+            self.exit_maint_btn,
+        ):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        form.addRow("Bus", self._wrap(actions))
+
+        modes = QHBoxLayout()
+        self.angle_radio = QRadioButton("Absolute angle (degrees)")
+        self.tick_radio = QRadioButton("Raw position ticks")
+        self.angle_radio.setChecked(True)
+        self.angle_radio.toggled.connect(
+            lambda checked: checked and self._set_ticks_mode(False)
+        )
+        self.tick_radio.toggled.connect(
+            lambda checked: checked and self._set_ticks_mode(True)
+        )
+        modes.addWidget(self.angle_radio)
+        modes.addWidget(self.tick_radio)
+        modes.addStretch(1)
+        form.addRow("Target units", self._wrap(modes))
+
+        self.apply_staged_btn = QPushButton("Apply staged (0)")
+        self.apply_staged_btn.setProperty("accent", True)
+        self.apply_staged_btn.clicked.connect(self._apply_staged)
+        form.addRow("Multiple servos", self.apply_staged_btn)
+        return box
+
+    def _servo_table(self) -> QGroupBox:
+        box = QGroupBox("Discovered servos")
+        layout = QVBoxLayout(box)
+        self.table = QTableWidget(0, len(self.COLUMNS))
+        self.table.setHorizontalHeaderLabels(self.COLUMNS)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.NoSelection)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(7, QHeaderView.Stretch)
+        self.table.setMinimumHeight(360)
+        layout.addWidget(self.table)
+        return box
+
+    def _status_panel(self) -> QGroupBox:
+        box = QGroupBox("Command status")
+        layout = QVBoxLayout(box)
+        self.status_lbl = QLabel("Enter Maintenance to scan the DXL bus.")
+        self.status_lbl.setObjectName("MonoLabel")
+        self.status_lbl.setWordWrap(True)
+        layout.addWidget(self.status_lbl)
+        return box
+
+    def _wrap(self, layout) -> QWidget:
+        widget = QWidget()
+        widget.setLayout(layout)
+        return widget
+
+    def _clear_servos(self) -> None:
+        self.table.setRowCount(0)
+        self._rows.clear()
+        self._editors.clear()
+        self._update_staged_action()
+
+    def _rescan(self) -> None:
+        self._clear_servos()
+        self._scan_in_progress = True
+        self.status_lbl.setText("Scanning DXL IDs 1-30...")
+        self._apply_gates()
+        self.service.dxl_scan()
+
+    def _populate_scan(self, servos) -> None:
+        self._clear_servos()
+        table_names = {0: "unknown", 1: "MX legacy", 2: "MX(2.0)"}
+        for record in sorted(servos, key=lambda servo: servo.id):
+            row = self.table.rowCount()
+            self.table.insertRow(row)
+            self._rows[record.id] = row
+            values = (
+                record.id,
+                record.model,
+                record.firmware,
+                record.protocol,
+                table_names.get(record.table_kind, str(record.table_kind)),
+                "--",
+                "--",
+            )
+            for column, value in enumerate(values):
+                self.table.setItem(row, column, QTableWidgetItem(str(value)))
+            editor = DxlCommandCell(record.id, self._send_one)
+            editor.value.textEdited.connect(self._update_staged_action)
+            self._editors[record.id] = editor
+            self.table.setCellWidget(row, 7, editor)
+            release = QPushButton("Disable torque")
+            release.clicked.connect(
+                lambda _checked=False, servo_id=record.id: self.service.set_servo_torque(
+                    servo_id, False
+                )
+            )
+            self.table.setCellWidget(row, 8, release)
+        self._apply_gates()
+
+    def _set_ticks_mode(self, ticks_mode: bool) -> None:
+        self._ticks_mode = ticks_mode
+        for editor in self._editors.values():
+            editor.set_ticks_mode(ticks_mode)
+
+    def _send_one(self, servo_id: int) -> None:
+        editor = self._editors[servo_id]
+        tick = editor.target_tick()
+        if tick is None:
+            self.status_lbl.setText(
+                f"Servo {servo_id}: finish entering a valid target before Set."
+            )
+            return
+        self.status_lbl.setText(f"Commanding servo {servo_id} to tick {tick}...")
+        self.service.set_dxl_positions_with_torque([(servo_id, tick)])
+        editor.clear_staged()
+        self._update_staged_action()
+
+    def _apply_staged(self) -> None:
+        staged = [
+            (servo_id, editor.target_tick())
+            for servo_id, editor in self._editors.items()
+            if editor.staged
+        ]
+        if not staged:
+            return
+        if any(tick is None for _servo_id, tick in staged):
+            self.status_lbl.setText(
+                "Finish every staged target before applying multiple servos."
+            )
+            return
+        targets = [(servo_id, int(tick)) for servo_id, tick in staged]
+        self.status_lbl.setText(f"Commanding {len(targets)} staged servo(s)...")
+        self.service.set_dxl_positions_with_torque(targets)
+        for servo_id, _tick in targets:
+            self._editors[servo_id].clear_staged()
+        self._update_staged_action()
+
+    def _update_staged_action(self, _text: str = "") -> None:
+        count = sum(editor.staged for editor in self._editors.values())
+        self.apply_staged_btn.setText(f"Apply staged ({count})")
+        self._apply_gates()
+
+    def _on_connected(self, connected: bool) -> None:
+        self._connected = connected
+        if connected:
+            self.request_stream(int(tlm.StreamId.SERVO_STATUS), 20)
+        else:
+            self._clear_servos()
+            self._lock_held = False
+            self._setup_ready = False
+            self._setup_busy = False
+            self._scan_in_progress = False
+        self._apply_gates()
+
+    def _on_lock_changed(self, held: bool, _token: int) -> None:
+        self._lock_held = held
+        if not held:
+            self._setup_ready = False
+        self._apply_gates()
+
+    def _on_setup_changed(self, busy: bool, ready: bool, detail: str) -> None:
+        if busy and detail == "scanning servos":
+            self._clear_servos()
+            self._scan_in_progress = True
+        self._setup_busy = busy
+        self._setup_ready = ready
+        self.status_lbl.setText(detail)
+        self._apply_gates()
+
+    def _on_dxl_result(self, kind: str, result) -> None:
+        if kind == "scan":
+            self._scan_in_progress = False
+            servos = result.servos() if result is not None and result.done else []
+            self._populate_scan(servos)
+            self.status_lbl.setText(f"Scan complete: {len(servos)} servo(s) found.")
+        elif kind == "goal_positions" and isinstance(result, dict):
+            self.status_lbl.setText(result.get("detail", "DXL command finished"))
+        elif kind == "torque":
+            ok = result is not None and result.done and result.code == api.DXL_CODE_OK
+            self.status_lbl.setText(
+                "All-servo torque command completed."
+                if ok
+                else "All-servo torque command failed."
+            )
+        self._apply_gates()
+
+    def _on_servo_torque_changed(
+        self, servo_id: int, enabled: bool, verified: bool
+    ) -> None:
+        row = self._rows.get(servo_id)
+        if row is None:
+            return
+        self.table.setItem(
+            row,
+            6,
+            QTableWidgetItem("ON" if enabled and verified else "off"),
+        )
+
+    def _on_telemetry(self, stream_id: int, record) -> None:
+        if stream_id != int(tlm.StreamId.SERVO_STATUS) or self._scan_in_progress:
+            return
+        for status in record.servos:
+            row = self._rows.get(status.id)
+            editor = self._editors.get(status.id)
+            if row is None or editor is None:
+                continue
+            self.table.setItem(row, 5, QTableWidgetItem(str(status.position)))
+            self.table.setItem(
+                row, 6, QTableWidgetItem("ON" if status.torque_enabled else "off")
+            )
+            editor.set_present_tick(status.position)
+
+    def _apply_gates(self) -> None:
+        ready = (
+            self._connected
+            and self._lock_held
+            and self._setup_ready
+            and not self._setup_busy
+            and not self._scan_in_progress
+        )
+        self.enter_maint_btn.setEnabled(
+            self._connected and not self._setup_busy and not self._setup_ready
+        )
+        self.rescan_btn.setEnabled(
+            self._connected and self._lock_held and not self._setup_busy
+        )
+        self.enable_all_btn.setEnabled(ready and bool(self._editors))
+        self.disable_all_btn.setEnabled(ready and bool(self._editors))
+        self.exit_maint_btn.setEnabled(
+            self._connected and self._lock_held and not self._setup_busy
+        )
+        self.angle_radio.setEnabled(not self._setup_busy)
+        self.tick_radio.setEnabled(not self._setup_busy)
+        self.apply_staged_btn.setEnabled(
+            ready and any(editor.staged for editor in self._editors.values())
+        )
+        for editor in self._editors.values():
+            editor.value.setEnabled(ready)
+            editor.set_btn.setEnabled(ready)
+        for row in range(self.table.rowCount()):
+            action = self.table.cellWidget(row, 8)
+            if action is not None:
+                action.setEnabled(ready)
+
+
+class JointMatrixPage(BasePage):
+    title = "DXL Commands"
+    subtitle = (
+        "Scan and torque the full DXL bus, then command one or several servos "
+        "with calibrated angle/tick conversion."
     )
 
     JOINTS = (("Coxa", 0), ("Femur", 1), ("Tibia", 2))
@@ -4953,10 +5366,26 @@ class JointMatrixPage(BasePage):
         center.clicked.connect(self._center_all)
         self.center_btn = center
 
+        self.apply_staged_btn = QPushButton("Apply staged (0)")
+        self.apply_staged_btn.setProperty("accent", True)
+        self.apply_staged_btn.setToolTip(
+            "Apply all edited positions in one 18-joint command. Typing alone "
+            "never sends a target."
+        )
+        self.apply_staged_btn.clicked.connect(self._apply_staged)
+
+        self.enable_torque_btn = QPushButton("Enable all torque")
+        self.enable_torque_btn.clicked.connect(lambda: self._set_all_torque(True))
+        self.disable_torque_btn = QPushButton("Disable all torque")
+        self.disable_torque_btn.clicked.connect(lambda: self._set_all_torque(False))
+
         bottom = QHBoxLayout()
+        bottom.addWidget(self.enable_torque_btn)
+        bottom.addWidget(self.disable_torque_btn)
         bottom.addWidget(center)
+        bottom.addWidget(self.apply_staged_btn)
         bottom.addStretch(1)
-        form.addRow("All joints", self._wrap(bottom))
+        form.addRow("All servos", self._wrap(bottom))
 
         self.maintenance_lbl = QLabel("Maintenance lock: none")
         self.maintenance_lbl.setObjectName("MonoLabel")
@@ -5002,6 +5431,7 @@ class JointMatrixPage(BasePage):
                         leg, joint
                     )
                 )
+                cell.value.textEdited.connect(self._update_staged_action)
                 self._cells[(leg, joint)] = cell
                 self.matrix.setCellWidget(leg, column, cell)
         lay.addWidget(self.matrix)
@@ -5029,6 +5459,42 @@ class JointMatrixPage(BasePage):
             cell.set_display_value(
                 self._cfg.SERVO_CENTER_TICK if self._ticks_mode else 180, force=True
             )
+        self._update_staged_action()
+
+    def _set_all_torque(self, enabled: bool) -> None:
+        action = "enabling" if enabled else "disabling"
+        self.command_result.setText(f"{action} torque for all scanned servos...")
+        self.service.dxl_torque(enabled)
+
+    def _apply_staged(self) -> None:
+        staged_count = sum(cell.staged for cell in self._cells.values())
+        if not staged_count:
+            return
+        angles_cdeg: list[int] = []
+        for leg in range(self._cfg.NUM_LEGS):
+            for joint in range(self._cfg.JOINTS_PER_LEG):
+                cell = self._cells[(leg, joint)]
+                if self._ticks_mode:
+                    relative_rad = self._servo_map.tick_to_angle(
+                        leg, joint, cell.value_int()
+                    )
+                    angles_cdeg.append(
+                        round(self._cfg.RAD_TO_DEG * relative_rad * 100)
+                    )
+                else:
+                    angles_cdeg.append((cell.value_int() - 180) * 100)
+        self.command_result.setText(
+            f"enabling torque and applying {staged_count} staged position(s)..."
+        )
+        self.service.set_all_joint_targets_with_torque(angles_cdeg)
+        for cell in self._cells.values():
+            cell.clear_staged_value()
+        self._update_staged_action()
+
+    def _update_staged_action(self, _text: str = "") -> None:
+        count = sum(cell.staged for cell in self._cells.values())
+        self.apply_staged_btn.setText(f"Apply staged ({count})")
+        self._apply_gates()
 
     def _apply_cell_range(self, cell: JointMatrixCell, leg: int, joint: int) -> None:
         """Point one cell at the mapped servo's travel in the active unit."""
@@ -5157,6 +5623,20 @@ class JointMatrixPage(BasePage):
                 self._setup_ready = True
                 self.enter_maint_btn.setText("Maintenance ready")
                 self._apply_gates()
+        elif kind == "torque":
+            ok = (
+                res is not None
+                and res.done
+                and res.code == api.DXL_CODE_OK
+                and len(res.data) >= 2
+            )
+            if ok:
+                state = "enabled" if res.data[0] else "disabled"
+                self.command_result.setText(
+                    f"torque {state} for {res.data[1]} servo(s)"
+                )
+            else:
+                self.command_result.setText("all-servo torque command failed")
 
     def _on_servo_torque_changed(
         self, servo_id: int, enabled: bool, verified: bool
@@ -5231,6 +5711,11 @@ class JointMatrixPage(BasePage):
             self._connected and self._lock_held and not self._setup_busy and not passive
         )
         self.center_btn.setEnabled(bench_ready)
+        self.enable_torque_btn.setEnabled(bench_ready)
+        self.disable_torque_btn.setEnabled(bench_ready)
+        self.apply_staged_btn.setEnabled(
+            bench_ready and any(cell.staged for cell in self._cells.values())
+        )
         self.angle_radio.setEnabled(not passive)
         self.tick_radio.setEnabled(not passive)
         for cell in self._cells.values():

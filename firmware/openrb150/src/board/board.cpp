@@ -104,9 +104,17 @@ void init() {
   if (pins::kHasDxlPowerControl) {
     digitalWrite(pins::kDxlPowerEnable, LOW);
     pinMode(pins::kDxlPowerEnable, OUTPUT);
+#if defined(HEXAPOD_DXL_POWER_LATCHED_ON)
+    digitalWrite(pins::kDxlPowerEnable, HIGH);
+#endif
   }
+#if defined(HEXAPOD_DXL_POWER_LATCHED_ON)
+  g_dxlPowerOn = pins::kHasDxlPowerControl;
+  g_dxlPowerTransitions = g_dxlPowerOn ? 1 : 0;
+#else
   g_dxlPowerOn = false;
   g_dxlPowerTransitions = 0;
+#endif
 
   // --- USER LED: output, off. ---------------------------------------------
   pinMode(pins::kUserLed, OUTPUT);
@@ -168,6 +176,9 @@ void setRgbStatusLed(uint8_t, uint8_t, uint8_t) {}
 bool hasDxlPowerControl() { return pins::kHasDxlPowerControl; }
 
 void setDxlPower(bool on) {
+#if defined(HEXAPOD_DXL_POWER_LATCHED_ON)
+  if (!on) return;
+#endif
   if (on && !hil::outputGuard().allowPowerEnable()) {
     return;
   }

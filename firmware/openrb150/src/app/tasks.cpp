@@ -410,11 +410,24 @@ volatile bool g_dxlTorqueOff = true;
 // parameter API. A released joint must stay limp even while maintenance goal
 // frames continue and another torque-on path runs. dxlTask owns this mask.
 uint32_t g_maintenanceReleasedMask = 0;
+// Servos commanded through the generic maintenance Goal Position parameter.
+// These IDs are excluded from the mapped controller Sync Write until
+// maintenance ends, so their verified direct goals are not overwritten.
+uint32_t g_maintenanceDirectGoalMask = 0;
 
 bool maintenanceServoReleased(uint8_t id) {
   for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
     if (g_dxlBus.profile(i).id == id) {
       return (g_maintenanceReleasedMask & (uint32_t{1} << i)) != 0;
+    }
+  }
+  return false;
+}
+
+bool maintenanceServoDirect(uint8_t id) {
+  for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
+    if (g_dxlBus.profile(i).id == id) {
+      return (g_maintenanceDirectGoalMask & (uint32_t{1} << i)) != 0;
     }
   }
   return false;
@@ -2209,6 +2222,10 @@ protocol::dxljob::Code writeParamChecked(uint8_t id, dxl::LogicalParam param,
   if (!dxl::paramDescriptor(p->table_kind, param, d) || !d.writable) {
     return Code::Unsupported;
   }
+  if (param == dxl::LogicalParam::GoalPosition &&
+      (value < 0 || value > config::kServoMaxTick)) {
+    return Code::VerifyFailed;
+  }
   if (param == dxl::LogicalParam::TorqueEnable) {
     if (value != 0 && value != 1) return Code::VerifyFailed;
     if (!g_dxlBus.setTorqueOne(id, p->table_kind, value != 0)) {
@@ -2251,6 +2268,14 @@ protocol::dxljob::Code writeParamChecked(uint8_t id, dxl::LogicalParam param,
     return Code::BusError;
   }
   verified = (readback == value);
+  if (verified && param == dxl::LogicalParam::GoalPosition) {
+    for (uint8_t i = 0; i < g_dxlBus.servoCount(); ++i) {
+      if (g_dxlBus.profile(i).id == id) {
+        g_maintenanceDirectGoalMask |= (uint32_t{1} << i);
+        break;
+      }
+    }
+  }
   return verified ? Code::Ok : Code::VerifyFailed;
 }
 
@@ -2389,6 +2414,7 @@ void runQueuedDxlJob() {
   switch (job.type) {
     case protocol::dxljob::Type::Scan: {
       g_dxlBus.beginDiscovery();
+      g_maintenanceDirectGoalMask = 0;
       clearServoStatusSnapshot();
       g_dxlScanJob.job_id = job_id;
       g_dxlScanJob.active = g_dxlScanJob.cursor.begin(job.arg0, job.arg1);
@@ -2884,8 +2910,10 @@ void dxlTask(void*) {
                   safety::ErrorSeverity::Error, now_ms);
       }
     }
-    if (!board::dxlPowerEnabled()) {
+    if (!board::dxlPowerEnabled() ||
+        live_state != safety::State::MacMaintenance) {
       g_maintenanceReleasedMask = 0;
+      g_maintenanceDirectGoalMask = 0;
     } else if (live_state == safety::State::MacMaintenance &&
                g_maintenanceReleasedMask != 0) {
       // Reassert only when another firmware path changed the cached torque
@@ -2933,7 +2961,8 @@ void dxlTask(void*) {
         const uint8_t frame_count = g_goalFrame.count;
         for (uint8_t i = 0; i < frame_count; ++i) {
           const uint8_t id = g_goalFrame.joints[i].id;
-          if (maint_authority && maintenanceServoReleased(id)) {
+          if (maint_authority &&
+              (maintenanceServoReleased(id) || maintenanceServoDirect(id))) {
             continue;
           }
           targets[count].id = id;

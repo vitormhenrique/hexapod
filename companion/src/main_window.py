@@ -16,9 +16,9 @@ from services import ConnectionService
 from ui.pages import (
     ConnectPage,
     DiagnosticsPage,
+    DxlCommandsPage,
     FootContactPage,
     GaitLabPage,
-    JointMatrixPage,
     LegLabPage,
     ModeSafetyPage,
     OpenLogConfigFilePage,
@@ -58,7 +58,7 @@ WORKSPACES = (
         "Configure",
         (
             ("leg_lab", "Foot IK", LegLabPage),
-            ("joint_matrix", "Bench Joints", JointMatrixPage),
+            ("joint_matrix", "DXL Commands", DxlCommandsPage),
             ("servo_calibration", "Fixture Calibration", ServoCalibrationPage),
             ("servo_config", "Robot Config", ServoConfigPage),
             ("servo_tuning", "DXL Settings", ServoTuningPage),

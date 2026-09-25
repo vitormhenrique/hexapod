@@ -926,6 +926,11 @@ def test_parse_dxl_set_param_result():
     assert not badres.set_param().verified
 
 
+def test_dxl_goal_position_logical_param_id_is_stable():
+    assert api.DXL_PARAM_GOAL_POSITION == 24
+    assert api.DXL_PARAM_COUNT == 25
+
+
 def test_parse_dxl_servo_limits_result():
     # [table, min(i32), max(i32), verified].
     data = struct.pack("<BiiB", 2, 100, 3900, 1)

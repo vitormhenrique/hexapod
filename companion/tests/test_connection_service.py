@@ -258,6 +258,48 @@ def test_center_all_inverts_active_map_to_physical_2048(qtbot) -> None:
         assert not command.clamped_low and not command.clamped_high
 
 
+def test_all_joint_targets_verify_torque_before_atomic_submit(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.config = cfg.default_robot_config()
+            self.calls = []
+
+        def read_config(self):
+            self.calls.append(("config",))
+            return self.config
+
+        def set_maint_control_mode(self, mode):
+            self.calls.append(("mode", mode))
+            return api.MaintControlModeResult(api.MAINT_TARGET_OK, mode, 1)
+
+        def dxl_torque(self, enabled):
+            self.calls.append(("torque", enabled))
+            return api.DxlJobResult(
+                api.DXL_SLOT_DONE, api.DXL_CODE_OK, bytes([1, 18])
+            )
+
+        def set_all_joint_targets(self, angles):
+            self.calls.append(("targets", list(angles)))
+            return api.AllJointTargetResult(api.MAINT_TARGET_OK, 8, 18, 0)
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+    targets = [index * 100 for index in range(18)]
+
+    with qtbot.waitSignal(service.joint_target_result, timeout=2000):
+        service.set_all_joint_targets_with_torque(targets)
+
+    assert client.calls == [
+        ("config",),
+        ("mode", api.MAINT_CONTROL_JOINT_TARGETS),
+        ("torque", True),
+        ("targets", targets),
+    ]
+
+
 def test_enter_maintenance_one_call_retries_gate_then_scans(qtbot, monkeypatch) -> None:
     import services as services_mod
     from services import ConnectionService
@@ -342,6 +384,35 @@ def test_released_joint_stages_goal_before_enabling_torque(qtbot, monkeypatch) -
     assert client.calls == [
         ("target", 0, 0, 0),
         ("torque", 1, api.DXL_PARAM_TORQUE_ENABLE, 1),
+    ]
+
+
+def test_generic_dxl_positions_write_all_goals_before_torque(qtbot) -> None:
+    from services import ConnectionService
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def dxl_set_param(self, servo_id, param, value):
+            self.calls.append((servo_id, param, value))
+            data = bytes([param, 4]) + struct.pack("<iiB", value, value, 1)
+            return api.DxlJobResult(api.DXL_SLOT_DONE, api.DXL_CODE_OK, data)
+
+    service = ConnectionService()
+    client = FakeClient()
+    service._client = client  # type: ignore[assignment]
+
+    with qtbot.waitSignal(service.dxl_result, timeout=2000) as completed:
+        service.set_dxl_positions_with_torque([(7, 1024), (2, 3071)])
+
+    assert completed.args[0] == "goal_positions"
+    assert completed.args[1]["ok"] is True
+    assert client.calls == [
+        (7, api.DXL_PARAM_GOAL_POSITION, 1024),
+        (2, api.DXL_PARAM_GOAL_POSITION, 3071),
+        (7, api.DXL_PARAM_TORQUE_ENABLE, 1),
+        (2, api.DXL_PARAM_TORQUE_ENABLE, 1),
     ]
 
 

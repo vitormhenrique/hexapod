@@ -84,6 +84,33 @@ def test_connect_page_prefers_openrb_cu_port(qtbot, monkeypatch) -> None:
     assert page.port_combo.currentData() == "/dev/cu.usbmodem101"
 
 
+def test_connect_page_prefers_teensy_over_macos_system_ports(qtbot, monkeypatch) -> None:
+    from transport import PortInfo
+    from ui.pages import ConnectPage
+
+    service = _service()
+    ports = [
+        PortInfo("/dev/cu.debug-console", "n/a", "n/a"),
+        PortInfo("/dev/cu.Bluetooth-Incoming-Port", "n/a", "n/a"),
+        PortInfo(
+            "/dev/cu.usbmodem106NTHM095052",
+            "LG Monitor Controls",
+            "USB VID:PID=043E:9A39",
+        ),
+        PortInfo(
+            "/dev/cu.usbmodem200296301",
+            "USB Serial",
+            "USB VID:PID=16C0:0483 SER=20029630",
+        ),
+    ]
+    monkeypatch.setattr(service, "available_ports", lambda: ports)
+
+    page = ConnectPage(service)
+    qtbot.addWidget(page)
+
+    assert page.port_combo.currentData() == "/dev/cu.usbmodem200296301"
+
+
 def test_overview_page_reflects_status_and_control_state(qtbot) -> None:
     from ui.pages import OverviewPage
 

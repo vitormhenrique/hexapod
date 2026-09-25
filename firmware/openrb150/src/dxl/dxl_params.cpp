@@ -28,6 +28,7 @@ bool legacyDescriptor(LogicalParam p, ParamDescriptor& d) {
     case LogicalParam::PidD:             d = {26, 1, kRam, false, true}; return true;
     case LogicalParam::PidI:             d = {27, 1, kRam, false, true}; return true;
     case LogicalParam::PidP:             d = {28, 1, kRam, false, true}; return true;
+    case LogicalParam::GoalPosition:     d = {30, 2, kRam, false, true}; return true;
     case LogicalParam::MovingSpeed:      d = {32, 2, kRam, false, true}; return true;
     case LogicalParam::TorqueLimit:      d = {34, 2, kRam, false, true}; return true;
     case LogicalParam::GoalAcceleration: d = {73, 1, kRam, false, true}; return true;
@@ -58,6 +59,7 @@ bool v2Descriptor(LogicalParam p, ParamDescriptor& d) {
     case LogicalParam::BusWatchdog:      d = {98, 1, kRam, false, true}; return true;
     case LogicalParam::ProfileAcceleration: d = {108, 4, kRam, false, true}; return true;
     case LogicalParam::ProfileVelocity:  d = {112, 4, kRam, false, true}; return true;
+    case LogicalParam::GoalPosition:     d = {116, 4, kRam, false, true}; return true;
     default:
       return false;  // no V2 equivalent (e.g. CW/CCW angle limit, MaxTorque)
   }

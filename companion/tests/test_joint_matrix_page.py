@@ -7,10 +7,10 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
+from hexapod_protocol import telemetry as tlm
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QAbstractItemView
 
-from hexapod_protocol import telemetry as tlm
 from theme import DRACULA
 
 pytest.importorskip("PySide6")
@@ -70,6 +70,51 @@ def test_tick_mode_enables_servo_then_sends_calibrated_relative_angle(
     cell.value.setText("2048")
     cell.apply.click()
     assert sent == [(1, 0, 0, 0)]
+
+
+def test_typing_waits_for_explicit_multi_servo_apply(qtbot, monkeypatch) -> None:
+    service, page = _make_ready_page(qtbot)
+    submitted = []
+    single_targets = []
+    monkeypatch.setattr(
+        service,
+        "set_all_joint_targets_with_torque",
+        lambda angles: submitted.append(list(angles)),
+    )
+    monkeypatch.setattr(
+        service,
+        "set_joint_target_with_torque",
+        lambda *target: single_targets.append(target),
+    )
+
+    _type(page._cells[(0, 0)], "190")
+    _type(page._cells[(2, 1)], "160")
+
+    assert submitted == []
+    assert single_targets == []
+    assert page.apply_staged_btn.text() == "Apply staged (2)"
+    assert page.apply_staged_btn.isEnabled()
+
+    page.apply_staged_btn.click()
+
+    assert len(submitted) == 1
+    assert len(submitted[0]) == 18
+    assert submitted[0][0] == 1000
+    assert submitted[0][2 * 3 + 1] == -2000
+    assert page.apply_staged_btn.text() == "Apply staged (0)"
+
+
+def test_all_servo_torque_requires_explicit_button_click(qtbot, monkeypatch) -> None:
+    service, page = _make_ready_page(qtbot)
+    torque = []
+    monkeypatch.setattr(service, "dxl_torque", lambda enabled: torque.append(enabled))
+
+    _type(page._cells[(0, 0)], "195")
+    assert torque == []
+
+    page.enable_torque_btn.click()
+    page.disable_torque_btn.click()
+    assert torque == [True, False]
 
 
 def test_release_targets_only_the_mapped_servo(qtbot, monkeypatch) -> None:
