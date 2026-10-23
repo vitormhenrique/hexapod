@@ -98,6 +98,14 @@ class ControlApi {
   // One-shot: returns true at most once per received heartbeat, then clears.
   bool consumeJetsonHeartbeat();
 
+  // --- Host software reset (SYSTEM_REBOOT) ----------------------------------
+  // Latched by the API dispatcher once the safety policy accepted a reboot.
+  // The task that owns the API consumes it AFTER the response frame has been
+  // written, cuts DYNAMIXEL power and performs the MCU reset.
+  void requestReboot() { reboot_ = true; }
+  bool consumeRebootRequest();
+  bool rebootRequested() const { return reboot_; }
+
   // --- Command handling ----------------------------------------------------
   // Handle one control command. Returns true if `msg_id` is in the control
   // group (response written to out/out_len/out_flags), false otherwise.
@@ -113,6 +121,7 @@ class ControlApi {
   bool disarm_ = false;
   bool clear_fault_ = false;
   bool jetson_hb_ = false;
+  bool reboot_ = false;
   uint8_t live_state_ = 0;
   uint8_t live_fault_ = 0;
 };

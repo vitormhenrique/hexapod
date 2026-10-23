@@ -21,6 +21,14 @@ MSG_GET_CAPABILITIES = 0x04
 # the generic HEARTBEAT so a Mac/CLI heartbeat never refreshes Jetson authority.
 # Reply mirrors HEARTBEAT (uptime_ms, state).
 MSG_JETSON_HEARTBEAT = 0x05
+# SYSTEM_REBOOT (mirrors api::msg::kSystemReboot): software reset for fault
+# recovery. Payload: optional flags byte (REBOOT_FLAG_FORCE). Reply:
+# [result, state]; result is REBOOT_OK / REBOOT_REJECTED / REBOOT_UNAVAILABLE.
+MSG_SYSTEM_REBOOT = 0x06
+REBOOT_FLAG_FORCE = 0x01
+REBOOT_OK = 0
+REBOOT_REJECTED = 1
+REBOOT_UNAVAILABLE = 2
 
 # Telemetry / logging command group (mirrors src/protocol/telemetry.h).
 MSG_SUBSCRIBE = 0x10
@@ -435,6 +443,40 @@ def build_jetson_heartbeat(seq: int = 0) -> bytes:
     state byte reveals whether the Jetson holds authority (JetsonAssisted).
     """
     return build_command(MSG_JETSON_HEARTBEAT, seq=seq)
+
+
+def build_system_reboot(force: bool = False, seq: int = 0) -> bytes:
+    """Build a SYSTEM_REBOOT command.
+
+    The firmware acknowledges first, then cuts DYNAMIXEL power and performs a
+    core reset, so the host must expect the link to drop right after the
+    reply. Without ``force`` the request is only honoured while the safety
+    machine is in a torque-off state (Boot/ConfigLoad/Disarmed/Passive/
+    Fault*/Estop); ``force=True`` also reboots a standing robot.
+    """
+    payload = bytes([REBOOT_FLAG_FORCE]) if force else b""
+    return build_command(MSG_SYSTEM_REBOOT, seq=seq, payload=payload)
+
+
+@dataclass
+class RebootResult:
+    result: int
+    state: int
+
+    @property
+    def ok(self) -> bool:
+        return self.result == REBOOT_OK
+
+    @property
+    def rejected(self) -> bool:
+        return self.result == REBOOT_REJECTED
+
+
+def parse_reboot_result(payload: bytes) -> RebootResult:
+    """Decode a SYSTEM_REBOOT reply ([result, state])."""
+    if len(payload) >= 2:
+        return RebootResult(payload[0], payload[1])
+    return RebootResult(payload[0] if payload else REBOOT_UNAVAILABLE, 0)
 
 
 def build_get_status(seq: int = 0) -> bytes:

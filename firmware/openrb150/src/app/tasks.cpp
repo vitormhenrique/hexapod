@@ -3485,6 +3485,15 @@ void apiTask(void*) {
         }
       }
 
+      // SYSTEM_REBOOT accepted by the dispatcher: the ack is already queued,
+      // so give USB CDC a moment to drain it, then cut servo power and reset.
+      // apiTask owns the host link, so blocking here cannot stall control.
+      if (g_controlApi.consumeRebootRequest()) {
+        Serial.flush();
+        vTaskDelay(pdMS_TO_TICKS(150));
+        board::systemReset();
+      }
+
       // If a CONTROLLER_SET_BINDINGS just validated a new map, stage it for
       // rcTask to adopt (it owns the bridge). Drop if a previous stage is still
       // pending to keep the single-slot hand-off lock-free.

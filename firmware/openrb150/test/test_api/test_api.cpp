@@ -15,6 +15,7 @@
 
 #include "hil/observer_api.h"
 #include "protocol/api.h"
+#include "protocol/control_api.h"
 #include "protocol/frame_reader.h"
 #include "protocol/framing.h"
 
@@ -377,6 +378,69 @@ void test_api_reports_decode_status() {
   TEST_ASSERT_EQUAL(DecodeStatus::Ok, dst);
 }
 
+void test_api_system_reboot_policy() {
+  // SYSTEM_REBOOT acks before the reset and only latches the request on the
+  // ControlApi when the safety state has torque off (or the force flag is set).
+  auto run = [](uint8_t state, bool force, bool with_ctrl,
+                ControlApi* ctrl, uint8_t* resp_payload, size_t* resp_len) {
+    Header h;
+    h.msg_type = static_cast<uint8_t>(MsgType::Command);
+    h.msg_id = api::msg::kSystemReboot;
+    h.seq = 77;
+    const uint8_t flags = force ? api::rebootflag::kForce : 0;
+    h.payload_len = force ? 1 : 0;
+    uint8_t req[kMaxWireFrame];
+    const size_t req_n = encodeFrame(h, force ? &flags : nullptr, req,
+                                     sizeof(req));
+    uint8_t resp[kMaxWireFrame];
+    const api::DeviceInfo info = makeInfo();
+    api::StatusSnapshot st = makeStatus();
+    st.state = state;
+    const size_t resp_n = api::handleRequest(
+        req + 1, req_n - 2, info, st, resp, sizeof(resp), nullptr, nullptr,
+        with_ctrl ? ctrl : nullptr);
+    TEST_ASSERT_TRUE(resp_n > 0);
+    Header rh;
+    TEST_ASSERT_EQUAL(DecodeStatus::Ok,
+                      decodeFrameBody(resp + 1, resp_n - 2, &rh, resp_payload,
+                                      kMaxPayload, resp_len));
+    TEST_ASSERT_EQUAL(static_cast<uint8_t>(MsgType::Response), rh.msg_type);
+    TEST_ASSERT_EQUAL_UINT16(77, rh.seq);
+    TEST_ASSERT_EQUAL_UINT(2, *resp_len);
+    TEST_ASSERT_EQUAL_HEX8(state, resp_payload[1]);
+  };
+
+  ControlApi ctrl;
+  uint8_t p[kMaxPayload];
+  size_t len = 0;
+
+  // Disarmed / Estop / FaultHard / PassivePoseStream / Boot: accepted + latched.
+  const uint8_t torque_off_states[] = {2, 12, 11, 9, 0};
+  for (uint8_t state : torque_off_states) {
+    ctrl.reset();
+    run(state, false, true, &ctrl, p, &len);
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(api::RebootResult::Ok), p[0]);
+    TEST_ASSERT_TRUE(ctrl.consumeRebootRequest());
+    TEST_ASSERT_FALSE(ctrl.consumeRebootRequest());  // one-shot
+  }
+  // Motion-capable states need the force flag.
+  const uint8_t motion_states[] = {4, 5, 8};
+  for (uint8_t state : motion_states) {
+    ctrl.reset();
+    run(state, false, true, &ctrl, p, &len);
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(api::RebootResult::Rejected),
+                           p[0]);
+    TEST_ASSERT_FALSE(ctrl.rebootRequested());
+    run(state, true, true, &ctrl, p, &len);
+    TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(api::RebootResult::Ok), p[0]);
+    TEST_ASSERT_TRUE(ctrl.consumeRebootRequest());
+  }
+  // No intent sink wired: reported, never silently dropped.
+  run(2, false, false, nullptr, p, &len);
+  TEST_ASSERT_EQUAL_HEX8(static_cast<uint8_t>(api::RebootResult::Unavailable),
+                         p[0]);
+}
+
 void test_api_routes_hil_observer_commands() {
   hil::ObserverApi observer(true);
   hil::OutputGuardStatus guard;
@@ -466,6 +530,7 @@ int main(int, char**) {
   RUN_TEST(test_frame_reader_roundtrip_handle);
   RUN_TEST(test_frame_reader_counts_frames_and_overflow);
   RUN_TEST(test_api_reports_decode_status);
+  RUN_TEST(test_api_system_reboot_policy);
   RUN_TEST(test_api_routes_hil_observer_commands);
   return UNITY_END();
 }

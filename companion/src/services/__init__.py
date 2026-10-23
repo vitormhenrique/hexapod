@@ -452,6 +452,41 @@ class ConnectionService(QObject):
     def clear_fault(self) -> None:
         self._run_control("clear_fault", lambda c: c.clear_fault())
 
+    def reboot_mcu(self, force: bool = False) -> None:
+        """Software-reset the robot MCU (recover a latched fault without a
+        power cycle). The firmware acks and then resets ~150 ms later, so on
+        success the link is closed here; the operator reconnects once the USB
+        port re-enumerates.
+        """
+        client = self._client
+        if client is None:
+            self.error.emit("reboot: not connected")
+            return
+        self.event.emit(
+            "reboot", "operator requested MCU reboot" + (" (forced)" if force else "")
+        )
+
+        def worker() -> None:
+            res = client.system_reboot(force=force)
+            if res is None:
+                self.error.emit("reboot: no response from firmware")
+                return
+            if res.ok:
+                self.event.emit("reboot", f"accepted in state {res.state}; link closing")
+                # Give the firmware its flush window, then drop the dead link on
+                # the UI thread (disconnect touches Qt signals + lease state).
+                time.sleep(0.4)
+                QTimer.singleShot(0, self.disconnect)
+            elif res.rejected:
+                self.error.emit(
+                    "reboot rejected: robot may have torque on (state "
+                    f"{res.state}). Disarm/E-stop first or use Force reboot."
+                )
+            else:
+                self.error.emit(f"reboot unavailable (result {res.result})")
+
+        threading.Thread(target=worker, name="hexapod-reboot", daemon=True).start()
+
     def set_arming(self, arm: bool) -> None:
         self._run_control("arm" if arm else "disarm", lambda c: c.set_arming(arm))
 

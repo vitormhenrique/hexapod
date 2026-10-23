@@ -7,8 +7,15 @@ void ControlApi::reset() {
   disarm_ = false;
   clear_fault_ = false;
   jetson_hb_ = false;
+  reboot_ = false;
   live_state_ = 0;
   live_fault_ = 0;
+}
+
+bool ControlApi::consumeRebootRequest() {
+  const bool pending = reboot_;
+  reboot_ = false;
+  return pending;
 }
 
 bool ControlApi::consumeClearFault() {

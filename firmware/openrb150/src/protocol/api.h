@@ -156,7 +156,27 @@ constexpr uint8_t kGetCapabilities = 0x04;
 // Distinct from the generic kHeartbeat so a Mac/CLI heartbeat never refreshes
 // Jetson authority. Response mirrors kHeartbeat: uptime_ms(4), state(1).
 constexpr uint8_t kJetsonHeartbeat = 0x05;
+// SYSTEM_REBOOT: ask the MCU to perform a software reset so an operator can
+// recover from a latched fault / E-stop without cycling power. Request is one
+// optional byte of flags (rebootflag::kForce). Without force the request is
+// only honoured while the safety machine is in a torque-off state (Boot,
+// ConfigLoad, Disarmed, PassivePoseStream, FaultSoft, FaultHard, Estop);
+// otherwise it is Rejected so a reboot can never drop a standing robot by
+// accident. Response: [result (RebootResult), state]. The response is sent
+// BEFORE the reset; the task owning the API then cuts DYNAMIXEL power and
+// resets after a short flush delay.
+constexpr uint8_t kSystemReboot = 0x06;
 }  // namespace msg
+
+namespace rebootflag {
+constexpr uint8_t kForce = 0x01;  // reboot even while motion is authorised
+}  // namespace rebootflag
+
+enum class RebootResult : uint8_t {
+  Ok = 0,         // reset scheduled
+  Rejected = 1,   // motion-capable state and no force flag
+  Unavailable = 2,  // no control intent sink wired (cannot schedule)
+};
 
 // Header flag bits.
 namespace flag {

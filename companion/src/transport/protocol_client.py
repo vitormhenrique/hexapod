@@ -359,6 +359,16 @@ class ProtocolClient:
         r = self.request(api.MSG_GET_STATUS)
         return api.parse_status(r.payload) if r else None
 
+    def system_reboot(self, force: bool = False) -> Optional[api.RebootResult]:
+        """Ask the MCU to software-reset (fault recovery without a power cycle).
+
+        On ``ok`` the firmware resets ~150 ms after replying; the serial port
+        will disappear and re-enumerate, so callers should disconnect and
+        reconnect afterwards.
+        """
+        r = self._send_built(api.build_system_reboot(force))
+        return api.parse_reboot_result(r.payload) if r else None
+
     def get_capabilities(self) -> Optional[api.Capabilities]:
         r = self.request(api.MSG_GET_CAPABILITIES)
         return api.parse_capabilities(r.payload) if r else None

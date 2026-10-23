@@ -66,6 +66,7 @@ The following existing APIs are reused rather than duplicated:
 | --- | --- |
 | `HELLO`, `GET_CAPABILITIES`, `GET_STATUS` | Discover the protocol version, build identity, current safety state, and ordinary hardware status. |
 | `ESTOP`, `CLEAR_FAULT`, `SET_ARMING`, `SET_MODE` | Existing safety intent only. HIL adds no alternate state transition. |
+| `SYSTEM_REBOOT` (`0x06`) | Fault-recovery software reset. Acknowledged with `[result, state]` and then the MCU cuts DYNAMIXEL power and resets; only accepted from a torque-off safety state unless the force flag (bit 0) is set. Never grants authority; every session, lock and subscription is lost with the reset. |
 | `ENTER_MAINTENANCE`, `EXIT_MAINTENANCE`, `MAINT_HEARTBEAT` | Existing low-authority maintenance lock. It is required to open the first HIL observer session and remains independent afterwards. |
 | `SET_GAIT`, `SET_GAIT_PARAMS`, `SET_BODY_TWIST`, `SET_BODY_POSE`, `STOP_MOTION` | Bounded high-level stimulus. These commands never grant authority by themselves. |
 | `SET_CONTROL_MODE(GaitPipeline)` | Existing maintenance-safe way to exercise the normal gait/IK pipeline without accepting raw servo ticks. |

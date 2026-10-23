@@ -198,6 +198,27 @@ void setDxlPower(bool on) {
 
 bool dxlPowerEnabled() { return g_dxlPowerOn; }
 
+[[noreturn]] void systemReset() {
+  noInterrupts();
+  if (pins::kHasDxlPowerControl) {
+    // Direct write: a reset must never leave the 12 V rail on behind a dead
+    // controller, whatever the guard / latch state was.
+    pinMode(pins::kDxlPowerEnable, OUTPUT);
+    digitalWrite(pins::kDxlPowerEnable, LOW);
+  }
+#if defined(ARDUINO_ARCH_SAMD)
+  __DSB();
+  SCB->AIRCR = (0x5FAul << SCB_AIRCR_VECTKEY_Pos) | SCB_AIRCR_SYSRESETREQ_Msk;
+  __DSB();
+#elif defined(__IMXRT1062__)
+  asm volatile("dsb");
+  SCB_AIRCR = 0x05FA0004;  // VECTKEY | SYSRESETREQ
+  asm volatile("dsb");
+#endif
+  for (;;) {
+  }
+}
+
 uint32_t dxlPowerTransitions() { return g_dxlPowerTransitions; }
 
 bool readBatteryRaw(uint16_t& raw) {

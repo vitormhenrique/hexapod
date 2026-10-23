@@ -106,6 +106,51 @@ def ports() -> None:
 
 
 @app.command()
+def reboot(
+    port: Optional[str] = typer.Option(None, "--port", "-p"),
+    baud: int = typer.Option(115200, "--baud"),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Reboot even while the robot is armed / standing (drops all torque).",
+    ),
+) -> None:
+    """Software-reset the robot MCU to recover from a fault without a power cycle."""
+    client = _connect(port, baud)
+    try:
+        _retry_request(client, "HELLO", client.hello)
+        st = _retry_request(client, "STATUS", client.get_status)
+        state_name = tlm.SAFETY_STATE_NAMES.get(st.state, st.state)
+        if force:
+            typer.secho(
+                f"Forcing reboot from state {state_name}: every servo will lose "
+                "torque.",
+                fg=typer.colors.YELLOW,
+            )
+        res = client.system_reboot(force=force)
+        if res is None:
+            _err("SYSTEM_REBOOT: no response from firmware")
+            raise typer.Exit(code=1)
+        if res.ok:
+            typer.secho(
+                f"Reboot accepted (state {state_name}); the MCU resets now and the "
+                "port will re-enumerate.",
+                fg=typer.colors.GREEN,
+            )
+        elif res.rejected:
+            _err(
+                f"Rejected: state {state_name} may have torque on. Disarm/E-stop "
+                "first, or pass --force to drop torque and reboot anyway."
+            )
+            raise typer.Exit(code=1)
+        else:
+            _err(f"SYSTEM_REBOOT unavailable (result {res.result})")
+            raise typer.Exit(code=1)
+    finally:
+        client.stop()
+
+
+@app.command()
 def status(
     port: Optional[str] = typer.Option(None, "--port", "-p"),
     baud: int = typer.Option(115200, "--baud"),

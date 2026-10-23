@@ -102,6 +102,15 @@ If an E-stop or fault occurs, remove the cause before requesting recovery. Do
 not treat `CLEAR_FAULT` as a way to override an active hardware or RC safety
 condition.
 
+If the controller is wedged in a fault/E-stop state that `CLEAR_FAULT` cannot
+release, use **Reboot MCU** on the Safety page (or `hexapod-cli reboot`)
+instead of pulling the battery. The firmware acknowledges, cuts DYNAMIXEL
+power, and performs a core reset, so the USB port disappears and re-enumerates
+and you reconnect afterwards. The request is only honoured while torque is off
+(disarmed, E-stop, fault, passive pose); from a standing state the app asks for
+a second confirmation and sends the force flag, which drops all torque
+immediately — support the robot first.
+
 ## Complete RC Control Map
 
 The custom ESP32-S3 controller sends these defaults. Feature switch states are

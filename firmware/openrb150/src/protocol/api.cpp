@@ -126,6 +126,28 @@ size_t handleRequest(const uint8_t* body, size_t body_len,
       payload_len = 5;
       break;
     }
+    case msg::kSystemReboot: {
+      // Software reset for fault recovery. Safety states 3..8 (ArmingChecks
+      // through MacMaintenance) may have torque on a standing robot; a reset
+      // there drops every servo, so it needs the explicit force flag.
+      const uint8_t flags_req = req_len >= 1 ? req_payload[0] : 0;
+      const bool torque_off_state =
+          status.state <= 2 || status.state >= 9;
+      RebootResult result = RebootResult::Unavailable;
+      if (ctrl == nullptr) {
+        result = RebootResult::Unavailable;
+      } else if (!torque_off_state &&
+                 (flags_req & rebootflag::kForce) == 0) {
+        result = RebootResult::Rejected;
+      } else {
+        ctrl->requestReboot();
+        result = RebootResult::Ok;
+      }
+      payload[0] = static_cast<uint8_t>(result);
+      payload[1] = status.state;
+      payload_len = 2;
+      break;
+    }
     case msg::kGetStatus: {
       putU32(&payload[0], status.uptime_ms);
       payload[4] = status.state;

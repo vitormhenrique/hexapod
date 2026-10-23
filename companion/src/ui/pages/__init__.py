@@ -456,6 +456,18 @@ class ModeSafetyPage(BasePage):
         for c in range(3):
             grid.setColumnStretch(c, 1)
 
+        reboot = QPushButton("Reboot MCU")
+        reboot.setToolTip(
+            "Software-reset the robot controller to recover from a latched "
+            "fault / E-stop without cycling power. Only accepted while torque "
+            "is off (disarmed, E-stop, fault, passive); the link closes and the "
+            "USB port re-enumerates."
+        )
+        reboot.clicked.connect(self._on_reboot_clicked)
+        reboot.setCursor(Qt.PointingHandCursor)
+        self.reboot_btn = reboot
+        grid.addWidget(reboot, 1, 0, 1, 3)
+
         self.action_lbl = QLabel("No command sent yet.")
         self.action_lbl.setStyleSheet(f"color: {DRACULA.comment};")
         self.action_lbl.setWordWrap(True)
@@ -529,6 +541,30 @@ class ModeSafetyPage(BasePage):
         )
         if reply == QMessageBox.Yes:
             action()
+
+    def _on_reboot_clicked(self) -> None:
+        # Torque-off states (firmware policy): Boot, ConfigLoad, Disarmed,
+        # PassivePoseStream, FaultSoft, FaultHard, Estop. Anything else may be
+        # standing on live servos, so make the drop-torque consequence explicit
+        # and send the force flag only after that second confirmation.
+        torque_off = self._state in (-1, 0, 1, 2, 9, 10, 11, 12)
+        state = tlm.SAFETY_STATE_NAMES.get(self._state, str(self._state))
+        if torque_off:
+            self._confirm(
+                "Reboot MCU",
+                f"Software-reset the robot controller (state {state})?\n\n"
+                "DYNAMIXEL power is cut, the MCU restarts as if power-cycled and "
+                "this link closes; reconnect once the USB port is back.",
+                lambda: self.service.reboot_mcu(force=False),
+            )
+        else:
+            self._confirm(
+                "Force reboot MCU",
+                f"The robot is in state {state} and may be standing on live "
+                "servos. A forced reboot drops ALL torque immediately.\n\n"
+                "Support the robot, then confirm to reboot anyway.",
+                lambda: self.service.reboot_mcu(force=True),
+            )
 
     def _on_feature_toggle(self, feature: int, enable: bool) -> None:
         if enable and feature == api.FEATURE_JETSON_CONTROL:
@@ -641,6 +677,13 @@ class ModeSafetyPage(BasePage):
             ),
             "No latched fault/E-stop to clear.",
         )
+        # The gate only clears the tooltip when enabled; keep the explanatory
+        # tooltip for the reboot button since it is always offered while linked.
+        self.reboot_btn.setEnabled(con and not self._simulation_mode)
+        if not con:
+            self.reboot_btn.setToolTip("Connect to the robot first.")
+        elif self._simulation_mode:
+            self.reboot_btn.setToolTip("Unavailable in the ROS simulated firmware.")
         gate(
             self.enter_maint_btn,
             not self._simulation_mode

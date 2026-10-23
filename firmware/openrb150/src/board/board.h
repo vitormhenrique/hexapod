@@ -91,6 +91,13 @@ bool dxlPowerEnabled();
 // increment it; useful for separating firmware rail cuts from bus brownouts.
 uint32_t dxlPowerTransitions();
 
+// --- Software reset ----------------------------------------------------------
+// Cut DYNAMIXEL power (direct pin write, independent of the HIL guard state)
+// and request a core reset (SCB AIRCR SYSRESETREQ) so the MCU boots as if
+// power-cycled. Never returns. Callers must have flushed any host response
+// they want delivered first.
+[[noreturn]] void systemReset();
+
 // --- Battery monitor --------------------------------------------------------
 // Read the battery sense pin with bounded ADC register waits. Returns false if
 // the ADC cannot synchronize or complete a conversion; callers must treat that
