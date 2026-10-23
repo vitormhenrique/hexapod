@@ -36,14 +36,16 @@ rotation-vector report and converts its Q14 quaternion to Euler telemetry.
 Missing or stale IMU data clears the corresponding status flags and suppresses
 attitude frames; it never blocks or disables walking.
 
-## Hexapod Status V2
+## Hexapod Status V3
 
-All multi-byte fields are big-endian. The payload is exactly 28 bytes.
+All multi-byte fields are big-endian. The payload is exactly 33 bytes. V3 is
+V2 plus five trailing bytes (offsets 28-32) that close the loop on the
+handset's **parameter uplink** (see `docs/controller_bridge.md` §3c).
 
 | Offset | Size | Field |
 | ---: | ---: | --- |
 | 0 | 2 | Magic `HX` (`0x48 0x58`) |
-| 2 | 1 | Version (`2`) |
+| 2 | 1 | Version (`3`) |
 | 3 | 1 | Flags: armed, motion gate, kill, failsafe, IMU present/fresh, fault, battery valid |
 | 4 | 1 | Safety state (`safety::State`) |
 | 5 | 1 | Command source (`safety::CommandSource`) |
@@ -63,6 +65,15 @@ All multi-byte fields are big-endian. The payload is exactly 28 bytes.
 | 23 | 1 | Error sequence, bumped per announced incident, 0 = never announced |
 | 24 | 2 | Occurrences in the current incident (saturating) |
 | 26 | 2 | Duplicate occurrences the journal suppressed (saturating) |
+| 28 | 2 | CRC-16/CCITT-FALSE of the live gait shape (`gait/gait_shape.h`: ids 1..7 as little-endian `uint16`, in id order) |
+| 30 | 1 | Last confirmed uplink parameter id (0 = none received since boot) |
+| 31 | 2 | Last confirmed uplink parameter value |
+
+The handset computes the same CRC over its own table and shows `SYNCED` when
+the two match; while they differ it keeps round-robining its values on the
+uplink. The default table (60 / 30 / 20 / 127 / 60 / 120 / 50) has CRC
+`0x1319`, pinned by `test_gait_engine` on the robot and
+`simulator/test_hexapod_gait_params.cpp` on the handset.
 
 Tune flag byte at offset 20:
 
@@ -100,7 +111,7 @@ latest code, severity, and count live. Draining is highest-severity-first, and
 a full table never evicts an unsent, at-least-as-severe entry, so a chatty
 warning cannot hide a critical fault.
 
-The controller accepts only exact-length, magic-matching version 2 payloads.
+The controller accepts only exact-length, magic-matching version 3 payloads.
 It keeps the last decoded values normally colored for two seconds, then retains
 them in orange with a stale indicator until a new valid frame arrives. Any
 incompatible layout change requires a new version and compatibility coverage

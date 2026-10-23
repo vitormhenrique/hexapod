@@ -13,9 +13,9 @@ constexpr float kTicksPerDeg = 4096.0f / 360.0f;
 constexpr float kStrideMm = 2.0f;
 constexpr float kLiftMm = 5.0f;
 constexpr float kBodyHeightMm = 132.0f;
-// Engine yaw stroke: sized so a full yaw sweeps the stride arc on the
-// largest-radius leg (gait_engine.h kMaxLegRadiusMm).
-constexpr float kMaxLegRadiusMm = 257.3f;
+// Engine yaw stroke: an explicit shape parameter (gait_shape.h
+// kTuneLimits[YawStrokeDeg].def), body yaw swept per cycle at full stick.
+constexpr float kYawStrokeDeg = 20.0f;
 constexpr float kStepPeriodMs = 80.0f;  // neutral speed_x255 = 128 cadence
 // Measured CAD leg model (dimensions.md).
 constexpr float kCoxaMm = 52.00f;
@@ -25,9 +25,16 @@ constexpr float kHomeRadiusMm = 126.75f;
 constexpr float kHomeLocalZMm = -131.73f;
 constexpr float kCoxaFrameZMm = 0.0f;
 
+// Home feet = coxa mount + kHomeRadiusMm along the home azimuth (exact, not
+// the 0.1 mm rounded documentation values).
+constexpr float kHomeRadial45 = kHomeRadiusMm * 0.70710678f;
 constexpr float kHome[config::kNumLegs][2] = {
-  {-155.2f, -205.2f}, {155.2f, -205.2f}, {196.5f, 0.0f},
-  {155.2f, 205.2f},   {-155.2f, 205.2f}, {-196.5f, 0.0f},
+  {-65.6f - kHomeRadial45, -115.6f - kHomeRadial45},
+  {65.6f + kHomeRadial45, -115.6f - kHomeRadial45},
+  {69.8f + kHomeRadiusMm, 0.0f},
+  {65.6f + kHomeRadial45, 115.6f + kHomeRadial45},
+  {-65.6f - kHomeRadial45, 115.6f + kHomeRadial45},
+  {-69.8f - kHomeRadiusMm, 0.0f},
 };
 
 constexpr float kMount[config::kNumLegs][3] = {
@@ -117,8 +124,7 @@ void referenceFoot(const ReferenceGait& gait, const ReferenceCommand& command,
       (next_longitudinal - current_longitudinal) * interpolation;
   const float lift =
       current_lift + (next_lift - current_lift) * interpolation;
-  const float yaw_travel =
-      2.0f * asinf(kStrideMm / (2.0f * kMaxLegRadiusMm));
+  const float yaw_travel = kYawStrokeDeg * kDegToRad;
   const float yaw = command.yaw * yaw_travel * longitudinal;
   const float cosine = cosf(yaw);
   const float sine = sinf(yaw);

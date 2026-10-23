@@ -44,6 +44,7 @@
 #include <stdint.h>
 
 #include "../config/config_schema.h"
+#include "../gait/gait_shape.h"
 #include "ChannelPack.h"  // vendored: single source of truth for the channel map
 #include "rc_input_conditioner.h"
 
@@ -269,6 +270,10 @@ constexpr uint32_t kArmReleaseDebounceMs = 150;
 // profile is locked. Prefer stable detection over a first-frame lock so a
 // glitchy startup frame cannot pick the wrong profile.
 constexpr uint8_t kProfileDetectFrames = 3;
+// A parameter-uplink (id, value) pair is applied only after it has been seen
+// unchanged in this many consecutive frames, so a torn or glitched channel
+// update can never land a wrong number in the gait.
+constexpr uint8_t kParamUplinkConfirmFrames = 2;
 
 // One decoded command the control layer consumes each cycle. All motion fields
 // are already clamped to the safe envelope.
@@ -313,6 +318,16 @@ struct ControllerCommand {
   // sequence it persisted, so a press can never be lost to a task boundary and
   // never applied twice.
   uint32_t gait_tune_save_seq = 0;
+  // Live gait shape in native units (gait/gait_shape.h). Compiled defaults
+  // until the handset parameter uplink (CH12..CH14) provides a value; stride
+  // and step height mirror the fractions above so one record carries the
+  // whole set the downlink CRC is computed over.
+  gait::GaitShape shape;
+  // Parameter-uplink bookkeeping for the downlink echo: the last confirmed
+  // (id, value) pair.
+  bool uplink_seen = false;
+  uint8_t uplink_last_id = 0;
+  uint16_t uplink_last_value = 0;
   // Bumped once per BTN_4 press. i2cTask compares the sequence to toggle
   // capture without losing an edge across task-rate boundaries.
   uint32_t capture_toggle_seq = 0;
@@ -428,6 +443,13 @@ class ControllerBridge {
   void updateGaitTune(uint32_t now_ms);
   void updatePoseTrim(uint32_t now_ms);
 
+  // Parameter uplink (custom ChannelPack profile only): confirm the (id,
+  // value) pair on CH12..CH14 across consecutive frames, then route it into
+  // the gait-tune fractions / GaitShape / save sequence.
+  void updateParamUplink(const uint16_t ch[CPACK_NUM_CHANNELS],
+                         uint32_t now_ms);
+  void applyParamUplink(uint8_t id, uint16_t value, uint32_t now_ms);
+
   void enterFailsafe(uint32_t now_ms);
 
   BindingConfig cfg_;
@@ -466,6 +488,16 @@ class ControllerBridge {
   // GaitTuneParam (step height, stride, duty). Survives mode changes and link
   // drops; only setGaitTuneFractions() or a NAV1 edit changes it.
   float gait_tune_frac_[kNumGaitTuneParams];
+  // True once the handset parameter uplink has supplied that GaitTuneParam;
+  // the handset then owns the number (NAV1 +/- and config re-seeding leave it
+  // alone) and only a new uplink value or reset() changes it.
+  bool gait_tune_uplink_owned_[kNumGaitTuneParams];
+  // Parameter-uplink confirmation window and save-sequence de-duplication.
+  uint8_t uplink_pending_id_ = 0;
+  uint16_t uplink_pending_value_ = 0;
+  uint8_t uplink_pending_frames_ = 0;
+  uint16_t uplink_save_seq_seen_ = 0;
+  bool uplink_save_seq_valid_ = false;
 
   // Edge state. Slots 0..kMaxTrickBindings-1 = trick bindings; the next 5 are
   // trim nudges; the next 6 are the gait-tune editor; the last is BTN_4 capture.

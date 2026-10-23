@@ -1933,6 +1933,9 @@ __attribute__((noinline)) void publishControllerCommand(uint32_t now_ms) {
     tune_flags |= crsf::telemetry::tuneflag::kSavePending;
   }
   radio.tune_flags = tune_flags;
+  radio.gait_shape_crc16 = diag.gait_shape_crc16;
+  radio.uplink_last_id = diag.uplink_last_id;
+  radio.uplink_last_value = diag.uplink_last_value;
 
   safety::ErrorEntry latest;
   bool has_error = false;

@@ -130,13 +130,15 @@ constexpr uint32_t kKnownFeatureBits = kFeatFootContact | kFeatTerrainLeveling |
                                        kFeatPassivePoseStream | kFeatJetsonControl;
 
 // Safe envelope for persisted gait defaults (validateRobotConfig). Mirrors the
-// gait engine's runtime clamps (gait/gait_engine.h: kMaxStrideMm 80, kMaxStepMm
-// 50, foot-Z floor -158 mm) without a layering dependency. A persisted default
-// outside this envelope is a configuration error -- the engine would otherwise
-// silently clamp it -- so it is rejected rather than stored as a "safe" default.
+// gait engine's runtime clamps (gait/gait_engine.h: kMaxStrideMm 140, kMaxStepMm
+// 80, foot-Z floor -158 mm) and the handset tune table (gait/gait_shape.h)
+// without a layering dependency. A persisted default outside this envelope is
+// a configuration error -- the engine would otherwise silently clamp it -- so
+// it is rejected rather than stored as a "safe" default. The pipeline's
+// reach limiter, not this cap, keeps a long stroke inside the leg workspace.
 // Heights follow the measured CAD stance (centered servos stand at 131.73 mm).
-constexpr uint16_t kMaxGaitStrideMm = 80;
-constexpr uint16_t kMaxGaitStepMm = 50;
+constexpr uint16_t kMaxGaitStrideMm = 140;
+constexpr uint16_t kMaxGaitStepMm = 80;
 constexpr uint16_t kMinGaitBodyHeightMm = 40;
 constexpr uint16_t kMaxGaitBodyHeightMm = 160;
 

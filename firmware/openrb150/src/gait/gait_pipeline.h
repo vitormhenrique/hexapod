@@ -111,6 +111,10 @@ class GaitPipeline {
   // Select the active gait (stand/sit/tripod/ripple/wave/crawl).
   void setGait(config::GaitId g);
 
+  // Apply the live shape tunables (yaw stroke, stance radius, cadence
+  // endpoints, half lift). Stride / step height still arrive via setParams.
+  void setShape(const GaitShape& shape);
+
   // Apply gait parameters (body height, stride, step, duty, speed). Mark III
   // APG tables own duty/support timing; duty_x255 remains a wire-compatible
   // input but does not alter those fixed safety patterns.

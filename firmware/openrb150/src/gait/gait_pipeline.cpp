@@ -8,6 +8,7 @@ namespace gait {
 
 GaitPipeline::GaitPipeline(const config::RobotConfig& cfg)
     : cfg_(cfg), body_(cfg), map_(cfg) {
+  engine_.setLegGeometry(cfg_);
   configureFromConfig();
 }
 
@@ -18,10 +19,13 @@ void GaitPipeline::reconfigure() {
   // the (updated) config. The servo map holds a live reference and needs no
   // action. Re-seed the gait engine defaults last.
   body_ = BodyKinematics(cfg_);
+  engine_.setLegGeometry(cfg_);
   configureFromConfig();
 }
 
 void GaitPipeline::setGait(config::GaitId g) { engine_.setGait(g); }
+
+void GaitPipeline::setShape(const GaitShape& shape) { engine_.setShape(shape); }
 
 void GaitPipeline::setParams(uint16_t body_height_mm, uint16_t stride_len_mm,
                              uint16_t step_height_mm, uint8_t duty_x255,

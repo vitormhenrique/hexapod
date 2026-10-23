@@ -100,11 +100,18 @@ Key points:
 | `POT1` | `speed` scalar | 0..1 |
 | `POT2` | `body_height` scalar — maps to `65..150 mm` ride height, neutral `132 mm` at centre | 0..1 |
 | `NAV1` (gait-tune mode) | `step_height`, `stride`, `duty` | 0..1 each |
+| Parameter uplink (CH12-CH14) | absolute `stride_mm`, `step_height_mm`, `yaw_stroke_deg`, `stance_radius_mm`, `step_period_fast/slow_ms`, `half_lift_pct` | see §3c |
 
 `ENC1` and `ENC2` are **no longer bound** in `defaultBindings()`: stride and step
 height moved to the NAV1 gait-tune editor, so both encoders are free for future
 use. A host may still bind an axis to `stride` / `step_height` / `duty` through
 `SET_BINDINGS`; when a binding is present it overrides the editor value.
+
+The envelope is `config::kMaxGaitStrideMm = 140` and `kMaxGaitStepMm = 80`
+(raised from 80 / 50 so the robot can take Phoenix-sized steps; the pipeline's
+reach limiter, not these caps, keeps a long stroke inside the leg workspace at
+the current ride height). Lower the body (Pot2) to unlock the longest strokes:
+at the 132 mm neutral height the home foot already sits at 87 % of leg reach.
 
 ### 3b. Gait-tune editor (SW_G + NAV1)
 
@@ -136,6 +143,57 @@ reported on the downlink through the deduplicated error journal.
 
 On boot — and after any config commit — `rcTask` seeds the editor from the
 persisted `GaitDefaults`, so the handset always starts from what is stored.
+Values the handset streams on the parameter uplink (§3c) are exempt: the
+handset owns them, and neither a config revision nor a NAV1 `±` press on the
+robot changes them (the handset applies the nudge to its own copy and
+re-streams it, so a press is never applied twice).
+
+### 3c. Parameter uplink (CH12-CH14) and live gait shape
+
+The custom handset owns the numeric gait tunables and streams them as
+**absolute values**, one `(id, value)` pair per RC frame, round-robin over its
+table (each pair held for 4 frames, a just-edited parameter first). The wire
+format lives in the shared `lib/ChannelPack/ChannelPack.h`:
+
+| Channel | Field |
+| --- | --- |
+| CH12 | parameter id, 0 = idle, 1..63 (`discreteToCrsf(id, 63)`) |
+| CH13 | value low byte (`discreteToCrsf(lo, 255)`) |
+| CH14 | value high byte |
+| CH15 | reserved, centre |
+| CH16 | layout signature `42/63` (~CRSF 1258) |
+
+With the ELRS *16ch Rate/2 Full Res* switch mode CH9-CH16 travel in one OTA
+packet, so id and value are always coherent; every field keeps ≤ 256 levels so
+the 10-bit over-the-air quantisation can never flip a value. The bridge applies
+a pair only after seeing it unchanged in `kParamUplinkConfirmFrames = 2`
+consecutive frames, clamps it to `gait::kTuneLimits`, and ignores unknown ids.
+
+| Id | Parameter | Unit | Range | Default | Effect |
+| ---: | --- | --- | --- | ---: | --- |
+| 1 | `StrideMm` | mm | 0-140 | 60 | horizontal stroke at full stick (also NAV1 `stride`) |
+| 2 | `StepHeightMm` | mm | 0-80 | 30 | swing clearance (also NAV1 `step_height`) |
+| 3 | `YawStrokeDeg` | deg/cycle | 0-45 | 20 | body yaw swept per cycle at full yaw stick (Phoenix Mark III used 32; was derived from stride ≈ 13°) |
+| 4 | `StanceRadiusMm` | mm | 100-165 | 127 | home foot distance from the coxa axis; capped per ride height so the home foot stays inside 98 % of the IK reach margin |
+| 5 | `StepPeriodFastMs` | ms | 30-250 | 60 | Mark III step period at Pot1 max (Phoenix: 35-50) |
+| 6 | `StepPeriodSlowMs` | ms | 30-400 | 120 | step period at Pot1 min (neutral = slow − ⅔·(slow − fast)) |
+| 7 | `HalfLiftPct` | % | 0-100 | 50 | swing mid-keyframe height (Phoenix `HalfLiftHeight`) |
+| 63 | `SaveRequest` | seq | — | — | a new sequence value arms one `GaitDefaults` save, exactly like NAV1 Center |
+
+Ids 3-7 live only in RAM on the robot (compiled defaults when no handset is
+streaming; the handset re-streams its NVS copy within one sweep ≈ 0.6 s of
+connecting). Stride / step height still flow through `GaitDefaults` and the
+existing save path. All positional parameters go through the gait engine's
+0.25 s first-order filter, so a value change can never jump the feet.
+
+The robot echoes `CRC-16` of its live `GaitShape` plus the last confirmed pair
+in Hexapod status **v3** (`docs/crsf_remote_telemetry.md`), which is how the
+handset shows `SYNCED`.
+
+Layout detection (§5b) now keys on the CH16 signature: a frame with the
+signature and CH15 centred is the custom handset even while CH12-CH14 carry
+data; a frame with CH12-CH16 all centred (pre-uplink handset) is still
+accepted; a conventional radio centres CH16 and is classified TX16S direct.
 
 ---
 

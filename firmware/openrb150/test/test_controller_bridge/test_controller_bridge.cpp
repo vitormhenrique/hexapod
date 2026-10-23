@@ -507,6 +507,204 @@ void test_gait_tune_defaults_track_config_until_editor_opens() {
 
 // --- features --------------------------------------------------------------
 
+// --- parameter uplink (CH12..CH14) ------------------------------------------
+
+// Feed one ChannelPack frame carrying an (id, value) uplink pair.
+const ControllerCommand& feedParam(ControllerBridge& b,
+                                   const ChannelPackInputs_t& in, uint8_t id,
+                                   uint16_t value, uint32_t t) {
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  ChannelPack::packParamUplink(ch, id, value);
+  return feedCh(b, ch, t);
+}
+
+// Simulate the 10-bit over-the-air quantisation of the ELRS full-res modes:
+// CRSF 172..1811 -> 0..1023 -> CRSF. Every discrete field must survive it.
+uint16_t otaRoundTrip(uint16_t crsf) {
+  const uint32_t ten = ((uint32_t)(crsf - 172) * 1023u + 819u) / 1639u;
+  return static_cast<uint16_t>((ten * 1639u + 511u) / 1023u + 172u);
+}
+
+void test_param_uplink_round_trips_through_ota_quantisation() {
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPackInputs_t in = makeNeutral();
+  for (uint16_t id = 0; id <= CPACK_PARAM_ID_MAX; ++id) {
+    for (uint32_t value = 0; value <= 0xFFFFu; value += 257u) {
+      ChannelPack::packInputs(&in, ch);
+      ChannelPack::packParamUplink(ch, static_cast<uint8_t>(id),
+                                   static_cast<uint16_t>(value));
+      for (int i = 0; i < CPACK_NUM_CHANNELS; ++i) ch[i] = otaRoundTrip(ch[i]);
+      uint8_t got_id = 0xFF;
+      uint16_t got_value = 0xFFFF;
+      const bool active = ChannelPack::unpackParamUplink(ch, &got_id, &got_value);
+      TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(id), got_id);
+      TEST_ASSERT_EQUAL_UINT16(static_cast<uint16_t>(value), got_value);
+      TEST_ASSERT_EQUAL(id != 0, active);
+      TEST_ASSERT_TRUE(ChannelPack::hasLayoutSignature(ch[CPACK_CH_SIGNATURE]));
+    }
+  }
+  // A centred CH16 (conventional radio / old handset) is never a signature.
+  TEST_ASSERT_FALSE(ChannelPack::hasLayoutSignature(CPACK_CRSF_MID));
+}
+
+void test_param_uplink_applies_after_two_identical_frames() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  feed(b, in, t);
+  const uint16_t default_stride = b.command().shape.get(gait::TuneId::StrideMm);
+  TEST_ASSERT_EQUAL_UINT16(60, default_stride);
+  TEST_ASSERT_FALSE(b.command().uplink_seen);
+
+  // First sighting is only pending.
+  t += 20;
+  feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StrideMm), 100, t);
+  TEST_ASSERT_FALSE(b.command().uplink_seen);
+  TEST_ASSERT_EQUAL_UINT16(60, b.command().shape.get(gait::TuneId::StrideMm));
+
+  // Second identical frame confirms it: fraction, shape and echo all update.
+  t += 20;
+  const ControllerCommand& c =
+      feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StrideMm), 100, t);
+  TEST_ASSERT_TRUE(c.uplink_seen);
+  TEST_ASSERT_EQUAL_UINT8(1, c.uplink_last_id);
+  TEST_ASSERT_EQUAL_UINT16(100, c.uplink_last_value);
+  TEST_ASSERT_EQUAL_UINT16(100, c.shape.get(gait::TuneId::StrideMm));
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 100.0f / config::kMaxGaitStrideMm, c.stride);
+  const uint32_t edits = c.gait_tune_edit_seq;
+
+  // Re-sending the same pair (round-robin) is idempotent (no new edit).
+  t += 20;
+  feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StrideMm), 100, t);
+  TEST_ASSERT_EQUAL_UINT32(edits, b.command().gait_tune_edit_seq);
+
+  // A glitch (one frame with a different value) never lands.
+  t += 20;
+  feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StrideMm), 7, t);
+  t += 20;
+  feedParam(b, in, static_cast<uint8_t>(gait::TuneId::YawStrokeDeg), 30, t);
+  TEST_ASSERT_EQUAL_UINT16(100, b.command().shape.get(gait::TuneId::StrideMm));
+  t += 20;
+  feedParam(b, in, static_cast<uint8_t>(gait::TuneId::YawStrokeDeg), 30, t);
+  TEST_ASSERT_EQUAL_UINT16(30, b.command().shape.get(gait::TuneId::YawStrokeDeg));
+  TEST_ASSERT_EQUAL_UINT32(edits + 1, b.command().gait_tune_edit_seq);
+}
+
+void test_param_uplink_clamps_to_table_and_feeds_shape_crc() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  feed(b, in, t);
+  const uint16_t crc_default = gait::gaitShapeCrc16(b.command().shape);
+  for (int i = 0; i < 2; ++i) {
+    t += 20;
+    feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StanceRadiusMm), 999, t);
+  }
+  TEST_ASSERT_EQUAL_UINT16(gait::kTuneLimits[4].max,
+                           b.command().shape.get(gait::TuneId::StanceRadiusMm));
+  for (int i = 0; i < 2; ++i) {
+    t += 20;
+    feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StepHeightMm), 200, t);
+  }
+  TEST_ASSERT_EQUAL_UINT16(config::kMaxGaitStepMm,
+                           b.command().shape.get(gait::TuneId::StepHeightMm));
+  TEST_ASSERT_EQUAL_FLOAT(1.0f, b.command().step_height);
+  TEST_ASSERT_NOT_EQUAL(crc_default, gait::gaitShapeCrc16(b.command().shape));
+  // Unknown ids are ignored entirely.
+  for (int i = 0; i < 2; ++i) {
+    t += 20;
+    feedParam(b, in, 40, 1, t);
+  }
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(gait::TuneId::StepHeightMm),
+                          b.command().uplink_last_id);
+}
+
+void test_param_uplink_owns_value_against_nav1_and_config_reseed() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  feed(b, in, t);
+  for (int i = 0; i < 2; ++i) {
+    t += 20;
+    feedParam(b, in, static_cast<uint8_t>(gait::TuneId::StepHeightMm), 40, t);
+  }
+  const float owned = 40.0f / config::kMaxGaitStepMm;
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, owned, b.command().step_height);
+
+  // A config revision cannot overwrite the handset's number...
+  b.setGaitTuneFractions(0.1f, 0.1f, 0.1f);
+  t += 20;
+  feed(b, in, t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, owned, b.command().step_height);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.1f, b.command().stride);  // not owned
+
+  // ...and NAV1 +/- on an owned parameter is left to the handset (which edits
+  // its own copy and re-streams it), so the press is not applied twice.
+  in.switches[4] = true;  // editor on, StepHeight selected
+  t += 20;
+  feed(b, in, t);
+  pulse(b, in, in.nav[0][CPACK_NAV_RIGHT], t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, owned, b.command().step_height);
+  // Stride is not uplink-owned, so NAV1 still edits it locally.
+  pulse(b, in, in.nav[0][CPACK_NAV_UP], t);
+  pulse(b, in, in.nav[0][CPACK_NAV_RIGHT], t);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.1f + kGaitTuneStepFrac, b.command().stride);
+}
+
+void test_param_uplink_save_request_bumps_sequence_once_per_new_value() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint32_t t = 100;
+  feed(b, in, t);
+  const uint32_t before = b.command().gait_tune_save_seq;
+  const uint8_t save = static_cast<uint8_t>(gait::TuneId::SaveRequest);
+  // A sequence value arms exactly one save, however often it repeats.
+  for (int i = 0; i < 6; ++i) {
+    t += 20;
+    feedParam(b, in, save, 5, t);
+  }
+  TEST_ASSERT_EQUAL_UINT32(before + 1, b.command().gait_tune_save_seq);
+  for (int i = 0; i < 6; ++i) {
+    t += 20;
+    feedParam(b, in, save, 6, t);
+  }
+  TEST_ASSERT_EQUAL_UINT32(before + 2, b.command().gait_tune_save_seq);
+  for (int i = 0; i < 2; ++i) {
+    t += 20;
+    feedParam(b, in, save, 7, t);
+  }
+  TEST_ASSERT_EQUAL_UINT32(before + 3, b.command().gait_tune_save_seq);
+}
+
+void test_custom_profile_detected_with_signature_and_busy_uplink() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  in.gimbal[1] = 500;
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  ChannelPack::packParamUplink(ch, 3, 25);  // CH12..CH14 far from centre
+  for (int i = 0; i < kProfileDetectFrames; ++i) b.update(ch, true, 100 + i);
+  TEST_ASSERT_TRUE(b.profileLocked());
+  TEST_ASSERT_EQUAL(static_cast<int>(InputProfile::CustomControllerChannelPack),
+                    static_cast<int>(b.detectedProfile()));
+  TEST_ASSERT_TRUE(b.command().valid);
+}
+
+void test_legacy_custom_frame_without_signature_still_detected() {
+  ControllerBridge b;
+  ChannelPackInputs_t in = makeNeutral();
+  uint16_t ch[CPACK_NUM_CHANNELS];
+  ChannelPack::packInputs(&in, ch);
+  for (int i = CPACK_CH_PARAM_ID; i < CPACK_NUM_CHANNELS; ++i) {
+    ch[i] = CPACK_CRSF_MID;  // pre-uplink handset: CH12..CH16 centred
+  }
+  for (int i = 0; i < kProfileDetectFrames; ++i) b.update(ch, true, 100 + i);
+  TEST_ASSERT_EQUAL(static_cast<int>(InputProfile::CustomControllerChannelPack),
+                    static_cast<int>(b.detectedProfile()));
+  TEST_ASSERT_FALSE(b.command().uplink_seen);
+}
+
 void test_feature_toggle_levels() {
   ControllerBridge b;
   ChannelPackInputs_t in = makeNeutral();
@@ -1110,6 +1308,14 @@ int main(int, char**) {
   RUN_TEST(test_gait_tune_adjusts_selected_parameter_and_clamps);
   RUN_TEST(test_gait_tune_save_bumps_sequence_once_per_press);
   RUN_TEST(test_gait_tune_defaults_track_config_until_editor_opens);
+  // Parameter uplink.
+  RUN_TEST(test_param_uplink_round_trips_through_ota_quantisation);
+  RUN_TEST(test_param_uplink_applies_after_two_identical_frames);
+  RUN_TEST(test_param_uplink_clamps_to_table_and_feeds_shape_crc);
+  RUN_TEST(test_param_uplink_owns_value_against_nav1_and_config_reseed);
+  RUN_TEST(test_param_uplink_save_request_bumps_sequence_once_per_new_value);
+  RUN_TEST(test_custom_profile_detected_with_signature_and_busy_uplink);
+  RUN_TEST(test_legacy_custom_frame_without_signature_still_detected);
   RUN_TEST(test_feature_toggle_levels);
   RUN_TEST(test_host_authority_switch);
   RUN_TEST(test_trick_repeats_while_button_is_held);

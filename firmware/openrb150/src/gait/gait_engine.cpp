@@ -7,14 +7,31 @@
 namespace gait {
 namespace {
 
-// Measured CAD home feet in body frame B (dimensions.md): each foot tip sits
-// 126.75 mm radially out from its coxa axis along the leg's home azimuth.
-// Mark III supplies gait phase/keyframe behavior only; physical dimensions
-// always come from this robot's measured model.
-constexpr float kHomeFootXy[config::kNumLegs][2] = {
-  {-155.2f, -205.2f}, {155.2f, -205.2f}, {196.5f, 0.0f},
-  {155.2f, 205.2f},   {-155.2f, 205.2f}, {-196.5f, 0.0f},
+constexpr float kPi = 3.14159265358979323846f;
+constexpr float kDegToRad = kPi / 180.0f;
+constexpr float kQ15 = 32767.0f;
+
+// Measured CAD coxa mounts in body frame B (dimensions.md, 0.1 mm) and the
+// home hip azimuth each leg points along. The documented home feet (corners
+// at (+-155.2, +-205.2), mids at (+-196.5, 0)) are mount + 126.75 mm along the
+// azimuth. Mark III supplies gait phase/keyframe behavior only; physical
+// dimensions always come from this robot's measured model (or the adopted
+// RobotConfig via setLegGeometry, which overrides this table).
+constexpr int16_t kDefaultMountDmm[config::kNumLegs][2] = {
+  {-656, -1156}, {656, -1156}, {698, 0},
+  {656, 1156},   {-656, 1156}, {-698, 0},
 };
+constexpr float kDefaultAzimuthDeg[config::kNumLegs] = {
+  225.0f, 315.0f, 0.0f, 45.0f, 135.0f, 180.0f,
+};
+
+inline int16_t toQ15(float v) {
+  if (v > 1.0f) v = 1.0f;
+  if (v < -1.0f) v = -1.0f;
+  // Snap float noise on axis-aligned legs so a mid leg's home y is exactly 0.
+  if (v > -1e-6f && v < 1e-6f) return 0;
+  return static_cast<int16_t>(v * kQ15 + (v >= 0.0f ? 0.5f : -0.5f));
+}
 
 struct MarkIiiGait {
   uint8_t steps;
@@ -40,7 +57,7 @@ const MarkIiiGait& gaitDefinition(config::GaitId gait) {
 }
 
 void keyframe(const MarkIiiGait& gait, uint8_t leg, uint8_t gait_step,
-              float& longitudinal, float& lift) {
+              float half_lift, float& longitudinal, float& lift) {
   const uint8_t relative = static_cast<uint8_t>(
       (gait_step + gait.steps - gait.origin[leg]) % gait.steps);
   lift = 0.0f;
@@ -49,12 +66,12 @@ void keyframe(const MarkIiiGait& gait, uint8_t leg, uint8_t gait_step,
     lift = 1.0f;
   } else if (relative == 1) {
     longitudinal = 0.5f;
-    lift = 0.5f;
+    lift = half_lift;
   } else if (relative == 2) {
     longitudinal = 0.5f;
   } else if (relative == gait.steps - 1) {
     longitudinal = -0.5f;
-    lift = 0.5f;
+    lift = half_lift;
   } else {
     longitudinal =
         0.5f - static_cast<float>(relative - 2) /
@@ -88,7 +105,60 @@ inline float clampf(float v, float lo, float hi) {
 
 }  // namespace
 
-GaitEngine::GaitEngine() {}
+GaitEngine::GaitEngine() {
+  for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+    mount_x_dmm_[leg] = kDefaultMountDmm[leg][0];
+    mount_y_dmm_[leg] = kDefaultMountDmm[leg][1];
+    azimuth_cos_q15_[leg] = toQ15(cosf(kDefaultAzimuthDeg[leg] * kDegToRad));
+    azimuth_sin_q15_[leg] = toQ15(sinf(kDefaultAzimuthDeg[leg] * kDegToRad));
+  }
+}
+
+void GaitEngine::setLegGeometry(const config::RobotConfig& cfg) {
+  for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+    const config::LegGeometry& g = cfg.legs[leg];
+    mount_x_dmm_[leg] = g.mount_x_dmm;
+    mount_y_dmm_[leg] = g.mount_y_dmm;
+    // The persisted mount yaw is the servo-180 pointing direction; the home
+    // foot azimuth in B is a quarter turn CCW from it (body_ik.cpp applies the
+    // inverse rotation -(yaw + 90 deg) to bring B vectors into the coxa frame).
+    const float azimuth =
+        static_cast<float>(g.mount_yaw_cdeg) * (kDegToRad / 100.0f) +
+        kPi / 2.0f;
+    azimuth_cos_q15_[leg] = toQ15(cosf(azimuth));
+    azimuth_sin_q15_[leg] = toQ15(sinf(azimuth));
+  }
+  if (cfg.links.coxa_cmm > 0 && cfg.links.femur_cmm > 0 &&
+      cfg.links.tibia_cmm > 0) {
+    l1_mm_ = static_cast<float>(cfg.links.coxa_cmm) / 100.0f;
+    l23_mm_ = static_cast<float>(cfg.links.femur_cmm + cfg.links.tibia_cmm) /
+              100.0f;
+  }
+}
+
+void GaitEngine::setShape(const GaitShape& shape) {
+  // Stride / step height stay owned by configure(); only the remaining slots
+  // are read here.
+  stance_radius_target_ =
+      static_cast<float>(shape.get(TuneId::StanceRadiusMm));
+  yaw_stroke_target_rad_ =
+      static_cast<float>(shape.get(TuneId::YawStrokeDeg)) * kDegToRad;
+  half_lift_target_ =
+      clampf(static_cast<float>(shape.get(TuneId::HalfLiftPct)) / 100.0f,
+             0.0f, 1.0f);
+  uint16_t fast = shape.get(TuneId::StepPeriodFastMs);
+  uint16_t slow = shape.get(TuneId::StepPeriodSlowMs);
+  // "Fast" must not be slower than "slow"; a crossed pair degrades to a fixed
+  // cadence rather than inverting the speed knob.
+  if (slow < fast) slow = fast;
+  step_period_fast_ms_ = fast;
+  step_period_slow_ms_ = slow;
+  if (!params_seeded_) {
+    stance_radius_mm_ = stance_radius_target_;
+    yaw_stroke_rad_ = yaw_stroke_target_rad_;
+    half_lift_ = half_lift_target_;
+  }
+}
 
 void GaitEngine::configure(const config::GaitDefaults& d) {
   gait_ = static_cast<config::GaitId>(d.gait);
@@ -106,6 +176,9 @@ void GaitEngine::configure(const config::GaitDefaults& d) {
     step_mm_ = step_target_;
     body_height_mm_ = height_target_;
     speed_ = speed_target_;
+    stance_radius_mm_ = stance_radius_target_;
+    yaw_stroke_rad_ = yaw_stroke_target_rad_;
+    half_lift_ = half_lift_target_;
     params_seeded_ = true;
   }
 }
@@ -130,10 +203,23 @@ float GaitEngine::dutyFactor() const {
   return minimumGaitDuty(gait_);
 }
 
+float GaitEngine::maxStanceRadiusMm(float body_height_mm) const {
+  // Home foot distance from the femur axis must stay inside
+  // kHomeReachFrac * (IK reach margin). Solve the planar radial component at
+  // the current ride height; with the body too high for any radial room the
+  // cap collapses onto the coxa link, which the table minimum then overrides.
+  const float d_limit = kHomeReachFrac * kIkReachMarginFrac * l23_mm_;
+  const float h = fabsf(body_height_mm);
+  if (h >= d_limit) return l1_mm_;
+  return l1_mm_ + sqrtf(d_limit * d_limit - h * h);
+}
+
 void GaitEngine::baseHomeFoot(uint8_t leg, float& x, float& y,
                               float& z) const {
-  x = kHomeFootXy[leg][0];
-  y = kHomeFootXy[leg][1];
+  x = static_cast<float>(mount_x_dmm_[leg]) * 0.1f +
+      stance_radius_mm_ * (static_cast<float>(azimuth_cos_q15_[leg]) / kQ15);
+  y = static_cast<float>(mount_y_dmm_[leg]) * 0.1f +
+      stance_radius_mm_ * (static_cast<float>(azimuth_sin_q15_[leg]) / kQ15);
   z = -body_height_mm_;
 }
 
@@ -146,14 +232,12 @@ void GaitEngine::footAt(uint8_t leg, float longitudinal,
                         float& z) const {
   float home_x, home_y, home_z;
   homeFoot(leg, home_x, home_y, home_z);
-  // Yaw stroke sized so a full yaw command sweeps the same arc length that a
-  // full translation command strides on the largest-radius leg. A fixed body
-  // angle (the old Mark III 32 deg) would move corner feet ~2.4x the stride
-  // and immediately saturate the reach limiter, crushing translation.
-  float yaw_ratio = stride_mm_ / (2.0f * kMaxLegRadiusMm);
-  yaw_ratio = clampf(yaw_ratio, 0.0f, 1.0f);
-  const float yaw_travel = 2.0f * asinf(yaw_ratio);
-  const float yaw = twist_.wz * yaw_travel * longitudinal;
+  // Yaw stroke is an explicit operator parameter: the body yaw swept over one
+  // full cycle at full yaw stick. Phoenix Mark III used a fixed 32 deg; that
+  // moved corner feet ~2.4x the translation stride at the old 60 mm default
+  // and saturated the reach limiter, so the stroke is tunable (default 20 deg)
+  // instead of being derived from stride.
+  const float yaw = twist_.wz * yaw_stroke_rad_ * longitudinal;
   const float cosine = cosf(yaw);
   const float sine = sinf(yaw);
   x = home_x * cosine - home_y * sine +
@@ -196,26 +280,41 @@ void GaitEngine::previewFoot(uint8_t leg, float phase, float& x, float& y,
 }
 
 float GaitEngine::stepPeriodMs() const {
+  // Piecewise-linear about a neutral point two thirds of the way from slow to
+  // fast (120 / 60 ms -> 80 ms at speed 0.5, the historical cadence), so the
+  // lower half of the knob stretches the period and the upper half tightens.
   constexpr float kNeutralSpeed = 128.0f / 255.0f;
+  const float slow = static_cast<float>(step_period_slow_ms_);
+  const float fast = static_cast<float>(step_period_fast_ms_);
+  const float neutral = slow - (slow - fast) * (2.0f / 3.0f);
   if (speed_ <= kNeutralSpeed) {
-    return kMaxStepPeriodMs -
-           (kMaxStepPeriodMs - kNeutralStepPeriodMs) *
-               (speed_ / kNeutralSpeed);
+    return slow - (slow - neutral) * (speed_ / kNeutralSpeed);
   }
-  return kNeutralStepPeriodMs -
-         (kNeutralStepPeriodMs - kMinStepPeriodMs) *
-             ((speed_ - kNeutralSpeed) / (1.0f - kNeutralSpeed));
+  return neutral -
+         (neutral - fast) * ((speed_ - kNeutralSpeed) / (1.0f - kNeutralSpeed));
 }
 
 void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
   const float dt_s = static_cast<float>(dt_ms) / 1000.0f;
 
-  // Advance the shape-parameter filters (body height, stride, step, speed).
+  // Advance the shape-parameter filters (body height, stride, step, speed,
+  // stance radius, yaw stroke, half lift).
   const float pk = (dt_s >= kParamFilterTau) ? 1.0f : dt_s / kParamFilterTau;
   stride_mm_ += (stride_target_ - stride_mm_) * pk;
   step_mm_ += (step_target_ - step_mm_) * pk;
   body_height_mm_ += (height_target_ - body_height_mm_) * pk;
   speed_ += (speed_target_ - speed_) * pk;
+  // The stance radius target is capped against the workspace at the filtered
+  // ride height every cycle, so lowering/raising the body via Pot2 widens or
+  // narrows the reachable stance smoothly instead of leaving the home foot
+  // outside the IK annulus.
+  const float radius_cap = maxStanceRadiusMm(body_height_mm_);
+  const float radius_goal = stance_radius_target_ < radius_cap
+                                ? stance_radius_target_
+                                : radius_cap;
+  stance_radius_mm_ += (radius_goal - stance_radius_mm_) * pk;
+  yaw_stroke_rad_ += (yaw_stroke_target_rad_ - yaw_stroke_rad_) * pk;
+  half_lift_ += (half_lift_target_ - half_lift_) * pk;
 
   // Static poses: no stepping, no twist.
   if (gait_ == config::GaitId::Stand || gait_ == config::GaitId::Sit) {
@@ -263,8 +362,9 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
     float current_longitudinal, current_lift;
     float next_longitudinal, next_lift;
-    keyframe(gait, leg, current_step, current_longitudinal, current_lift);
-    keyframe(gait, leg, next_step, next_longitudinal, next_lift);
+    keyframe(gait, leg, current_step, half_lift_, current_longitudinal,
+             current_lift);
+    keyframe(gait, leg, next_step, half_lift_, next_longitudinal, next_lift);
     const float longitudinal =
         current_longitudinal +
         (next_longitudinal - current_longitudinal) * interpolation;

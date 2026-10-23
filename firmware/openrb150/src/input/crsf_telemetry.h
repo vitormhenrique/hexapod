@@ -11,8 +11,8 @@ constexpr uint8_t kFrameTypeAttitude = 0x1E;
 constexpr uint8_t kFrameTypeHexapodStatus = 0x80;
 constexpr uint8_t kHexapodMagic0 = 0x48;  // H
 constexpr uint8_t kHexapodMagic1 = 0x58;  // X
-constexpr uint8_t kHexapodVersion = 2;
-constexpr uint8_t kHexapodPayloadBytes = 28;
+constexpr uint8_t kHexapodVersion = 3;
+constexpr uint8_t kHexapodPayloadBytes = 33;
 constexpr uint8_t kBatteryPayloadBytes = 8;
 constexpr uint8_t kAttitudePayloadBytes = 6;
 
@@ -61,6 +61,14 @@ struct HexapodStatus {
   uint8_t error_sequence = 0;  // bumped per announced incident; 0 = none
   uint16_t error_count = 0;    // occurrences within the current incident
   uint16_t error_suppressed = 0;  // duplicates the journal did not send
+  // --- v3 ---
+  // CRC-16/CCITT-FALSE of the live GaitShape (gait/gait_shape.h, ids 1..7 as
+  // little-endian uint16). The handset computes the same over its table and
+  // shows "synced" on a match.
+  uint16_t gait_shape_crc16 = 0;
+  // Last confirmed parameter-uplink pair (0 = none received since boot).
+  uint8_t uplink_last_id = 0;
+  uint16_t uplink_last_value = 0;
 };
 
 // Encode fixed-size payloads. Multi-byte CRSF sensor values are big-endian.

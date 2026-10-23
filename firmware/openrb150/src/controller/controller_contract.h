@@ -182,6 +182,13 @@ struct ControllerDiagnostics {
   bool gait_tune_active = false;
   // The single-leg preview is running (operator is watching a parameter).
   bool gait_tune_preview = false;
+  // Handset parameter-uplink echo: CRC-16 of the complete live GaitShape the
+  // handset streams (gait/gait_shape.h), plus the last confirmed (id, value)
+  // pair. The handset compares the CRC with its own table to show "synced".
+  uint16_t gait_shape_crc16 = 0;
+  bool uplink_seen = false;
+  uint8_t uplink_last_id = 0;
+  uint16_t uplink_last_value = 0;
   // The operator asked to persist the applied gait shape. The adapter owns the
   // storage transaction and applies `gait_save_seq` de-duplication: it acts only
   // when the sequence differs from the last one it persisted.

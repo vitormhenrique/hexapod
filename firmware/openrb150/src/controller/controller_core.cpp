@@ -252,6 +252,12 @@ void ControllerCore::step(const RobotState& state,
     command.diagnostics.gait_save_seq = rc_cmd.gait_tune_save_seq;
     command.diagnostics.gait_save_requested =
         rc_authority && !rcCommandIsActive(rc_cmd) && !trick_engine_.active();
+    // Echo the handset-facing shape set regardless of who drives motion, so
+    // the handset can confirm its uplink even while a host holds authority.
+    command.diagnostics.gait_shape_crc16 = gait::gaitShapeCrc16(rc_cmd.shape);
+    command.diagnostics.uplink_seen = rc_cmd.uplink_seen;
+    command.diagnostics.uplink_last_id = rc_cmd.uplink_last_id;
+    command.diagnostics.uplink_last_value = rc_cmd.uplink_last_value;
   }
 
   if (intent.host_disarm ||
@@ -356,12 +362,17 @@ void ControllerCore::step(const RobotState& state,
       const uint16_t body_height = static_cast<uint16_t>(
           gait::rcBodyHeightMm(height_fraction) + 0.5f);
         requested_body_height = body_height;
+        // Round, do not truncate: the handset sends whole millimetres and the
+        // fraction round-trip (mm / max * max) must give the same number back.
         requested_stride = static_cast<uint16_t>(
-          rc.stride * config::kMaxGaitStrideMm);
+          rc.stride * config::kMaxGaitStrideMm + 0.5f);
         requested_step_height = static_cast<uint16_t>(
-          rc.step_height * config::kMaxGaitStepMm);
+          rc.step_height * config::kMaxGaitStepMm + 0.5f);
         requested_speed = static_cast<uint8_t>(rc.speed * 255.0f);
         requested_duty = static_cast<uint8_t>(rc.duty * 255.0f);
+      // Yaw stroke, stance radius, cadence endpoints and half lift follow the
+      // handset (or compiled defaults) whenever RC drives.
+      pipeline_.setShape(rc.shape);
       applied_intent_sequence_ = 0xFFFFFFFFu;
     } else if (intent.motion.seq != applied_intent_sequence_) {
       trick_engine_.cancel();
@@ -465,11 +476,13 @@ void ControllerCore::step(const RobotState& state,
                  : active_config.robot.gait.body_height_mm;
     command.diagnostics.applied_stride_mm =
         rc_shape ? static_cast<uint16_t>(rc_cmd.stride *
-                                         config::kMaxGaitStrideMm)
+                                             config::kMaxGaitStrideMm +
+                                         0.5f)
                  : active_config.robot.gait.stride_len_mm;
     command.diagnostics.applied_step_height_mm =
         rc_shape ? static_cast<uint16_t>(rc_cmd.step_height *
-                                         config::kMaxGaitStepMm)
+                                             config::kMaxGaitStepMm +
+                                         0.5f)
                  : active_config.robot.gait.step_height_mm;
     command.diagnostics.applied_duty_x255 =
         rc_shape ? static_cast<uint8_t>(rc_cmd.duty * 255.0f)

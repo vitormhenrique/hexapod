@@ -61,7 +61,9 @@ All inputs the controller exposes, and where each lands in the CRSF frame.
 | Push buttons | `BTN_1`…`BTN_4` | 4 | MCP23017 | CH10 (bitfield) |
 | 5-way nav switch 1 | `NAV1` U/D/L/R/C | 5 | MCP23017 | CH11 (bitfield) |
 | 5-way nav switch 2 | `NAV2` U/D/L/R/C | 5 | MCP23017 | CH11 (bitfield) |
-| Reserved | — | 5 | — | CH12–CH16 |
+| Parameter uplink | id + 16-bit value | — | handset gait table | CH12–CH14 (discrete) |
+| Reserved | — | 1 | — | CH15 |
+| Layout signature | constant `42/63` | — | — | CH16 |
 
 **Totals:** 6 proportional axes, 2 encoders, and 22 digital inputs (6 + 2×2 + 4 + 10)
 mapped into 11 active channels, leaving 5 spare channels centered.
@@ -86,7 +88,11 @@ matching **0-based** array indices used by the library.
 | CH9 | `CPACK_CH_SWITCHES` (8) | SW_B/C/D/G/H | **scaled 5-bit mask** | `packAuxSwitches` + `discreteToCrsf` |
 | CH10 | `CPACK_CH_BTN_TOGGLE` (9) | 4 buttons + 2 × 3-pos toggles | **scaled state index** | `packButtonToggleState` + `discreteToCrsf` |
 | CH11 | `CPACK_CH_NAV`      (10) | 2 × 5-way nav switches | **scaled state index** | `packNavStates` + `discreteToCrsf` |
-| CH12–CH16 | 11–15 | Reserved | centered | constant `992` |
+| CH12 | `CPACK_CH_PARAM_ID` (11) | parameter uplink id, 0 = idle, 1..63 | **scaled discrete** | `packParamUplink` |
+| CH13 | `CPACK_CH_PARAM_LO` (12) | parameter value, low byte | **scaled discrete (0..255)** | `packParamUplink` |
+| CH14 | `CPACK_CH_PARAM_HI` (13) | parameter value, high byte | **scaled discrete (0..255)** | `packParamUplink` |
+| CH15 | `CPACK_CH_RESERVED` (14) | Reserved | centered | constant `992` |
+| CH16 | `CPACK_CH_SIGNATURE` (15) | layout signature | **scaled discrete** | `layoutSignatureCrsf()` (~`1258`) |
 
 > **Critical:** CH9–CH11 carry discrete integers encoded across the valid CRSF
 > range by `discreteToCrsf()`. ELRS clamps raw values below `CPACK_CRSF_MIN` and
@@ -208,7 +214,10 @@ typedef struct {
 
 | Function | Purpose |
 |----------|---------|
-| `void packInputs(const ChannelPackInputs_t* in, uint16_t ch[16])` | Pack all inputs into 16 channels; CH12–16 set to `CPACK_CRSF_MID`. |
+| `void packInputs(const ChannelPackInputs_t* in, uint16_t ch[16])` | Pack all inputs into 16 channels; uplink idle (id 0) on CH12–14, CH15 centred, signature on CH16. |
+| `void packParamUplink(uint16_t ch[16], uint8_t id, uint16_t value)` | Overlay one parameter-uplink pair on CH12–14 (call after `packInputs`). |
+| `bool unpackParamUplink(const uint16_t ch[16], uint8_t* id, uint16_t* value)` | Decode the pair; `false` while idle. |
+| `bool hasLayoutSignature(uint16_t crsf)` | True if CH16 carries the ChannelPack signature. |
 | `uint16_t gimbalToCrsf(int16_t)` / `potToCrsf(int16_t)` | Proportional → CRSF. |
 | `uint16_t armPotToCrsf(int16_t, bool)` | Pack Pot 1 and SW_A into guarded CH5 bands. |
 | `uint16_t encoderToCrsf(int32_t)` | Encoder → wrapped 11-bit. |
@@ -389,6 +398,9 @@ not crowd the RC uplink.
 * **Encoders are relative and wrap** at 0 ↔ 2047. Work in deltas.
 * **`SW_E` / `SW_F` are 3-position** (values 0/1/2), packed in CH10 — not in the
   CH9 switch bitfield (bits 6–7 of CH9 are reserved).
-* **CH12–CH16 are reserved** and always centered (`992`); safe to use for future
-  expansion if you update both ends.
+* **CH12–CH14 carry the parameter uplink** (handset → robot absolute numeric
+  settings, one `(id, value)` pair per frame; the receiver applies a pair only
+  after two identical frames). **CH15 is reserved** (centered) and **CH16 is the
+  layout signature**, which is how a receiver distinguishes this layout from a
+  conventional per-channel radio even while CH12–CH14 are busy.
 * **Honor failsafe** via `isLinkUp()` before acting on channel data.

@@ -657,10 +657,10 @@ def validate_robot_config(config: RobotConfig) -> list[str]:
         errors.append(f"gait {gait.gait} is unknown")
     if not 40 <= gait.body_height_mm <= 160:
         errors.append("body height must be within 40..160 mm")
-    if not 0 <= gait.stride_len_mm <= 80:
-        errors.append("stride length must be within 0..80 mm")
-    if not 0 <= gait.step_height_mm <= 50:
-        errors.append("step height must be within 0..50 mm")
+    if not 0 <= gait.stride_len_mm <= 140:
+        errors.append("stride length must be within 0..140 mm")
+    if not 0 <= gait.step_height_mm <= 80:
+        errors.append("step height must be within 0..80 mm")
     if not 0 <= config.feature_defaults <= 0xFFFFFFFF:
         errors.append("feature defaults are outside the unsigned 32-bit range")
     elif config.feature_defaults & ~(

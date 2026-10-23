@@ -14,7 +14,23 @@
  *   CH9:    switches B,C,D,G,H - scaled 5-bit mask
  *   CH10:   4 buttons + 2 three-pos toggles - scaled physical-state index
  *   CH11:   10 nav switch buttons (2x 5-way) - scaled physical-state index
- *   CH12-16: Reserved (center)
+ *   CH12:   parameter uplink id (0 = idle, 1..63) - scaled discrete
+ *   CH13:   parameter uplink value, low byte (0..255) - scaled discrete
+ *   CH14:   parameter uplink value, high byte (0..255) - scaled discrete
+ *   CH15:   Reserved (center)
+ *   CH16:   layout signature (CPACK_LAYOUT_SIGNATURE) - scaled discrete
+ *
+ * Parameter uplink: the handset streams ABSOLUTE numeric settings (gait
+ * stride, step height, ...) one (id, value) pair per RC frame, round-robin
+ * over its parameter table. With the ELRS "16ch Rate/2 Full Res" switch mode
+ * CH9..CH16 travel in one OTA packet, so id and value are always coherent.
+ * The receiver applies a pair only after seeing it unchanged in two
+ * consecutive frames. Every discrete field keeps <= 256 levels so the 10-bit
+ * over-the-air quantisation can never flip a value.
+ *
+ * The signature on CH16 lets the receiver tell this layout from a
+ * conventional per-channel radio (which centres CH16) even while CH12..CH14
+ * carry data.
  */
 
 #include <stdint.h>
@@ -33,6 +49,11 @@
 #define CPACK_ARM_POT_STEPS        511u
 #define CPACK_ARM_POT_ON_BASE      1536u
 #define CPACK_ARM_POT_CODE_MAX     2047u
+// Parameter uplink + layout signature fields (CH12..CH14, CH16).
+#define CPACK_PARAM_ID_MAX         63u   // 0 = idle, 1..63 = parameter ids
+#define CPACK_PARAM_BYTE_MAX       255u  // one value byte per channel
+#define CPACK_SIGNATURE_FIELD_MAX  63u
+#define CPACK_LAYOUT_SIGNATURE     42u   // CRSF ~1258, far from centre (992)
 
 // Channel assignments (0-based)
 #define CPACK_CH_LEFT_X      0
@@ -46,6 +67,11 @@
 #define CPACK_CH_SWITCHES    8   // 5x 2-pos switches (B,C,D,G,H)
 #define CPACK_CH_BTN_TOGGLE  9   // 4 buttons + 2 three-pos toggles (SW_E, SW_F)
 #define CPACK_CH_NAV        10   // 10 nav switch buttons (2x5)
+#define CPACK_CH_PARAM_ID   11   // parameter uplink id (0 = idle)
+#define CPACK_CH_PARAM_LO   12   // parameter uplink value, low byte
+#define CPACK_CH_PARAM_HI   13   // parameter uplink value, high byte
+#define CPACK_CH_RESERVED   14   // centre
+#define CPACK_CH_SIGNATURE  15   // layout signature
 #define CPACK_NUM_CHANNELS  16
 
 // Nav switch direction indices within the 5-element array
@@ -190,6 +216,23 @@ inline uint16_t packNavStates(const bool nav[2][5]) {
     return (uint16_t)(packNavState(nav[0]) * 6u + packNavState(nav[1]));
 }
 
+// CRSF value carried on CH16 by every ChannelPack frame.
+inline uint16_t layoutSignatureCrsf() {
+    return discreteToCrsf(CPACK_LAYOUT_SIGNATURE, CPACK_SIGNATURE_FIELD_MAX);
+}
+
+// Write one parameter-uplink pair into CH12..CH14. id 0 marks the uplink idle
+// (the value bytes are still encoded so the frame stays well-formed).
+inline void packParamUplink(uint16_t ch[CPACK_NUM_CHANNELS], uint8_t id,
+                            uint16_t value) {
+    if (id > CPACK_PARAM_ID_MAX) id = (uint8_t)CPACK_PARAM_ID_MAX;
+    ch[CPACK_CH_PARAM_ID] = discreteToCrsf(id, CPACK_PARAM_ID_MAX);
+    ch[CPACK_CH_PARAM_LO] = discreteToCrsf((uint16_t)(value & 0xFFu),
+                                           CPACK_PARAM_BYTE_MAX);
+    ch[CPACK_CH_PARAM_HI] = discreteToCrsf((uint16_t)((value >> 8) & 0xFFu),
+                                           CPACK_PARAM_BYTE_MAX);
+}
+
 // Pack all inputs into 16-channel array (CRSF 11-bit values)
 inline void packInputs(const ChannelPackInputs_t* in, uint16_t ch[CPACK_NUM_CHANNELS]) {
     ch[CPACK_CH_LEFT_X]     = gimbalToCrsf(in->gimbal[0]);
@@ -208,9 +251,11 @@ inline void packInputs(const ChannelPackInputs_t* in, uint16_t ch[CPACK_NUM_CHAN
         CPACK_BTN_TOGGLE_FIELD_MAX);
     ch[CPACK_CH_NAV] = discreteToCrsf(
         packNavStates(in->nav), CPACK_NAV_FIELD_MAX);
-    for (int i = 11; i < CPACK_NUM_CHANNELS; i++) {
-        ch[i] = CPACK_CRSF_MID;
-    }
+    // Parameter uplink idle until the caller overlays a pair; the layout
+    // signature is always present so the receiver can identify the frame.
+    packParamUplink(ch, 0, 0);
+    ch[CPACK_CH_RESERVED] = CPACK_CRSF_MID;
+    ch[CPACK_CH_SIGNATURE] = layoutSignatureCrsf();
 }
 
 //=============================================================================
@@ -292,6 +337,27 @@ inline void unpackNavStates(uint16_t val, bool nav[2][5]) {
             nav[n][i] = state[n] == (uint8_t)(i + 1);
         }
     }
+}
+
+// True if CH16 carries the ChannelPack layout signature.
+inline bool hasLayoutSignature(uint16_t crsf_val) {
+    return crsfToDiscrete(crsf_val, CPACK_SIGNATURE_FIELD_MAX) ==
+           CPACK_LAYOUT_SIGNATURE;
+}
+
+// Decode the parameter-uplink pair from CH12..CH14. Returns false while the
+// uplink is idle (id 0); `id`/`value` are still written.
+inline bool unpackParamUplink(const uint16_t ch[CPACK_NUM_CHANNELS],
+                              uint8_t* id, uint16_t* value) {
+    const uint16_t raw_id =
+        crsfToDiscrete(ch[CPACK_CH_PARAM_ID], CPACK_PARAM_ID_MAX);
+    const uint16_t lo =
+        crsfToDiscrete(ch[CPACK_CH_PARAM_LO], CPACK_PARAM_BYTE_MAX);
+    const uint16_t hi =
+        crsfToDiscrete(ch[CPACK_CH_PARAM_HI], CPACK_PARAM_BYTE_MAX);
+    *id = (uint8_t)raw_id;
+    *value = (uint16_t)((hi << 8) | lo);
+    return raw_id != 0u;
 }
 
 // Unpack 16-channel array into input struct

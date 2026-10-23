@@ -32,14 +32,19 @@ void test_hexapod_status_matches_controller_wire_layout() {
   status.error_sequence = 7;
   status.error_count = 300;
   status.error_suppressed = 4096;
+  // v3: gait-shape CRC echo plus the last confirmed uplink pair (stride = 60).
+  status.gait_shape_crc16 = 0xBEEF;
+  status.uplink_last_id = 1;
+  status.uplink_last_value = 60;
 
   uint8_t payload[telemetry::kHexapodPayloadBytes];
   TEST_ASSERT_EQUAL_UINT8(telemetry::kHexapodPayloadBytes,
                           telemetry::encodeHexapodStatus(status, payload));
   const uint8_t expected[telemetry::kHexapodPayloadBytes] = {
-      0x48, 0x58, 0x02, 0x33, 0x05, 0x01, 0x02, 0x00, 0x00, 0xBF,
+      0x48, 0x58, 0x03, 0x33, 0x05, 0x01, 0x02, 0x00, 0x00, 0xBF,
       0x99, 0xDB, 0x2E, 0xE0, 0x00, 0x28, 0x00, 0x3C, 0x00, 0x1E,
       0x53, 0x10, 0x66, 0x07, 0x01, 0x2C, 0x10, 0x00,
+      0xBE, 0xEF, 0x01, 0x00, 0x3C,
   };
   TEST_ASSERT_EQUAL_UINT8_ARRAY(expected, payload, sizeof(expected));
 }

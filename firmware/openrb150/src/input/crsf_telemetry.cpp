@@ -48,6 +48,9 @@ uint8_t encodeHexapodStatus(const HexapodStatus& status,
   out[23] = status.error_sequence;
   putBe16(&out[24], status.error_count);
   putBe16(&out[26], status.error_suppressed);
+  putBe16(&out[28], status.gait_shape_crc16);
+  out[30] = status.uplink_last_id;
+  putBe16(&out[31], status.uplink_last_value);
   return kHexapodPayloadBytes;
 }
 

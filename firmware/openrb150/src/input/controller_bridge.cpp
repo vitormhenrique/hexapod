@@ -181,9 +181,17 @@ void ControllerBridge::setGaitTuneFractions(float step_height, float stride,
   // An active edit session owns the values; a config revision landing mid-edit
   // must not yank the number the operator is watching on the handset.
   if (cmd_.gait_tune_active) return;
-  gait_tune_frac_[0] = clampf(step_height, 0.0f, 1.0f);
-  gait_tune_frac_[1] = clampf(stride, 0.0f, 1.0f);
-  gait_tune_frac_[2] = clampf(duty, 0.0f, 1.0f);
+  // Likewise a value the handset streams on the parameter uplink is the
+  // handset's: the stored config follows it (via save), never the reverse.
+  if (!gait_tune_uplink_owned_[0]) {
+    gait_tune_frac_[0] = clampf(step_height, 0.0f, 1.0f);
+  }
+  if (!gait_tune_uplink_owned_[1]) {
+    gait_tune_frac_[1] = clampf(stride, 0.0f, 1.0f);
+  }
+  if (!gait_tune_uplink_owned_[2]) {
+    gait_tune_frac_[2] = clampf(duty, 0.0f, 1.0f);
+  }
 }
 
 void ControllerBridge::reset() {
@@ -221,10 +229,23 @@ void ControllerBridge::reset() {
   }
   // Compiled fallbacks for the NAV1-edited gait shape; rcTask overwrites these
   // with the persisted GaitDefaults through setGaitTuneFractions() as soon as
-  // a config revision is adopted.
-  gait_tune_frac_[0] = 0.6f;    // 30 mm of the 50 mm step-height range
-  gait_tune_frac_[1] = 0.75f;   // 60 mm of the 80 mm stride range
+  // a config revision is adopted, and the handset parameter uplink overrides
+  // both once it streams a value.
+  gait_tune_frac_[0] =
+      static_cast<float>(gait::kTuneLimits[2].def) /
+      static_cast<float>(config::kMaxGaitStepMm);     // 30 mm step height
+  gait_tune_frac_[1] =
+      static_cast<float>(gait::kTuneLimits[1].def) /
+      static_cast<float>(config::kMaxGaitStrideMm);   // 60 mm stride
   gait_tune_frac_[2] = 0.625f;  // duty 159/255
+  for (uint8_t i = 0; i < kNumGaitTuneParams; ++i) {
+    gait_tune_uplink_owned_[i] = false;
+  }
+  uplink_pending_id_ = 0;
+  uplink_pending_value_ = 0;
+  uplink_pending_frames_ = 0;
+  uplink_save_seq_seen_ = 0;
+  uplink_save_seq_valid_ = false;
   for (uint8_t i = 0; i < kNumEdgeSlots; ++i) {
     edge_prev_[i] = false;
     // Seed one refractory window in the past (unsigned wrap) so the very first
@@ -280,13 +301,21 @@ bool ControllerBridge::looksLikeCustomChannelPack(
       ch[CPACK_CH_NAV], CPACK_NAV_FIELD_MAX);
   const bool nav_ok = (nav & ~uint16_t(0x03FF)) == 0;
 
-  // CH12..CH16 are reserved and packed near CRSF centre by the TX.
-  bool reserved_ok = true;
-  for (int i = 11; i < CPACK_NUM_CHANNELS; ++i) {
-    reserved_ok = reserved_ok && nearCrsfMid(ch[i]);
+  // Current handsets stamp the layout signature on CH16 and keep CH15 centred
+  // while CH12..CH14 carry the parameter uplink. Older handsets (no uplink)
+  // centre all of CH12..CH16; accept both so a handset update is never
+  // required to keep flying. A conventional radio (TX16S direct model)
+  // centres CH15/CH16 and never produces the signature.
+  const bool signature_ok =
+      ChannelPack::hasLayoutSignature(ch[CPACK_CH_SIGNATURE]) &&
+      nearCrsfMid(ch[CPACK_CH_RESERVED]);
+  bool legacy_reserved_ok = true;
+  for (int i = CPACK_CH_PARAM_ID; i < CPACK_NUM_CHANNELS; ++i) {
+    legacy_reserved_ok = legacy_reserved_ok && nearCrsfMid(ch[i]);
   }
 
-  return switches_ok && btn_toggle_ok && nav_ok && reserved_ok;
+  return switches_ok && btn_toggle_ok && nav_ok &&
+         (signature_ok || legacy_reserved_ok);
 }
 
 InputProfile ControllerBridge::classifyFirstFrame(
@@ -704,14 +733,21 @@ void ControllerBridge::updateGaitTune(uint32_t now_ms) {
 
   if (risingEdge(kGaitTuneEdgeBase + 3, readBool(cfg_.gait_tune_increase),
                  now_ms)) {
-    gait_tune_frac_[index] =
-        clampf(gait_tune_frac_[index] + kGaitTuneStepFrac, 0.0f, 1.0f);
+    // A handset that streams this parameter on the uplink applies the nudge
+    // to its own copy and re-sends the number; stepping it here too would
+    // double every press.
+    if (!gait_tune_uplink_owned_[index]) {
+      gait_tune_frac_[index] =
+          clampf(gait_tune_frac_[index] + kGaitTuneStepFrac, 0.0f, 1.0f);
+    }
     edited = true;
   }
   if (risingEdge(kGaitTuneEdgeBase + 4, readBool(cfg_.gait_tune_decrease),
                  now_ms)) {
-    gait_tune_frac_[index] =
-        clampf(gait_tune_frac_[index] - kGaitTuneStepFrac, 0.0f, 1.0f);
+    if (!gait_tune_uplink_owned_[index]) {
+      gait_tune_frac_[index] =
+          clampf(gait_tune_frac_[index] - kGaitTuneStepFrac, 0.0f, 1.0f);
+    }
     edited = true;
   }
   if (risingEdge(kGaitTuneEdgeBase + 5, readBool(cfg_.gait_tune_save),
@@ -722,6 +758,82 @@ void ControllerBridge::updateGaitTune(uint32_t now_ms) {
     edited = true;
   }
   if (edited) {
+    ++cmd_.gait_tune_edit_seq;
+    cmd_.gait_tune_last_edit_ms = now_ms;
+  }
+}
+
+void ControllerBridge::updateParamUplink(
+    const uint16_t ch[CPACK_NUM_CHANNELS], uint32_t now_ms) {
+  uint8_t id = 0;
+  uint16_t value = 0;
+  const bool active = ChannelPack::unpackParamUplink(ch, &id, &value);
+  if (!active || !(gait::tuneIdValid(id) ||
+                   id == static_cast<uint8_t>(gait::TuneId::SaveRequest))) {
+    uplink_pending_id_ = 0;
+    uplink_pending_frames_ = 0;
+    return;
+  }
+  if (id != uplink_pending_id_ || value != uplink_pending_value_) {
+    uplink_pending_id_ = id;
+    uplink_pending_value_ = value;
+    uplink_pending_frames_ = 1;
+    return;
+  }
+  if (uplink_pending_frames_ < kParamUplinkConfirmFrames) {
+    ++uplink_pending_frames_;
+  }
+  if (uplink_pending_frames_ >= kParamUplinkConfirmFrames) {
+    applyParamUplink(id, value, now_ms);
+  }
+}
+
+void ControllerBridge::applyParamUplink(uint8_t id, uint16_t value,
+                                        uint32_t now_ms) {
+  cmd_.uplink_seen = true;
+  cmd_.uplink_last_id = id;
+  cmd_.uplink_last_value = value;
+  if (id == static_cast<uint8_t>(gait::TuneId::SaveRequest)) {
+    // The handset bumps the value once per save press and transmits id 63
+    // only in a short burst afterwards, so every sequence value seen for the
+    // first time is exactly one press: arm the save like a NAV1-Center press.
+    if (!uplink_save_seq_valid_ || value != uplink_save_seq_seen_) {
+      uplink_save_seq_valid_ = true;
+      uplink_save_seq_seen_ = value;
+      ++cmd_.gait_tune_save_seq;
+      ++cmd_.gait_tune_edit_seq;
+      cmd_.gait_tune_last_edit_ms = now_ms;
+    }
+    return;
+  }
+  const gait::TuneId tune = static_cast<gait::TuneId>(id);
+  const uint16_t clamped = gait::clampTune(tune, value);
+  bool changed = false;
+  switch (tune) {
+    case gait::TuneId::StrideMm: {
+      const float frac = static_cast<float>(clamped) /
+                         static_cast<float>(config::kMaxGaitStrideMm);
+      changed = !gait_tune_uplink_owned_[1] || gait_tune_frac_[1] != frac;
+      gait_tune_frac_[1] = frac;
+      gait_tune_uplink_owned_[1] = true;
+      break;
+    }
+    case gait::TuneId::StepHeightMm: {
+      const float frac = static_cast<float>(clamped) /
+                         static_cast<float>(config::kMaxGaitStepMm);
+      changed = !gait_tune_uplink_owned_[0] || gait_tune_frac_[0] != frac;
+      gait_tune_frac_[0] = frac;
+      gait_tune_uplink_owned_[0] = true;
+      break;
+    }
+    default:
+      changed = cmd_.shape.get(tune) != clamped;
+      break;
+  }
+  cmd_.shape.set(tune, clamped);
+  if (changed) {
+    // Count as an edit so the downlink rate boost and the leg-1 preview react
+    // to handset changes exactly as they do to NAV1 presses.
     ++cmd_.gait_tune_edit_seq;
     cmd_.gait_tune_last_edit_ms = now_ms;
   }
@@ -770,6 +882,7 @@ const ControllerCommand& ControllerBridge::update(
   if (detected_profile_ == InputProfile::CustomControllerChannelPack) {
     ChannelPack::unpackChannels(ch, &raw_);
     integrateEncoders();  // relative wrap-delta integration (custom only)
+    updateParamUplink(ch, now_ms);
   } else if (detected_profile_ == InputProfile::Tx16sMk3Direct) {
     unpackTx16sMk3DirectChannels(ch, &raw_);
     updateTx16sDirectVirtualEncoders(ch);  // absolute slider passthrough
@@ -837,6 +950,17 @@ const ControllerCommand& ControllerBridge::update(
   cmd_.duty = cfg_.duty.source != AxisSource::None
                   ? readAxisUnipolar(cfg_.duty)
                   : gait_tune_frac_[2];
+  // Keep the native-unit record coherent with whatever source fed the
+  // fractions (uplink, NAV1, host axis binding, or persisted defaults).
+  cmd_.shape.set(gait::TuneId::StrideMm,
+                 static_cast<uint16_t>(
+                     cmd_.stride * static_cast<float>(config::kMaxGaitStrideMm) +
+                     0.5f));
+  cmd_.shape.set(gait::TuneId::StepHeightMm,
+                 static_cast<uint16_t>(
+                     cmd_.step_height *
+                         static_cast<float>(config::kMaxGaitStepMm) +
+                     0.5f));
 
   // Motion: the left gimbal always walks in the plane (forward + strafe), so
   // the operator never loses locomotion while adjusting the body. Right X
