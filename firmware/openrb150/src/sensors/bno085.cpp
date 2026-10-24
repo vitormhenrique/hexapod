@@ -70,28 +70,42 @@ bool Bno085::enableRotationVector() {
   return sendPacket(bno085::kChannelControl, feature, length);
 }
 
-bool Bno085::begin() {
-  present_ = false;
+bool Bno085::probe() {
   address_ = 0;
   const uint8_t candidates[] = {bno085::kAddressA, bno085::kAddressB};
   for (uint8_t candidate : candidates) {
     if (bus_.probe(candidate)) {
       address_ = candidate;
-      break;
+      return true;
     }
   }
-  if (address_ == 0) return false;
+  return false;
+}
+
+bool Bno085::begin() {
+  present_ = false;
+  state_ = State::NotFound;
+  if (!probe()) return false;
+  state_ = State::NoResponse;
   for (uint8_t& sequence : sequence_) sequence = 0;
 
   const uint8_t reset = 1;
   if (!sendPacket(bno085::kChannelExecutable, &reset, 1)) return false;
-  delay(300);
 
+  // Drain the post-reset advertisement / reset-complete packets. The BNO085
+  // is silent (NACKs reads) while it reboots, so keep polling with a bounded
+  // deadline instead of giving up on the first empty read: a cold sensor can
+  // take noticeably longer than a warm one to come back.
   uint8_t channel = 0;
   uint8_t payload[32];
   uint16_t payload_len = 0;
-  for (uint8_t packet = 0; packet < 8; ++packet) {
-    if (!receivePacket(channel, payload, sizeof(payload), payload_len)) break;
+  uint8_t drained = 0;
+  for (uint8_t attempt = 0; attempt < 60 && drained < 8; ++attempt) {
+    if (receivePacket(channel, payload, sizeof(payload), payload_len)) {
+      ++drained;
+    } else {
+      delay(10);
+    }
   }
 
   const uint8_t product_request[2] = {
@@ -101,7 +115,7 @@ bool Bno085::begin() {
     return false;
   }
   bool identified = false;
-  for (uint8_t attempt = 0; attempt < 20; ++attempt) {
+  for (uint8_t attempt = 0; attempt < 30; ++attempt) {
     if (receivePacket(channel, payload, sizeof(payload), payload_len) &&
         channel == bno085::kChannelControl && payload_len > 0 &&
         payload[0] == bno085::kReportProductIdResponse) {
@@ -112,6 +126,7 @@ bool Bno085::begin() {
   }
   if (!identified || !enableRotationVector()) return false;
   present_ = true;
+  state_ = State::Ready;
   return true;
 }
 

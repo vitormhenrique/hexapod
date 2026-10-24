@@ -288,10 +288,12 @@ void test_i2c_topology_no_snapshot() {
   TEST_ASSERT_EQUAL(DecodeStatus::Ok,
                     runSensor(feat, sen, sensormsg::kI2cGetTopology, 1, nullptr,
                               0, &h, p, &len));
-  TEST_ASSERT_EQUAL_UINT(4 + 8 * 5, len);
+  TEST_ASSERT_EQUAL_UINT(6 + 8 * 5, len);
   TEST_ASSERT_EQUAL_UINT(0, p[0]);  // mux absent
   TEST_ASSERT_EQUAL_UINT(0, p[1]);  // eeprom absent
   TEST_ASSERT_EQUAL_UINT(8, p[2]);  // channel count
+  TEST_ASSERT_EQUAL_UINT(0, p[44]);  // imu address: none
+  TEST_ASSERT_EQUAL_UINT(0, p[45]);  // imu state: not found
 }
 
 // I2C_GET_TOPOLOGY encodes the published snapshot.
@@ -304,6 +306,8 @@ void test_i2c_topology_snapshot() {
   topo.mux_present = 1;
   topo.eeprom_present = 1;
   topo.oled_present = 1;
+  topo.imu_address = 0x4A;
+  topo.imu_state = 2;  // Bno085::State::Ready
   topo.num_channels = kSensorNumChannels;
   topo.channels[2].scanned = 1;
   topo.channels[2].vcnl_present = 1;
@@ -328,6 +332,9 @@ void test_i2c_topology_snapshot() {
   TEST_ASSERT_EQUAL_UINT(2, p[16]);      // device_count
   TEST_ASSERT_EQUAL_UINT(1, p[17]);      // state Present
   TEST_ASSERT_EQUAL_UINT(1, p[43]);      // OLED initialized
+  TEST_ASSERT_EQUAL_UINT(6 + 8 * 5, len);
+  TEST_ASSERT_EQUAL_HEX8(0x4A, p[44]);   // IMU address
+  TEST_ASSERT_EQUAL_UINT(2, p[45]);      // IMU ready
 }
 
 // SENSOR_GET_STATUS encodes the published foot-status snapshot.

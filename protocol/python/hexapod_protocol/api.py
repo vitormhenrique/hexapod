@@ -1385,6 +1385,25 @@ class I2cTopologyResult:
     eeprom_present: bool
     channels: List[TopologyChannel]
     oled_present: bool = False
+    # Root-bus BNO085 IMU (additive tail): the address that ACKed (0 = none)
+    # and the bring-up state (IMU_STATE_*).
+    imu_address: int = 0
+    imu_state: int = 0
+
+    @property
+    def imu_present(self) -> bool:
+        return self.imu_state == IMU_STATE_READY
+
+
+# sensors::Bno085::State mirror.
+IMU_STATE_NOT_FOUND = 0
+IMU_STATE_NO_RESPONSE = 1
+IMU_STATE_READY = 2
+IMU_STATE_NAMES = {
+    IMU_STATE_NOT_FOUND: "not found",
+    IMU_STATE_NO_RESPONSE: "no response",
+    IMU_STATE_READY: "ready",
+}
 
 
 def parse_i2c_topology_result(payload: bytes) -> I2cTopologyResult:
@@ -1410,7 +1429,11 @@ def parse_i2c_topology_result(payload: bytes) -> I2cTopologyResult:
         )
         off += 5
     oled_present = bool(payload[off]) if off < len(payload) else False
-    return I2cTopologyResult(mux, eeprom, channels, oled_present)
+    imu_address = payload[off + 1] if off + 1 < len(payload) else 0
+    imu_state = payload[off + 2] if off + 2 < len(payload) else 0
+    return I2cTopologyResult(
+        mux, eeprom, channels, oled_present, imu_address, imu_state
+    )
 
 
 @dataclass

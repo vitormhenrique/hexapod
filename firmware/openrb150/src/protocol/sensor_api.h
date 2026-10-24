@@ -90,6 +90,8 @@ struct TopologySnapshot {
   uint8_t mux_present;
   uint8_t eeprom_present;  // wire-compatible legacy name: config storage present
   uint8_t oled_present;    // debug OLED responded to initialization
+  uint8_t imu_address;     // root-bus BNO085 address that ACKed (0 = none)
+  uint8_t imu_state;       // sensors::Bno085::State (0 none/1 no response/2 ready)
   uint8_t num_channels;   // up to kSensorNumChannels
   struct Channel {
     uint8_t scanned;

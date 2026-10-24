@@ -2988,8 +2988,10 @@ class SensorDashboardPage(BasePage):
         badges = QHBoxLayout()
         self.mux_badge = StatusBadge("Sensor multiplexer")
         self.eeprom_badge = StatusBadge("Config storage")
+        self.imu_badge = StatusBadge("IMU (BNO085)")
         badges.addWidget(self.mux_badge)
         badges.addWidget(self.eeprom_badge)
+        badges.addWidget(self.imu_badge)
         badges.addStretch(1)
         lay.addLayout(badges)
 
@@ -3091,6 +3093,7 @@ class SensorDashboardPage(BasePage):
             self.topo_table.setRowCount(0)
             self.mux_badge.set("disconnected", "idle")
             self.eeprom_badge.set("disconnected", "idle")
+            self.imu_badge.set("disconnected", "idle")
             self.topo_status.setText("Not connected.")
             for ch in range(tlm.NUM_FEET):
                 for col in range(1, len(self.LIVE_COLUMNS)):
@@ -3116,6 +3119,14 @@ class SensorDashboardPage(BasePage):
             "present" if res.eeprom_present else "missing",
             "ok" if res.eeprom_present else "warn",
         )
+        # IMU: distinguish "nothing at 0x4A/0x4B" (wiring/power) from "address
+        # ACKs but the SHTP bring-up failed" (sensor fault / bus timing).
+        if res.imu_state == api.IMU_STATE_READY:
+            self.imu_badge.set(f"ready @0x{res.imu_address:02X}", "ok")
+        elif res.imu_state == api.IMU_STATE_NO_RESPONSE:
+            self.imu_badge.set(f"no response @0x{res.imu_address:02X}", "error")
+        else:
+            self.imu_badge.set("not found (0x4A/0x4B)", "warn")
         self.topo_table.setRowCount(len(res.channels))
         for ch, chan in enumerate(res.channels):
             state_name = self.CHANNEL_STATE_NAMES.get(chan.state, str(chan.state))

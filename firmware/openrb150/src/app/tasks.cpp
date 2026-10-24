@@ -3583,6 +3583,8 @@ void publishTopologySnapshot() {
   // replacement config storage (Qwiic OpenLog) is present and SD-ready.
   s.eeprom_present = g_i2cTopology.openlog_present ? 1 : 0;
   s.oled_present = g_i2cTopology.oled_present ? 1 : 0;
+  s.imu_address = g_bno085.address();
+  s.imu_state = static_cast<uint8_t>(g_bno085.state());
   s.num_channels = protocol::kSensorNumChannels;
   for (uint8_t i = 0; i < protocol::kSensorNumChannels; ++i) {
     const i2c::ChannelInfo& c = g_i2cTopology.channels[i];
@@ -4115,8 +4117,40 @@ void i2cTask(void*) {
       g_i2cBus.scanAll(g_i2cTopology);
       g_footPresentMask = i2c::footSensorPresentMask(g_i2cTopology);
       configured_mask = 0;  // force re-power of any (re)discovered boards
+      // Re-detect the root-bus IMU too, so a sensor plugged in (or powered)
+      // after boot becomes usable without a reset.
+      {
+        const bool imu_present = g_bno085.begin();
+        taskENTER_CRITICAL();
+        g_imuSnapshot.present = imu_present;
+        g_imuSnapshot.valid = false;
+        g_imuSnapshot.sample_ms = 0;
+        taskEXIT_CRITICAL();
+      }
       publishTopologySnapshot();
       applied_scan_seq = want_scan;
+    }
+
+    // While no IMU is present, re-probe its addresses every few seconds (two
+    // address-only writes) and run the full bring-up only once one ACKs. The
+    // boot-time begin() can miss a BNO085 that is still resetting when the
+    // board powers up alongside it.
+    static uint32_t last_imu_retry_ms = 0;
+    if (!g_bno085.present()) {
+      const uint32_t retry_now_ms = millis();
+      if ((retry_now_ms - last_imu_retry_ms) >= 5000) {
+        last_imu_retry_ms = retry_now_ms;
+        if (g_i2cTopology.mux_present) g_i2cBus.selectNone();
+        if (g_bno085.probe()) {
+          const bool imu_present = g_bno085.begin();
+          taskENTER_CRITICAL();
+          g_imuSnapshot.present = imu_present;
+          g_imuSnapshot.valid = false;
+          g_imuSnapshot.sample_ms = 0;
+          taskEXIT_CRITICAL();
+          publishTopologySnapshot();
+        }
+      }
     }
 
     // Service a host-requested baseline capture (CONTACT_CALIBRATE /
