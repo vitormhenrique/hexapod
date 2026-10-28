@@ -452,6 +452,101 @@ void test_stand_is_not_reach_limited() {
   TEST_ASSERT_FALSE(out.any_unreachable);
 }
 
+// Trick leg lift: only the masked legs leave the ground, by the requested
+// amount and radially outward; the rest hold home. Clearing the mask restores
+// the plain stance bit-exactly.
+void test_lift_override_raises_only_masked_legs_then_clears() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  PipelineOutput plain;
+  pipe.update(20, plain);
+
+  pipe.setLiftOverride(0x18, 40.0f, 20.0f, 0.0f);  // both front legs
+  PipelineOutput lifted;
+  pipe.update(20, lifted);
+  TEST_ASSERT_FALSE(lifted.any_unreachable);
+  TEST_ASSERT_FALSE(lifted.any_reach_limited);
+  for (uint8_t leg = 0; leg < kNumLegs; ++leg) {
+    float hx, hy, hz;
+    pipe.engine().nominalFoot(leg, hx, hy, hz);
+    const bool masked = (0x18u >> leg) & 1u;
+    if (masked) {
+      TEST_ASSERT_INT_WITHIN(1, static_cast<int>(hz + 40.0f),
+                             lifted.legs[leg].foot_z_mm);
+      TEST_ASSERT_TRUE(lifted.legs[leg].flags & kPipelineLegFlagSwing);
+      // 20 mm further from the hip-yaw axis than home.
+      const float home_r = sqrtf(hx * hx + hy * hy);
+      const float lift_r =
+          sqrtf(static_cast<float>(lifted.legs[leg].foot_x_mm) *
+                    static_cast<float>(lifted.legs[leg].foot_x_mm) +
+                static_cast<float>(lifted.legs[leg].foot_y_mm) *
+                    static_cast<float>(lifted.legs[leg].foot_y_mm));
+      TEST_ASSERT_TRUE(lift_r > home_r + 10.0f);
+    } else {
+      TEST_ASSERT_EQUAL_INT16(plain.legs[leg].foot_z_mm,
+                              lifted.legs[leg].foot_z_mm);
+      TEST_ASSERT_FALSE(lifted.legs[leg].flags & kPipelineLegFlagSwing);
+    }
+  }
+  for (uint8_t k = 0; k < lifted.count; ++k) {
+    TEST_ASSERT_FALSE(lifted.joints[k].clamped);
+  }
+
+  pipe.setLiftOverride(0, 0.0f, 0.0f, 0.0f);
+  TEST_ASSERT_EQUAL_UINT8(0, pipe.liftMask());
+  PipelineOutput restored;
+  pipe.update(20, restored);
+  for (uint8_t k = 0; k < restored.count; ++k) {
+    TEST_ASSERT_EQUAL_UINT16(plain.joints[k].tick, restored.joints[k].tick);
+  }
+}
+
+// An absurd lift reach is pulled back to the reach margin and reported, never
+// passed to IK as an unreachable target; the lift itself survives.
+void test_lift_override_reach_is_clamped_not_unreachable() {
+  RobotConfig cfg = defaultCfg();
+  GaitPipeline pipe(cfg);
+  pipe.setGait(GaitId::Stand);
+  pipe.setLiftOverride(0x01, 30.0f, 60.0f, 60.0f);
+  PipelineOutput out;
+  pipe.update(20, out);
+  TEST_ASSERT_TRUE(out.any_reach_limited);
+  TEST_ASSERT_FALSE(out.any_unreachable);
+  float hx, hy, hz;
+  pipe.engine().nominalFoot(0, hx, hy, hz);
+  TEST_ASSERT_INT_WITHIN(1, static_cast<int>(hz + 30.0f),
+                         out.legs[0].foot_z_mm);
+}
+
+// Fast height response: with the hook on, a commanded height step lands on
+// the feet within a few cycles instead of the 250 ms RC smoothing.
+void test_fast_height_response_shortens_height_lag() {
+  RobotConfig cfg = defaultCfg();
+  PipelineOutput out;
+
+  GaitPipeline slow(cfg);
+  slow.setGait(GaitId::Stand);
+  slow.update(10, out);
+  slow.setParams(100, cfg.gait.stride_len_mm, cfg.gait.step_height_mm, 128,
+                 128);
+  for (int i = 0; i < 10; ++i) slow.update(10, out);  // 100 ms
+  const int slow_z = out.legs[0].foot_z_mm;
+
+  GaitPipeline fast(cfg);
+  fast.setGait(GaitId::Stand);
+  fast.update(10, out);
+  fast.setFastHeightResponse(true);
+  fast.setParams(100, cfg.gait.stride_len_mm, cfg.gait.step_height_mm, 128,
+                 128);
+  for (int i = 0; i < 10; ++i) fast.update(10, out);
+  const int fast_z = out.legs[0].foot_z_mm;
+
+  // 132 -> 100 mm step: slow path is ~33% there after 100 ms, fast ~92%.
+  TEST_ASSERT_TRUE(slow_z < -115);
+  TEST_ASSERT_INT_WITHIN(4, -100, fast_z);
+}
+
 void test_pipeline_exports_final_leg_targets_for_capture() {
   RobotConfig cfg = defaultCfg();
   GaitPipeline pipe(cfg);
@@ -676,6 +771,9 @@ int main(int, char**) {
   RUN_TEST(test_large_stride_is_reach_limited_not_unreachable);
   RUN_TEST(test_default_forward_stance_never_reverses_after_ik);
   RUN_TEST(test_default_lateral_stance_never_reverses_after_ik);
+  RUN_TEST(test_lift_override_raises_only_masked_legs_then_clears);
+  RUN_TEST(test_lift_override_reach_is_clamped_not_unreachable);
+  RUN_TEST(test_fast_height_response_shortens_height_lag);
   RUN_TEST(test_default_yaw_stance_never_reverses_after_ik);
   RUN_TEST(test_stand_is_not_reach_limited);
   RUN_TEST(test_pipeline_exports_final_leg_targets_for_capture);

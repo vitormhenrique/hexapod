@@ -21,97 +21,174 @@ inline float clamp01(float v) {
 //
 // Pose translations are mm and rotations rad, well inside the bridge's pose
 // envelope (controller::poselim: +/-50 mm, +/-0.4363 rad). Heights are 0..1
-// fractions of the configured safe body-height range. Frames list every field
-// in TrickKeyframe order; trailing zeros are omitted via aggregate init.
+// fractions of the configured safe body-height range (gait::rcBodyHeightMm:
+// 0 = 65 mm crouch, 0.5 = 132 mm neutral, 1 = 150 mm tall). Frames list every
+// field in TrickKeyframe order; trailing zeros are omitted via aggregate init.
 // height_frac < 0 means "do not override the live body height".
+//
+// Every program below was measured through the real ControllerCore path
+// (test/test_trick_envelope): no servo reaches its travel clamp and no foot
+// leaves the IK workspace, from any Pot2 entry height. Two rules keep it that
+// way:
+//   * Body-pose tricks (roll / pitch / yaw / shift) first bring the body to
+//     ~0.32..0.40 (105..119 mm). The home stance at the 132 mm neutral is
+//     already at ~87% of the leg reach, so a 0.25 rad roll there only
+//     straightens the high-side legs against the reach limiter and looks like
+//     the robot is "stuck"; 15..25 mm lower buys the vertical room instead.
+//   * Nothing lifts a foot or steps while the body is at the 65 mm crouch:
+//     the femur sits at about +60 deg there and any swing lift pins it on the
+//     +90 deg clamp. Stepping tricks therefore floor the live height.
+// Explicit height rates (hard-capped at config::kBodyHeightRateMaxMmPerS,
+// 200 mm/s) and pose-rate scales (hard-capped by the shaper) make each
+// keyframe reachable within its duration; the persisted RC rates (20/30 mm/s)
+// would otherwise reduce every trick to a slow drift.
+//
+// Column order: duration gait vx vy wz x y z roll pitch yaw height height_rate
+//               stride step speed pose_rate_scale lift_mask lift reach swing
+//
+// Leg bits (config leg index order): 0x01 rear-left, 0x02 rear-right,
+// 0x04 mid-right, 0x08 front-right, 0x10 front-left, 0x20 mid-left.
+constexpr uint8_t kFrontLegs = 0x18;
+constexpr uint8_t kFrontLeftLeg = 0x10;
+constexpr float kPoseSnappy = 3.0f;
+constexpr float kPoseFast = 4.0f;
 
-// Rise to a tall, level stance.
+// Rise back to the neutral, level stance.
 constexpr TrickKeyframe kStandUpFrames[] = {
-    {700, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.80f},
+    {600, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.50f, 150.0f, 0, 0, 0,
+     kPoseSnappy},
 };
 
-// Settle into the low sit pose.
+// Settle into the full crouch and stay there until a stick moves or StandUp
+// is pressed (held, so the body does not pop back up when the frame ends).
 constexpr TrickKeyframe kSitDownFrames[] = {
-    {700, GaitId::Sit, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.05f},
+    {900, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.00f, 120.0f, 0, 0, 0,
+     kPoseSnappy},
 };
 
-// Friendly body wave: tip the nose up and rock side to side, then level out.
+// Classic leg wave: shift the weight to the right, lift the front-left leg,
+// wave it side to side twice, put it back down and return to neutral.
 constexpr TrickKeyframe kWaveFrames[] = {
-    {300, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0.25f, -0.15f, 0, -1.0f},
-    {300, GaitId::Stand, 0, 0, 0, 0, 0, 0, -0.10f, -0.15f, 0, -1.0f},
-    {300, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0.25f, -0.15f, 0, -1.0f},
-    {300, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.0f},
+    {400, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy},
+    {300, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 55, 10, 0},
+    {250, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 60, 10, 30},
+    {250, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 60, 10, -30},
+    {250, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 60, 10, 30},
+    {250, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 60, 10, -30},
+    {300, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 50, 10, 0},
+    {350, GaitId::Stand, 0, 0, 0, 0, -20, 0, 0, -0.06f, 0, 0.40f, 150.0f, 0, 0,
+     0, kPoseSnappy, kFrontLeftLeg, 0, 0, 0},
+    {400, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.50f, 150.0f, 0, 0, 0,
+     kPoseSnappy},
 };
 
 // Crouch down and hold (toggle target A).
 constexpr TrickKeyframe kCrouchDownFrames[] = {
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.15f},
+    {600, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.15f, 120.0f, 0, 0, 0,
+     kPoseSnappy},
 };
 
 // Rise tall and hold (toggle target B).
 constexpr TrickKeyframe kCrouchUpFrames[] = {
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.85f},
+    {600, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.85f, 120.0f, 0, 0, 0,
+     kPoseSnappy},
 };
 
 // In-place yaw spin: ramp up a yaw twist on a walking gait, hold, then stop.
+// Keeps the live height, floored at 0.35 (112 mm) so the swing lift never
+// saturates the femur when the operator is crouched; the fast height rate
+// only matters in that floored case (otherwise no height override is active).
 constexpr TrickKeyframe kTwirlFrames[] = {
-    {300, GaitId::Tripod, 0, 0, 0.80f, 0, 0, 0, 0, 0, 0, -1.0f},
-    {1500, GaitId::Tripod, 0, 0, 0.80f, 0, 0, 0, 0, 0, 0, -1.0f},
-    {300, GaitId::Tripod, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.0f},
+    {400, GaitId::Tripod, 0, 0, 0.80f, 0, 0, 0, 0, 0, 0, -1.0f, 200.0f},
+    {1500, GaitId::Tripod, 0, 0, 0.80f, 0, 0, 0, 0, 0, 0, -1.0f, 200.0f},
+    {300, GaitId::Tripod, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1.0f, 200.0f},
 };
 
-// Stretch / push-up: dip low, push tall, dip again, settle to mid.
+// Push-ups: three full-range dips at the capped height rate, then settle.
 constexpr TrickKeyframe kStretchFrames[] = {
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.20f},
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.90f},
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.20f},
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.60f},
+    {450, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.12f, 200.0f, 0, 0, 0,
+     kPoseSnappy},
+    {450, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.95f, 200.0f, 0, 0, 0,
+     kPoseSnappy},
+    {450, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.12f, 200.0f, 0, 0, 0,
+     kPoseSnappy},
+    {450, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.95f, 200.0f, 0, 0, 0,
+     kPoseSnappy},
+    {450, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.12f, 200.0f, 0, 0, 0,
+     kPoseSnappy},
+    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.50f, 200.0f, 0, 0, 0,
+     kPoseSnappy},
 };
 
-// Hold a lean / look attitude until cancelled.
+// Hold a lean / look attitude until cancelled (slightly lowered for reach).
 constexpr TrickKeyframe kLeanLookFrames[] = {
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0.20f, 0.15f, 0.20f, -1.0f},
+    {600, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0.12f, -0.12f, 0.22f, 0.40f, 150.0f,
+     0, 0, 0, 2.0f},
 };
 
 // Looping dance: sway + yaw wiggle + body bob, repeating until cancelled.
 constexpr TrickKeyframe kDanceFrames[] = {
-    {350, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0.25f, 0, 0, 0.40f},
-    {350, GaitId::Stand, 0, 0, 0, 0, 0, 0, -0.25f, 0, 0.20f, 0.70f},
-    {350, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0.25f, 0, -0.20f, 0.40f},
-    {350, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.60f},
+    {320, GaitId::Stand, 0, 0, 0, 0, 12, 0, 0.16f, 0, 0, 0.35f, 200.0f, 0, 0, 0,
+     kPoseFast},
+    {320, GaitId::Stand, 0, 0, 0, 0, -12, 0, -0.16f, 0, 0.14f, 0.45f, 200.0f, 0,
+     0, 0, kPoseFast},
+    {320, GaitId::Stand, 0, 0, 0, 0, 12, 0, 0.16f, 0, -0.14f, 0.35f, 200.0f, 0,
+     0, 0, kPoseFast},
+    {320, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, -0.08f, 0, 0.45f, 200.0f, 0, 0, 0,
+     kPoseFast},
 };
 
-  // Low, forward body stance held until stick input cancels it. The pose remains
-  // deliberately inside the normal body-pose envelope; the usual planted-foot
-  // IK reach limiter remains authoritative.
-  constexpr TrickKeyframe kSpiderAttackFrames[] = {
-    {650, GaitId::Stand, 0, 0, 0, 18, 0, 0, 0, 0.18f, 0, 0.18f},
-  };
+// Rear-up threat pose, held until a stick cancels it: shift the body back
+// over the mid/rear legs, raise the nose, then lift and extend both front
+// legs in two beats. The body pose stays inside the normal envelope and the
+// planted-foot IK reach limiter remains authoritative.
+constexpr TrickKeyframe kSpiderAttackFrames[] = {
+    {450, GaitId::Stand, 0, 0, 0, -20, 0, 0, 0, -0.15f, 0, 0.32f, 200.0f, 0, 0,
+     0, kPoseSnappy},
+    {350, GaitId::Stand, 0, 0, 0, -20, 0, 0, 0, -0.22f, 0, 0.32f, 200.0f, 0, 0,
+     0, kPoseSnappy, kFrontLegs, 60, 30, 0},
+    {300, GaitId::Stand, 0, 0, 0, -20, 0, 0, 0, -0.22f, 0, 0.32f, 200.0f, 0, 0,
+     0, kPoseSnappy, kFrontLegs, 80, 40, 0},
+};
 
-  // This is intentionally not a ballistic jump: the robot first crouches to
-  // create leg travel, then extends at 120 mm/s (below the firmware's 200 mm/s
-  // hard height-rate cap) while a short tripod step supplies the visible flick.
-  // It still uses the normal gait -> IK -> servo-map path; no raw servo targets
-  // or direct diagnostic mode are involved.
-  constexpr TrickKeyframe kJumpKickFrames[] = {
-    {900, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.10f, 80.0f,
-     35, 40, 255},
-    {700, GaitId::Tripod, 0, 0.65f, 0, 0, 0, 0, 0, 0, 0, 0.90f, 120.0f,
-     35, 40, 255},
-    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.60f, 80.0f},
-  };
+// Spring jump with a front-leg kick. Not ballistic: the robot coils into a
+// deep crouch, extends to the tall stance at the firmware's 200 mm/s hard
+// height-rate cap with the nose coming up, kicks both front legs out at the
+// top, then lands and settles. Everything still flows through the normal
+// gait -> IK -> servo-map path; no raw servo targets or direct diagnostic
+// mode are involved.
+constexpr TrickKeyframe kJumpKickFrames[] = {
+    {500, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0.06f, 0, 0.10f, 200.0f, 0, 0, 0,
+     kPoseFast},
+    {330, GaitId::Stand, 0, 0, 0, 10, 0, 0, 0, -0.14f, 0, 1.00f, 200.0f, 0, 0,
+     0, kPoseFast},
+    {220, GaitId::Stand, 0, 0, 0, 10, 0, 0, 0, -0.14f, 0, 1.00f, 200.0f, 0, 0,
+     0, kPoseFast, kFrontLegs, 60, 35, 0},
+    {300, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.55f, 200.0f, 0, 0, 0,
+     kPoseFast, kFrontLegs, 0, 0, 0},
+    {300, GaitId::Stand, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.50f, 200.0f, 0, 0, 0,
+     kPoseFast},
+};
 
-constexpr TrickProgram kStandUpProg{kStandUpFrames, 1, false, false};
-constexpr TrickProgram kSitDownProg{kSitDownFrames, 1, false, false};
-constexpr TrickProgram kWaveProg{kWaveFrames, 4, false, false};
-constexpr TrickProgram kCrouchDownProg{kCrouchDownFrames, 1, false, true};
-constexpr TrickProgram kCrouchUpProg{kCrouchUpFrames, 1, false, true};
-constexpr TrickProgram kTwirlProg{kTwirlFrames, 3, false, false};
-constexpr TrickProgram kStretchProg{kStretchFrames, 4, false, false};
-constexpr TrickProgram kLeanLookProg{kLeanLookFrames, 1, false, true};
-constexpr TrickProgram kDanceProg{kDanceFrames, 4, true, false};
-constexpr TrickProgram kSpiderAttackProg{kSpiderAttackFrames, 1, false, true};
-constexpr TrickProgram kJumpKickProg{kJumpKickFrames, 3, false, false};
+constexpr TrickProgram kStandUpProg{kStandUpFrames, 1, false, false, 0.0f};
+constexpr TrickProgram kSitDownProg{kSitDownFrames, 1, false, true, 0.0f};
+constexpr TrickProgram kWaveProg{kWaveFrames, 9, false, false, 0.0f};
+constexpr TrickProgram kCrouchDownProg{kCrouchDownFrames, 1, false, true, 0.0f};
+constexpr TrickProgram kCrouchUpProg{kCrouchUpFrames, 1, false, true, 0.0f};
+constexpr TrickProgram kTwirlProg{kTwirlFrames, 3, false, false, 0.35f};
+constexpr TrickProgram kStretchProg{kStretchFrames, 6, false, false, 0.0f};
+constexpr TrickProgram kLeanLookProg{kLeanLookFrames, 1, false, true, 0.0f};
+constexpr TrickProgram kDanceProg{kDanceFrames, 4, true, false, 0.0f};
+constexpr TrickProgram kSpiderAttackProg{kSpiderAttackFrames, 3, false, true,
+                                         0.0f};
+constexpr TrickProgram kJumpKickProg{kJumpKickFrames, 5, false, false, 0.0f};
 
 }  // namespace
 
@@ -126,6 +203,8 @@ void TrickEngine::reset() {
   from_x_ = from_y_ = from_z_ = 0.0f;
   from_roll_ = from_pitch_ = from_yaw_ = 0.0f;
   from_height_ = 0.0f;
+  from_lift_ = from_lift_reach_ = from_lift_swing_ = 0.0f;
+  entry_height_ = 0.0f;
   crouched_ = false;
   out_ = TrickOutput();
 }
@@ -180,6 +259,8 @@ void TrickEngine::trigger(TrickId trick, float entry_height_frac,
   from_x_ = from_y_ = from_z_ = 0.0f;
   from_roll_ = from_pitch_ = from_yaw_ = 0.0f;
   from_height_ = clamp01(entry_height_frac);
+  from_lift_ = from_lift_reach_ = from_lift_swing_ = 0.0f;
+  entry_height_ = from_height_;
   // Seed the output at t=0 of the first segment so output() is valid before the
   // first update() (equals the entry pose).
   writeOutputs(prog_->frames[0], 0.0f);
@@ -203,9 +284,23 @@ void TrickEngine::captureTargets(const TrickKeyframe& kf) {
   from_roll_ = kf.roll;
   from_pitch_ = kf.pitch;
   from_yaw_ = kf.yaw;
-  if (kf.height_frac >= 0.0f) {
-    from_height_ = kf.height_frac;
+  const float h = effectiveHeight(kf);
+  if (h >= 0.0f) {
+    from_height_ = h;
   }
+  from_lift_ = kf.lift_mm;
+  from_lift_reach_ = kf.lift_reach_mm;
+  from_lift_swing_ = kf.lift_swing_mm;
+}
+
+float TrickEngine::effectiveHeight(const TrickKeyframe& kf) const {
+  if (kf.height_frac >= 0.0f) return kf.height_frac;
+  // Live-height frame: only the program's floor can turn it into an override.
+  if (prog_ != nullptr && prog_->min_live_height_frac > 0.0f &&
+      entry_height_ < prog_->min_live_height_frac) {
+    return prog_->min_live_height_frac;
+  }
+  return -1.0f;
 }
 
 void TrickEngine::writeOutputs(const TrickKeyframe& kf, float t) {
@@ -220,9 +315,10 @@ void TrickEngine::writeOutputs(const TrickKeyframe& kf, float t) {
   out_.pose.roll = lerp(from_roll_, kf.roll, t);
   out_.pose.pitch = lerp(from_pitch_, kf.pitch, t);
   out_.pose.yaw = lerp(from_yaw_, kf.yaw, t);
-  if (kf.height_frac >= 0.0f) {
+  const float h = effectiveHeight(kf);
+  if (h >= 0.0f) {
     out_.override_height = true;
-    out_.body_height_frac = clamp01(lerp(from_height_, kf.height_frac, t));
+    out_.body_height_frac = clamp01(lerp(from_height_, h, t));
   } else {
     out_.override_height = false;
   }
@@ -233,6 +329,11 @@ void TrickEngine::writeOutputs(const TrickKeyframe& kf, float t) {
   out_.stride_mm = kf.stride_mm;
   out_.step_height_mm = kf.step_height_mm;
   out_.speed_x255 = kf.speed_x255;
+  out_.pose_rate_scale = kf.pose_rate_scale;
+  out_.lift_mask = kf.lift_mask;
+  out_.lift_mm = lerp(from_lift_, kf.lift_mm, t);
+  out_.lift_reach_mm = lerp(from_lift_reach_, kf.lift_reach_mm, t);
+  out_.lift_swing_mm = lerp(from_lift_swing_, kf.lift_swing_mm, t);
 }
 
 const TrickOutput& TrickEngine::update(uint32_t dt_ms, bool sticks_active) {

@@ -103,6 +103,33 @@ void test_height_override_is_hard_capped() {
       1e-6f, 42.0f, output.body_height_mm);  // 200 mm/s hard ceiling
 }
 
+void test_pose_rate_scale_speeds_pose_but_is_hard_capped() {
+  controller::BodyCommandShaper shaper;
+  shaper.configure(limits());
+  shaper.reset(40.0f);
+  controller::BodyCommand target = desired(0.0f, 0.0f, 0.0f);
+  target.pose.x_mm = 100.0f;
+  target.pose.roll = 1.0f;
+  // x2: 50 -> 100 mm/s and 0.5 -> 1.0 rad/s, both under the ceilings.
+  target.pose_rate_scale = 2.0f;
+  const controller::BodyCommand& scaled = shaper.update(target, 10);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 1.0f, scaled.pose.x_mm);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.010f, scaled.pose.roll);
+  // x100 would be 5000 mm/s / 50 rad/s; the shaper holds the configured
+  // ceilings (200 mm/s, 2.0 rad/s) regardless of what a trick asks for.
+  shaper.reset(40.0f);
+  target.pose_rate_scale = 100.0f;
+  const controller::BodyCommand& capped = shaper.update(target, 10);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 2.0f, capped.pose.x_mm);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.020f, capped.pose.roll);
+  // Zero / one leave the configured rates alone.
+  shaper.reset(40.0f);
+  target.pose_rate_scale = 0.0f;
+  const controller::BodyCommand& plain = shaper.update(target, 10);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.5f, plain.pose.x_mm);
+  TEST_ASSERT_FLOAT_WITHIN(1e-5f, 0.005f, plain.pose.roll);
+}
+
 void test_large_dt_cannot_integrate_a_giant_command_step() {
   controller::BodyCommandShaper shaper;
   shaper.configure(limits());
@@ -135,6 +162,7 @@ int main(int, char**) {
   RUN_TEST(test_axis_maxima_clamp_the_desired_command);
   RUN_TEST(test_height_and_pose_are_rate_limited);
   RUN_TEST(test_height_override_is_hard_capped);
+  RUN_TEST(test_pose_rate_scale_speeds_pose_but_is_hard_capped);
   RUN_TEST(test_large_dt_cannot_integrate_a_giant_command_step);
   RUN_TEST(test_direct_diagnostic_is_gated_and_bumpless);
   return UNITY_END();

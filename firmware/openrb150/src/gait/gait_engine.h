@@ -67,6 +67,12 @@ constexpr float kTwistParkPos = 0.03f;
 // RC pot/ADC noise and handset edits land on the filter target, never
 // directly on the servo goals.
 constexpr float kParamFilterTau = 0.25f;  // seconds
+// Body-height filter time constant while a choreography (trick) drives the
+// height with an explicit fast rate. The BodyCommandShaper already bounds the
+// height slew to kBodyHeightRateMaxMmPerS, so this filter only has to remove
+// the per-cycle quantisation of the shaped command; the long RC smoothing
+// would otherwise smear a 300 ms spring/crouch over most of a second.
+constexpr float kTrickHeightFilterTau = 0.04f;  // seconds
 // Ignore residual stick/transport noise around centre. A stepping gait with a
 // neutral command must hold the planted home stance rather than bob in place.
 constexpr float kMotionDeadband = 0.03f;
@@ -152,6 +158,18 @@ class GaitEngine {
   void setGait(config::GaitId g);
   void setTwist(const BodyTwist& t);
 
+  // Choreography fast response: while true the body-height filter uses
+  // kTrickHeightFilterTau instead of kParamFilterTau. Only the trick path sets
+  // this, and only while it also requests an explicit (hard-capped) height
+  // rate from the BodyCommandShaper, so the per-step height change stays
+  // bounded exactly as before.
+  void setFastHeightResponse(bool fast) { fast_height_ = fast; }
+  bool fastHeightResponse() const { return fast_height_; }
+
+  // Unit radial direction of `leg`'s home azimuth in body frame B (cos, sin).
+  // Lets callers express per-leg offsets as "outward" / "tangential".
+  void legAzimuth(uint8_t leg, float& cos_a, float& sin_a) const;
+
   // Reset phase to 0.
   void reset();
 
@@ -202,6 +220,7 @@ class GaitEngine {
   float stance_radius_mm_ = 126.75f;
   float yaw_stroke_rad_ = 0.349066f;  // 20 deg
   float half_lift_ = 0.5f;
+  bool fast_height_ = false;
   // Raw configure()/setShape() targets for the filtered parameters.
   float stride_target_ = 60.0f;
   float step_target_ = 30.0f;

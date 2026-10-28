@@ -35,6 +35,13 @@ struct BodyCommand {
   // Internal choreography-only request. Zero retains the persisted normal
   // rate; BodyCommandShaper clamps every positive request to the hard ceiling.
   float height_rate_override_mm_per_s = 0.0f;
+  // Internal choreography-only request: multiply the configured pose
+  // translation / rotation rates (0 or 1 = unchanged). The shaper hard-caps
+  // the resulting rates at kBodyPoseTranslationRateMaxMmPerS /
+  // kBodyPoseRotationRateMaxMilliRadPerS, the same ceilings the persisted
+  // limits must respect, so a trick can be snappy but never faster than a
+  // host is allowed to configure.
+  float pose_rate_scale = 0.0f;
   gait::BodyPose pose{};
 };
 

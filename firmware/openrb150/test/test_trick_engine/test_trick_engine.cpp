@@ -32,76 +32,121 @@ const TrickOutput& step(TrickEngine& e, uint32_t ms) {
 
 void test_stand_up_ramps_height_and_completes() {
   TrickEngine e;
-  e.trigger(TrickId::StandUp, 0.30f, 0);
+  e.trigger(TrickId::StandUp, 0.10f, 0);
   TEST_ASSERT_TRUE(e.active());
-  // Mid-ramp (~350 ms of a 700 ms segment): height between entry 0.30 and 0.80.
-  const TrickOutput& mid = step(e, 350);
+  // Mid-ramp (300 ms of a 600 ms segment): height between entry 0.10 and 0.50.
+  const TrickOutput& mid = step(e, 300);
   TEST_ASSERT_TRUE(mid.active);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
                           static_cast<uint8_t>(mid.gait));
   TEST_ASSERT_TRUE(mid.override_height);
-  TEST_ASSERT_FLOAT_WITHIN(0.05f, 0.55f, mid.body_height_frac);
+  TEST_ASSERT_FLOAT_WITHIN(0.05f, 0.30f, mid.body_height_frac);
+  TEST_ASSERT_TRUE(mid.height_rate_mm_per_s > 0.0f);
+  TEST_ASSERT_TRUE(mid.pose_rate_scale > 1.0f);
   // Past the segment end the one-shot completes and goes inactive.
-  const TrickOutput& done = step(e, 450);
+  const TrickOutput& done = step(e, 400);
   TEST_ASSERT_FALSE(done.active);
   TEST_ASSERT_FALSE(e.active());
 }
 
-void test_sit_down_selects_sit_gait_low() {
+void test_sit_down_holds_full_crouch_on_stand_gait() {
   TrickEngine e;
   e.trigger(TrickId::SitDown, 0.60f, 0);
-  const TrickOutput& mid = step(e, 350);
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Sit),
+  const TrickOutput& mid = step(e, 450);
+  // The sit is a planted Stand-gait crouch (the Sit gait would snap the feet
+  // 70 mm in one step); it heads for the bottom of the height envelope.
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
                           static_cast<uint8_t>(mid.gait));
   TEST_ASSERT_TRUE(mid.override_height);
-  // Heading toward the 0.05 sit height (below the 0.60 entry).
   TEST_ASSERT_TRUE(mid.body_height_frac < 0.60f);
-  const TrickOutput& done = step(e, 450);
-  TEST_ASSERT_FALSE(done.active);
+  // ...and holds there instead of popping back up when the frame ends.
+  const TrickOutput& held = step(e, 3000);
+  TEST_ASSERT_TRUE(held.active);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, held.body_height_frac);
+  // StandUp replaces the hold and rises again.
+  e.trigger(TrickId::StandUp, held.body_height_frac, 0);
+  const TrickOutput& up = step(e, 600);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.50f, up.body_height_frac);
 }
 
 void test_twirl_ramps_yaw_then_stops() {
   TrickEngine e;
   e.trigger(TrickId::Twirl, 0.50f, 0);
   // Inside the hold segment the yaw twist is near full and the gait is Tripod.
-  const TrickOutput& spin = step(e, 800);
+  const TrickOutput& spin = step(e, 900);
   TEST_ASSERT_TRUE(spin.active);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Tripod),
                           static_cast<uint8_t>(spin.gait));
   TEST_ASSERT_FLOAT_WITHIN(0.05f, 0.80f, spin.twist_wz);
   TEST_ASSERT_FALSE(spin.override_height);  // twirl leaves height alone
-  // After the full 2100 ms program it completes with no residual twist.
+  // After the full 2200 ms program it completes with no residual twist.
   const TrickOutput& done = step(e, 1500);
   TEST_ASSERT_FALSE(done.active);
 }
 
-void test_wave_uses_stand_and_no_height_override() {
+void test_twirl_floors_live_height_when_entered_crouched() {
+  TrickEngine e;
+  // Entered at the 65 mm crouch: swing lift there would pin the femur on its
+  // travel clamp, so the program floors the height to 0.35 and ramps to it.
+  e.trigger(TrickId::Twirl, 0.0f, 0);
+  const TrickOutput& start = step(e, 200);
+  TEST_ASSERT_TRUE(start.override_height);
+  TEST_ASSERT_TRUE(start.body_height_frac > 0.10f);
+  TEST_ASSERT_TRUE(start.body_height_frac < 0.35f);
+  TEST_ASSERT_TRUE(start.height_rate_mm_per_s > 0.0f);
+  const TrickOutput& spin = step(e, 800);
+  TEST_ASSERT_TRUE(spin.override_height);
+  TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.35f, spin.body_height_frac);
+  // Above the floor the live height is untouched.
+  e.trigger(TrickId::Twirl, 0.40f, 0);
+  TEST_ASSERT_FALSE(step(e, 500).override_height);
+}
+
+void test_wave_lifts_front_left_leg_and_swings_it() {
   TrickEngine e;
   e.trigger(TrickId::Wave, 0.50f, 0);
-  const TrickOutput& w = step(e, 150);
-  TEST_ASSERT_TRUE(w.active);
+  // Settle frame: lowered, weight shifted right, no leg lifted yet.
+  const TrickOutput& settle = step(e, 390);
+  TEST_ASSERT_TRUE(settle.active);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
-                          static_cast<uint8_t>(w.gait));
-  TEST_ASSERT_FALSE(w.override_height);
-  // The wave tips the body (non-zero roll/pitch) but never walks.
-  TEST_ASSERT_EQUAL_FLOAT(0.0f, w.twist_vx);
-  TEST_ASSERT_EQUAL_FLOAT(0.0f, w.twist_wz);
-  // 4 x 300 ms = 1200 ms, then completes and levels out.
-  const TrickOutput& done = step(e, 1300);
+                          static_cast<uint8_t>(settle.gait));
+  TEST_ASSERT_TRUE(settle.override_height);
+  TEST_ASSERT_TRUE(settle.body_height_frac < 0.50f);
+  TEST_ASSERT_TRUE(settle.pose.y_mm < -10.0f);
+  TEST_ASSERT_EQUAL_UINT8(0, settle.lift_mask);
+  // Leg raised (front-left = leg index 4) and waving side to side.
+  const TrickOutput& up = step(e, 310);
+  TEST_ASSERT_EQUAL_UINT8(0x10, up.lift_mask);
+  TEST_ASSERT_TRUE(up.lift_mm > 50.0f);
+  const float swing_a = step(e, 250).lift_swing_mm;
+  const float swing_b = step(e, 250).lift_swing_mm;
+  TEST_ASSERT_TRUE(swing_a > 20.0f);
+  TEST_ASSERT_TRUE(swing_b < -20.0f);
+  // The wave never walks.
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, e.output().twist_vx);
+  TEST_ASSERT_EQUAL_FLOAT(0.0f, e.output().twist_wz);
+  // The foot is ramped back to the ground while still masked (no snap), then
+  // the program levels out and completes (2750 ms total).
+  const TrickOutput& down = step(e, 1140);
+  TEST_ASSERT_EQUAL_UINT8(0x10, down.lift_mask);
+  TEST_ASSERT_TRUE(down.lift_mm < 5.0f);
+  const TrickOutput& done = step(e, 700);
   TEST_ASSERT_FALSE(done.active);
 }
 
 void test_stretch_oscillates_height_then_completes() {
   TrickEngine e;
   e.trigger(TrickId::Stretch, 0.50f, 0);
-  // First dip toward 0.20. Copy the value: step() returns a reference to the
+  // First dip toward 0.12. Copy the value: step() returns a reference to the
   // engine's single output, so it is overwritten by the next step().
-  const float dip_h = step(e, 500).body_height_frac;
+  const float dip_h = step(e, 450).body_height_frac;
   TEST_ASSERT_TRUE(e.output().override_height);
-  // Push tall toward 0.90 (sampled mid second segment).
-  const float up_h = step(e, 250).body_height_frac;
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 200.0f, e.output().height_rate_mm_per_s);
+  // Push tall toward 0.95 (sampled mid second segment).
+  const float up_h = step(e, 225).body_height_frac;
   TEST_ASSERT_TRUE(up_h > dip_h);
-  const TrickOutput& done = step(e, 1300);
+  // 6 x 450/500 ms = 2750 ms, then completes.
+  const TrickOutput& done = step(e, 2200);
   TEST_ASSERT_FALSE(done.active);
 }
 
@@ -113,9 +158,11 @@ void test_lean_look_holds_until_cancelled() {
   // After the ramp it stays active, frozen at the lean attitude.
   const TrickOutput& held = step(e, 5000);
   TEST_ASSERT_TRUE(held.active);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.20f, held.pose.roll);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.15f, held.pose.pitch);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.20f, held.pose.yaw);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.12f, held.pose.roll);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, -0.12f, held.pose.pitch);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.22f, held.pose.yaw);
+  TEST_ASSERT_TRUE(held.override_height);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.40f, held.body_height_frac);
   e.cancel();
   TEST_ASSERT_FALSE(e.active());
   TEST_ASSERT_FALSE(e.update(kDt, false).active);
@@ -141,46 +188,66 @@ void test_crouch_toggle_latches_low_then_tall() {
 void test_dance_loop_stays_active() {
   TrickEngine e;
   e.trigger(TrickId::DanceLoop, 0.50f, 0);
-  // 4 x 350 ms = 1400 ms per loop; well past several loops it never completes.
+  // 4 x 320 ms = 1280 ms per loop; well past several loops it never completes.
   const TrickOutput& d = step(e, 5000);
   TEST_ASSERT_TRUE(d.active);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
                           static_cast<uint8_t>(d.gait));
   TEST_ASSERT_TRUE(d.override_height);
+  TEST_ASSERT_TRUE(d.pose_rate_scale > 1.0f);
 }
 
-void test_spider_attack_holds_low_forward_pose() {
+void test_spider_attack_rears_up_and_lifts_front_legs() {
   TrickEngine e;
   e.trigger(TrickId::SpiderAttack, 0.50f, 0);
-  const TrickOutput& attack = step(e, 1000);
-  TEST_ASSERT_TRUE(attack.active);
+  // First beat: body back and nose up on all six feet.
+  const TrickOutput& rear = step(e, 440);
+  TEST_ASSERT_TRUE(rear.active);
   TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
-                          static_cast<uint8_t>(attack.gait));
-  TEST_ASSERT_TRUE(attack.override_height);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.18f, attack.body_height_frac);
-  TEST_ASSERT_FLOAT_WITHIN(0.5f, 18.0f, attack.pose.x_mm);
-  TEST_ASSERT_FLOAT_WITHIN(0.02f, 0.18f, attack.pose.pitch);
+                          static_cast<uint8_t>(rear.gait));
+  TEST_ASSERT_TRUE(rear.override_height);
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, 0.32f, rear.body_height_frac);
+  TEST_ASSERT_TRUE(rear.pose.x_mm < -15.0f);
+  TEST_ASSERT_TRUE(rear.pose.pitch < -0.10f);
+  TEST_ASSERT_EQUAL_UINT8(0, rear.lift_mask);
+  // Then both front legs (indices 3 and 4) come up and extend; held.
+  const TrickOutput& attack = step(e, 2000);
+  TEST_ASSERT_TRUE(attack.active);
+  TEST_ASSERT_EQUAL_UINT8(0x18, attack.lift_mask);
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, 80.0f, attack.lift_mm);
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, 40.0f, attack.lift_reach_mm);
+  TEST_ASSERT_FLOAT_WITHIN(0.02f, -0.22f, attack.pose.pitch);
 }
 
-void test_jump_kick_uses_bounded_fast_height_and_gait_shape() {
+void test_jump_kick_coils_springs_kicks_and_lands() {
   TrickEngine e;
   e.trigger(TrickId::JumpKick, 0.50f, 0);
-  const TrickOutput& crouch = step(e, 450);
+  // Coil: deep crouch at the capped fast rate, no gait-shape override needed
+  // (the jump never steps).
+  const TrickOutput& crouch = step(e, 490);
   TEST_ASSERT_TRUE(crouch.active);
   TEST_ASSERT_TRUE(crouch.override_height);
-  TEST_ASSERT_TRUE(crouch.body_height_frac < 0.50f);
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 80.0f, crouch.height_rate_mm_per_s);
-  TEST_ASSERT_TRUE(crouch.override_gait_shape);
-  TEST_ASSERT_EQUAL_UINT16(35, crouch.stride_mm);
-  TEST_ASSERT_EQUAL_UINT16(40, crouch.step_height_mm);
-  TEST_ASSERT_EQUAL_UINT8(255, crouch.speed_x255);
-
-  const TrickOutput& kick = step(e, 1000);
-  TEST_ASSERT_TRUE(kick.active);
-  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Tripod),
-                          static_cast<uint8_t>(kick.gait));
-  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 120.0f, kick.height_rate_mm_per_s);
-  TEST_ASSERT_TRUE(kick.twist_vy > 0.45f);
+  TEST_ASSERT_TRUE(crouch.body_height_frac < 0.15f);
+  TEST_ASSERT_FLOAT_WITHIN(1e-3f, 200.0f, crouch.height_rate_mm_per_s);
+  TEST_ASSERT_FALSE(crouch.override_gait_shape);
+  TEST_ASSERT_EQUAL_UINT8(static_cast<uint8_t>(config::GaitId::Stand),
+                          static_cast<uint8_t>(crouch.gait));
+  // Spring: full height with the nose coming up.
+  const TrickOutput& spring = step(e, 330);
+  TEST_ASSERT_FLOAT_WITHIN(0.03f, 1.0f, spring.body_height_frac);
+  TEST_ASSERT_TRUE(spring.pose.pitch < -0.10f);
+  TEST_ASSERT_EQUAL_UINT8(0, spring.lift_mask);
+  // Kick: both front legs out at the top.
+  const TrickOutput& kick = step(e, 210);
+  TEST_ASSERT_EQUAL_UINT8(0x18, kick.lift_mask);
+  TEST_ASSERT_TRUE(kick.lift_mm > 50.0f);
+  TEST_ASSERT_TRUE(kick.lift_reach_mm > 30.0f);
+  // Land: feet ramp down while still masked, then settle and complete.
+  const TrickOutput& land = step(e, 300);
+  TEST_ASSERT_EQUAL_UINT8(0x18, land.lift_mask);
+  TEST_ASSERT_TRUE(land.lift_mm < 5.0f);
+  const TrickOutput& done = step(e, 400);
+  TEST_ASSERT_FALSE(done.active);
 }
 
 // --- cancellation ----------------------------------------------------------
@@ -219,15 +286,16 @@ void test_retrigger_restarts_program() {
 int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_stand_up_ramps_height_and_completes);
-  RUN_TEST(test_sit_down_selects_sit_gait_low);
+  RUN_TEST(test_sit_down_holds_full_crouch_on_stand_gait);
   RUN_TEST(test_twirl_ramps_yaw_then_stops);
-  RUN_TEST(test_wave_uses_stand_and_no_height_override);
+  RUN_TEST(test_twirl_floors_live_height_when_entered_crouched);
+  RUN_TEST(test_wave_lifts_front_left_leg_and_swings_it);
   RUN_TEST(test_stretch_oscillates_height_then_completes);
   RUN_TEST(test_lean_look_holds_until_cancelled);
   RUN_TEST(test_crouch_toggle_latches_low_then_tall);
   RUN_TEST(test_dance_loop_stays_active);
-  RUN_TEST(test_spider_attack_holds_low_forward_pose);
-  RUN_TEST(test_jump_kick_uses_bounded_fast_height_and_gait_shape);
+  RUN_TEST(test_spider_attack_rears_up_and_lifts_front_legs);
+  RUN_TEST(test_jump_kick_coils_springs_kicks_and_lands);
   RUN_TEST(test_sticks_active_cancels_trick);
   RUN_TEST(test_none_trigger_cancels_active);
   RUN_TEST(test_retrigger_restarts_program);

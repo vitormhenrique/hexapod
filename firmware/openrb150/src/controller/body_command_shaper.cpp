@@ -77,17 +77,31 @@ const BodyCommand& BodyCommandShaper::update(const BodyCommand& desired,
                                        target.body_height_mm,
                                        bounded_height_rate * dt_s);
 
-  const float translation_delta =
-      static_cast<float>(limits_.pose_translation_rate_mm_per_s) * dt_s;
+  const float pose_scale =
+      target.pose_rate_scale > 1.0f ? target.pose_rate_scale : 1.0f;
+  float translation_rate =
+      static_cast<float>(limits_.pose_translation_rate_mm_per_s) * pose_scale;
+  if (translation_rate >
+      static_cast<float>(config::kBodyPoseTranslationRateMaxMmPerS)) {
+    translation_rate =
+        static_cast<float>(config::kBodyPoseTranslationRateMaxMmPerS);
+  }
+  const float translation_delta = translation_rate * dt_s;
   current_.pose.x_mm = moveToward(current_.pose.x_mm, target.pose.x_mm,
                                   translation_delta);
   current_.pose.y_mm = moveToward(current_.pose.y_mm, target.pose.y_mm,
                                   translation_delta);
   current_.pose.z_mm = moveToward(current_.pose.z_mm, target.pose.z_mm,
                                   translation_delta);
-  const float rotation_delta =
+  float rotation_rate_milli =
       static_cast<float>(limits_.pose_rotation_rate_millirad_per_s) *
-      kMilliScale * dt_s;
+      pose_scale;
+  if (rotation_rate_milli >
+      static_cast<float>(config::kBodyPoseRotationRateMaxMilliRadPerS)) {
+    rotation_rate_milli =
+        static_cast<float>(config::kBodyPoseRotationRateMaxMilliRadPerS);
+  }
+  const float rotation_delta = rotation_rate_milli * kMilliScale * dt_s;
   current_.pose.roll = moveToward(current_.pose.roll, target.pose.roll,
                                   rotation_delta);
   current_.pose.pitch = moveToward(current_.pose.pitch, target.pose.pitch,

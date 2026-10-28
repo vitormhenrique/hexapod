@@ -148,6 +148,20 @@ class GaitPipeline {
   void setPreviewLeg(int8_t leg);
   int8_t previewLeg() const { return preview_leg_; }
 
+  // Choreography leg lift (trick engine): every leg whose bit is set in `mask`
+  // (bit n = leg index n) leaves the ground and holds `lift_mm` above its home
+  // foot, pushed `reach_mm` radially outward along the leg's home azimuth and
+  // `swing_mm` tangentially (CCW positive). The target gets the same
+  // reach-margin clamp as a walking/preview foot and every joint still passes
+  // the servo travel clamp, so it can never command an unsafe pose. Pass mask
+  // 0 to disable. Intended for the static gaits (Stand / Sit).
+  void setLiftOverride(uint8_t mask, float lift_mm, float reach_mm,
+                       float swing_mm);
+  uint8_t liftMask() const { return lift_mask_; }
+
+  // Choreography fast body-height response (see GaitEngine).
+  void setFastHeightResponse(bool fast) { engine_.setFastHeightResponse(fast); }
+
   // Seed the goal slew limiter for one servo from its known present position
   // (raw ticks). Called on the motion-gate rising edge with fresh status reads
   // so the joint ramps smoothly from where it actually is onto the commanded
@@ -170,6 +184,10 @@ class GaitPipeline {
   bool apply_pose_ = false;  // true while the filtered pose is non-neutral
   int8_t preview_leg_ = -1;    // gait-tune preview leg, negative = disabled
   float preview_phase_ = 0.0f;  // preview cycle position in [0, 1)
+  uint8_t lift_mask_ = 0;       // choreography lifted legs (bit per leg)
+  float lift_mm_ = 0.0f;
+  float lift_reach_mm_ = 0.0f;
+  float lift_swing_mm_ = 0.0f;
   // Per-slot arm-transition ramp state ((leg, joint) slot order). seedGoal()
   // arms a slot; it disengages permanently once the joint reaches the live
   // trajectory, so steady-state gait output is NEVER rate-clipped.

@@ -236,21 +236,49 @@ implemented by the control-task trick engine in `oha.5`.
 
 | Input | `TrickId` | Description |
 | --- | --- | --- |
-| `BTN_1` | `StandUp` | Stand up from rest |
-| `BTN_2` | `SitDown` | Sit/rest down |
-| `BTN_3` | `Wave` | Rock the standing body side to side |
+| `BTN_1` | `StandUp` | Rise to the neutral 132 mm level stance (also ends a held sit/crouch) |
+| `BTN_2` | `SitDown` | Settle into the 65 mm full crouch and **hold** it until a stick moves or `StandUp` |
+| `BTN_3` | `Wave` | Classic leg wave: shift weight right, lift the front-left leg, wave it twice, put it down |
 | `BTN_4` press | `capture_toggle_seq` | First press starts `CAPTURE.CSV`; next press stops it |
-| `NAV2 Up` | `Twirl` | Rotate body 360° in place |
-| `NAV2 Down` | `Stretch` | Full-body stretch sequence |
-| `NAV2 Left` | `JumpKick` | Crouch, bounded fast extension, then a short tripod flick |
-| `NAV2 Right` | `SpiderAttack` | Hold a low forward attack stance |
-| `NAV2 Center` | `DanceLoop` | Looping dance until cancelled |
+| `NAV2 Up` | `Twirl` | Tripod yaw spin in place (~2 s) at the live height, floored to 112 mm |
+| `NAV2 Down` | `Stretch` | Push-ups: three full-range 81 ↔ 148 mm dips at the capped rate |
+| `NAV2 Left` | `JumpKick` | Spring jump: coil to 78 mm, extend to 150 mm at the cap with the nose up, kick both front legs out, land |
+| `NAV2 Right` | `SpiderAttack` | Rear-up threat pose, **held**: body back, nose up, both front legs raised and extended |
+| `NAV2 Center` | `DanceLoop` | Looping sway / yaw wiggle / bob until cancelled |
 
-`JumpKick` is not a raw-servo or ballistic jump. It uses the normal gait, IK,
-reach-limit, servo-map, and safety-state path with a 120 mm/s internal
-height-rate request below the firmware’s 200 mm/s hard cap. Start with the
-robot supported and a clear level surface. `LeanLook` remains available to a
-host through a remapped trick binding.
+### 5.1 How tricks stay inside the servo and reach limits
+
+Every program is measured through the real `ControllerCore` path by
+`test/test_trick_envelope` (prints per-joint min/max per trick; asserts zero
+servo travel clamps and zero unreachable IK targets from the crouch, neutral
+and tall Pot2 entry heights). Two design rules follow from those numbers:
+
+- **Body-pose tricks lower the body first.** At the 132 mm neutral the home
+  foot already sits at 87 % of leg reach, so a 0.25 rad roll there only
+  straightens the high-side legs against the reach limiter and looks like the
+  robot is stuck. Wave / LeanLook / Dance / SpiderAttack run at 105–119 mm,
+  where the same tilt has 40–50 mm of vertical room and is never reach-limited.
+- **Nothing lifts a foot at the 65 mm crouch.** The femur is already at about
+  +60° there; any swing lift pins it on the +90° travel clamp. Tricks that
+  step or lift (Twirl, Wave, SpiderAttack, JumpKick) therefore either override
+  the height or floor the live Pot2 height (`TrickProgram::min_live_height_frac`).
+
+Trick keyframes can also request an explicit body-height rate (hard-capped by
+`BodyCommandShaper` at `config::kBodyHeightRateMaxMmPerS` = 200 mm/s, which
+also switches the gait engine to its 40 ms choreography height filter instead
+of the 250 ms RC smoothing), a pose-rate scale (hard-capped at the same
+200 mm/s / 2.0 rad/s ceilings a host may persist), and a **leg lift**
+(`lift_mask` + lift / radial reach / tangential swing). Lifted feet go through
+the pipeline's reach-margin clamp and the servo travel clamp like any walking
+target (`GaitPipeline::setLiftOverride`). None of this bypasses the gait →
+IK → servo-map → safety-gate path; no trick ever commands a raw servo
+position, and every hook resets to off whenever a trick ends, is cancelled,
+or RC loses authority.
+
+`JumpKick` is not a ballistic jump: with position-controlled MX-28s the spring
+phase is simply the fastest body rise the firmware allows. Start with the
+robot on a clear level surface. `LeanLook` and `CrouchToggle` remain available
+to a host through a remapped trick binding.
 
 Bindings are remappable (any boolean source → any `TrickId`, up to
 `kMaxTrickBindings` = 9).

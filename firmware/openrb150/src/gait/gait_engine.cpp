@@ -227,6 +227,16 @@ void GaitEngine::homeFoot(uint8_t leg, float& x, float& y, float& z) const {
   baseHomeFoot(leg, x, y, z);
 }
 
+void GaitEngine::legAzimuth(uint8_t leg, float& cos_a, float& sin_a) const {
+  if (leg >= config::kNumLegs) {
+    cos_a = 1.0f;
+    sin_a = 0.0f;
+    return;
+  }
+  cos_a = static_cast<float>(azimuth_cos_q15_[leg]) / kQ15;
+  sin_a = static_cast<float>(azimuth_sin_q15_[leg]) / kQ15;
+}
+
 void GaitEngine::footAt(uint8_t leg, float longitudinal,
                         float lift_fraction, float& x, float& y,
                         float& z) const {
@@ -302,7 +312,11 @@ void GaitEngine::update(uint32_t dt_ms, GaitOutput& out) {
   const float pk = (dt_s >= kParamFilterTau) ? 1.0f : dt_s / kParamFilterTau;
   stride_mm_ += (stride_target_ - stride_mm_) * pk;
   step_mm_ += (step_target_ - step_mm_) * pk;
-  body_height_mm_ += (height_target_ - body_height_mm_) * pk;
+  {
+    const float tau = fast_height_ ? kTrickHeightFilterTau : kParamFilterTau;
+    const float hk = (dt_s >= tau) ? 1.0f : dt_s / tau;
+    body_height_mm_ += (height_target_ - body_height_mm_) * hk;
+  }
   speed_ += (speed_target_ - speed_) * pk;
   // The stance radius target is capped against the workspace at the filtered
   // ride height every cycle, so lowering/raising the body via Pot2 widens or

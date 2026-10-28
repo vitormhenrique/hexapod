@@ -74,6 +74,21 @@ void GaitPipeline::setPreviewLeg(int8_t leg) {
   preview_leg_ = leg;
 }
 
+void GaitPipeline::setLiftOverride(uint8_t mask, float lift_mm,
+                                   float reach_mm, float swing_mm) {
+  lift_mask_ = static_cast<uint8_t>(mask & ((1u << config::kNumLegs) - 1u));
+  if (lift_mask_ == 0) {
+    lift_mm_ = lift_reach_mm_ = lift_swing_mm_ = 0.0f;
+    return;
+  }
+  lift_mm_ = lift_mm < 0.0f ? 0.0f : (lift_mm > kMaxStepMm ? kMaxStepMm : lift_mm);
+  constexpr float kMaxLiftOffsetMm = 60.0f;
+  lift_reach_mm_ = reach_mm < -kMaxLiftOffsetMm ? -kMaxLiftOffsetMm
+                   : (reach_mm > kMaxLiftOffsetMm ? kMaxLiftOffsetMm : reach_mm);
+  lift_swing_mm_ = swing_mm < -kMaxLiftOffsetMm ? -kMaxLiftOffsetMm
+                   : (swing_mm > kMaxLiftOffsetMm ? kMaxLiftOffsetMm : swing_mm);
+}
+
 void GaitPipeline::seedGoal(uint8_t id, uint16_t present_tick) {
   const config::ServoConfig* sc = map_.servoForId(id);
   if (sc == nullptr) return;
@@ -190,6 +205,35 @@ void GaitPipeline::update(uint32_t dt_ms, PipelineOutput& out) {
     target.y_mm = anchor_y + (preview_y - anchor_y) * scale;
     target.z_mm = preview_z;
     target.swing = preview_z > anchor_z + 0.5f;
+  }
+
+  // Choreography leg lift (trick engine): lifted legs hold a raised foot at a
+  // radial / tangential offset from home. Like the preview it is applied after
+  // the walking reach limiter, gets its own horizontal reach clamp, and the Z
+  // stays inside the engine's commanded foot-Z envelope.
+  if (lift_mask_ != 0) {
+    for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {
+      if ((lift_mask_ & (1u << leg)) == 0) continue;
+      float anchor_x, anchor_y, anchor_z;
+      engine_.nominalFoot(leg, anchor_x, anchor_y, anchor_z);
+      float cos_a, sin_a;
+      engine_.legAzimuth(leg, cos_a, sin_a);
+      const float lift_x =
+          anchor_x + cos_a * lift_reach_mm_ - sin_a * lift_swing_mm_;
+      const float lift_y =
+          anchor_y + sin_a * lift_reach_mm_ + cos_a * lift_swing_mm_;
+      float lift_z = anchor_z + lift_mm_;
+      if (lift_z > kMaxFootZMm) lift_z = kMaxFootZMm;
+      float scale = body_.bodyTargetPathScale(leg, anchor_x, anchor_y, lift_z,
+                                              lift_x, lift_y, lift_z);
+      if (scale > 1.0f) scale = 1.0f;
+      if (scale < 1.0f) out.any_reach_limited = true;
+      FootTarget& target = feet.feet[leg];
+      target.x_mm = anchor_x + (lift_x - anchor_x) * scale;
+      target.y_mm = anchor_y + (lift_y - anchor_y) * scale;
+      target.z_mm = lift_z;
+      target.swing = lift_z > anchor_z + 0.5f;
+    }
   }
 
   for (uint8_t leg = 0; leg < config::kNumLegs; ++leg) {

@@ -5,14 +5,17 @@
 //
 // Consumes the controller bridge's edge-triggered TrickId (oha.2/oha.3) and
 // turns each trick into a deterministic, time-stepped *body* choreography:
-// stand up / sit down, a friendly body wave, a crouch<->tall toggle, an
-// in-place yaw twirl, a body-z stretch/push-up, a held lean/look attitude, a
-// spider attack stance, a bounded jump-kick, and a looping dance. Every trick
-// is expressed purely as a sequence of gait id +
-// body twist + 6-DOF body-pose + body-height keyframes -- the SAME quantities
-// the RC walk path already feeds into the gait pipeline -- so a trick can never
-// command a raw servo position; it only shapes intent that the existing IK +
-// servo-map + safety gate still validate (AGENTS.md 1.1 / 5.2).
+// stand up / sit down (held crouch), a front-leg wave, a crouch<->tall toggle,
+// an in-place yaw twirl, push-ups, a held lean/look attitude, a rear-up spider
+// threat pose, a spring jump with a front-leg kick, and a looping dance. Every
+// trick is expressed purely as a sequence of gait id + body twist + 6-DOF
+// body-pose + body-height (+ optional lifted-leg offsets) keyframes -- the
+// SAME quantities the RC walk path already feeds into the gait pipeline -- so
+// a trick can never command a raw servo position; it only shapes intent that
+// the existing IK + reach limiter + servo-map + safety gate still validate
+// (AGENTS.md 1.1 / 5.2). test/test_trick_envelope measures every program
+// through the real ControllerCore path and asserts no servo travel clamp and
+// no unreachable foot from any Pot2 entry height.
 //
 // The engine is a small linear-interpolating keyframe player. A trick is a
 // TrickProgram: a fixed table of TrickKeyframe targets, each reached by ramping
@@ -45,6 +48,11 @@ namespace gait {
 // positive values request a faster, still hard-capped rate for the jump-kick.
 // A nonzero gait-shape triplet temporarily overrides the live stride, lift,
 // and cadence during a choreography segment.
+// `pose_rate_scale` (0 = configured) multiplies the body-pose slew rates so a
+// keyframe is actually reached inside its duration; the shaper hard-caps the
+// result. `lift_mask` (bit n = leg n) raises those legs off the ground by
+// `lift_mm`, pushed `lift_reach_mm` radially outward and `lift_swing_mm`
+// tangentially (CCW positive); the lift offsets are interpolated like the pose.
 //
 // Plain aggregate (no default member initializers) so the constexpr program
 // tables brace-initialize under gnu++11; omitted trailing fields value-init to
@@ -66,6 +74,11 @@ struct TrickKeyframe {
   uint16_t stride_mm;
   uint16_t step_height_mm;
   uint8_t speed_x255;
+  float pose_rate_scale;
+  uint8_t lift_mask;
+  float lift_mm;
+  float lift_reach_mm;
+  float lift_swing_mm;
 };
 
 // A trick program: an ordered keyframe table plus end-of-sequence behaviour.
@@ -74,6 +87,10 @@ struct TrickProgram {
   uint8_t count;
   bool loop;       // restart at frame 0 when the last frame finishes (dance)
   bool hold_last;  // freeze at the last frame until cancelled / re-triggered
+  // Frames that keep the live (Pot2) height (height_frac < 0) still override
+  // it up to this floor when the operator is crouched below it, so a stepping
+  // trick never runs where swing lift would saturate the femur travel.
+  float min_live_height_frac;
 };
 
 // The motion the control layer applies this cycle while a trick runs.
@@ -91,6 +108,11 @@ struct TrickOutput {
   uint16_t stride_mm = 0;
   uint16_t step_height_mm = 0;
   uint8_t speed_x255 = 0;
+  float pose_rate_scale = 0.0f;   // 0 = configured pose slew rates
+  uint8_t lift_mask = 0;          // legs held off the ground (bit per leg)
+  float lift_mm = 0.0f;
+  float lift_reach_mm = 0.0f;
+  float lift_swing_mm = 0.0f;
 };
 
 class TrickEngine {
@@ -128,6 +150,9 @@ class TrickEngine {
   void writeOutputs(const TrickKeyframe& kf, float t);
   // Latch the segment's exact targets as the next segment's ramp origin.
   void captureTargets(const TrickKeyframe& kf);
+  // Height target a frame resolves to: its own override, the program's live
+  // floor when the operator entered below it, or -1 for "keep live height".
+  float effectiveHeight(const TrickKeyframe& kf) const;
 
   bool active_;
   bool held_;  // frozen at the last frame of a hold_last program
@@ -141,6 +166,8 @@ class TrickEngine {
   float from_x_, from_y_, from_z_;
   float from_roll_, from_pitch_, from_yaw_;
   float from_height_;  // 0..1, always valid (entry or last overridden frame)
+  float from_lift_, from_lift_reach_, from_lift_swing_;
+  float entry_height_;  // live height fraction at trigger (for the floor)
 
   bool crouched_;  // CrouchToggle latch: false = tall, true = crouched
   TrickOutput out_;
