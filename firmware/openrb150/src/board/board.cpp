@@ -5,6 +5,7 @@
 #endif
 
 #include "battery_calc.h"
+#include "../dxl/discovery_timing.h"
 #include "../hil/output_guard.h"
 #include "board_pins.h"
 
@@ -14,6 +15,7 @@ namespace {
 bool g_userLedOn = false;
 bool g_dxlPowerOn = false;
 uint32_t g_dxlPowerTransitions = 0;
+dxl::PowerOnSettling g_dxlPowerSettling;
 
 #if defined(ARDUINO_ARCH_SAMD)
 // The Arduino SAMD core's analogRead() waits indefinitely for ADC register
@@ -115,6 +117,8 @@ void init() {
   g_dxlPowerOn = false;
   g_dxlPowerTransitions = 0;
 #endif
+  g_dxlPowerSettling.setPowered(false, millis());
+  g_dxlPowerSettling.setPowered(g_dxlPowerOn, millis());
 
   // --- USER LED: output, off. ---------------------------------------------
   pinMode(pins::kUserLed, OUTPUT);
@@ -193,10 +197,12 @@ void setDxlPower(bool on) {
   if (on == g_dxlPowerOn) return;
   digitalWrite(pins::kDxlPowerEnable, on ? HIGH : LOW);
   g_dxlPowerOn = on;
+  g_dxlPowerSettling.setPowered(on, millis());
   ++g_dxlPowerTransitions;
 }
 
 bool dxlPowerEnabled() { return g_dxlPowerOn; }
+bool dxlPowerReady() { return g_dxlPowerSettling.ready(millis()); }
 
 [[noreturn]] void systemReset() {
   noInterrupts();

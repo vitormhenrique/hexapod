@@ -49,8 +49,9 @@ struct StateParams {
   // A genuinely dying pack stays low, so debouncing only filters transients.
   uint16_t battery_low_debounce_ms = 250;
   // Maximum time for DXL discovery, status checks, torque-off verification,
-  // hold-goal seeding, and torque-on verification.
-  uint16_t arming_timeout_ms = 10000;
+  // hold-goal seeding, and torque-on verification. Includes the 1 s rail/boot
+  // settling guard and up to three scheduler-spaced discovery attempts/ID.
+  uint16_t arming_timeout_ms = 15000;
   // Idle auto-disarm: an ARMED robot (StandReady / RC / contact / Jetson
   // states) with no motion activity for this long drops to Disarmed, which
   // cuts DXL power via stateAllowsDxlPower -- 18 idle MX-28s holding torque

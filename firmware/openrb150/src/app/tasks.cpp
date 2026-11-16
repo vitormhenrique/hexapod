@@ -2317,9 +2317,13 @@ bool advanceDxlScanJob() {
     return true;
   }
 
+  const uint32_t now_ms = millis();
+  if (!board::dxlPowerReady() || !g_dxlScanJob.cursor.ready(now_ms)) {
+    return true;  // leave the job Running without blocking the DXL task
+  }
   watchdog::markProgress(21);
-  g_dxlBus.discoverId(g_dxlScanJob.cursor.currentId());
-  if (!g_dxlScanJob.cursor.advanceAfterPing()) {
+  const bool found = g_dxlBus.discoverId(g_dxlScanJob.cursor.currentId());
+  if (!g_dxlScanJob.cursor.advanceAfterPing(found, millis())) {
     completeDxlScanJob(g_dxlScanJob.job_id);
     g_dxlScanJob.active = false;
   }
@@ -2671,10 +2675,8 @@ void dxlTask(void*) {
   bool arming_event_noted = false;
   bool arming_torque_off_verified = false;
   bool arming_hold_seeded = false;
-  uint8_t arming_discovery_index = 0;
+  dxl::ScanCursor arming_discovery_cursor;
   uint32_t arming_status_checked_mask = 0;
-  uint32_t arming_power_on_ms = 0;
-  constexpr uint16_t kServoBootDelayMs = 500;
   // Sustained dead-bus window before declaring a hard bus fault (lmt.5).
   constexpr uint16_t kDxlBusFailLimit = 50;  // ~1 s at the 50 Hz dxl period
   dxl::FaultMonitor servo_fault_monitor;
@@ -2712,36 +2714,46 @@ void dxlTask(void*) {
       if (!board::dxlPowerEnabled()) {
         watchdog::markProgress(10);
         board::setDxlPower(true);
-        arming_power_on_ms = now_ms;
-        arming_discovery_started = false;
+        // A new power cycle invalidates even a previously complete scan.
+        g_dxlBus.beginDiscovery();
+        g_configuredServoCoverage = false;
+        arming_discovery_started = true;
         arming_discovery_finished = false;
         arming_torque_off_verified = false;
         arming_hold_seeded = false;
-        arming_discovery_index = 0;
+        arming_discovery_cursor.begin(1, config::kNumServos);
         arming_status_checked_mask = 0;
         clearServoStatusSnapshot();
       }
-      if ((now_ms - arming_power_on_ms) >= kServoBootDelayMs) {
+      if (board::dxlPowerReady()) {
         if (!arming_discovery_started) {
           if (configuredServoCoverageFromBus()) {
             arming_discovery_finished = true;
           } else {
             g_dxlBus.beginDiscovery();
             g_configuredServoCoverage = false;
-            arming_discovery_index = 0;
+            // Cursor IDs here are 1-based config slots, not bus IDs; custom
+            // servo maps need not be contiguous or sorted.
+            arming_discovery_cursor.begin(1, config::kNumServos);
             arming_discovery_started = true;
             arming_discovery_finished = false;
             clearServoStatusSnapshot();
           }
         }
-        if (arming_discovery_started && !arming_discovery_finished) {
+        if (arming_discovery_started && !arming_discovery_finished &&
+            arming_discovery_cursor.ready(millis())) {
           const config::RobotConfig& cfg = g_configApi.config();
           watchdog::markProgress(11);
-          const uint8_t discover_id = cfg.servos[arming_discovery_index].id;
-          if (!g_dxlBus.discoverId(discover_id)) {
+          const uint8_t slot = arming_discovery_cursor.currentId();
+          const uint8_t discover_id = cfg.servos[slot - 1].id;
+          const bool found = g_dxlBus.discoverId(discover_id);
+          const bool more =
+              arming_discovery_cursor.advanceAfterPing(found, millis());
+          if (!found &&
+              (!more || arming_discovery_cursor.currentId() != slot)) {
             noteError(safety::ErrorCode::DxlDiscoveryIncomplete, discover_id,
                       safety::ErrorSeverity::Error, now_ms);
-          } else {
+          } else if (found) {
             const dxl::ServoProfile* profile =
                 g_dxlBus.profileById(discover_id);
             if (profile == nullptr ||
@@ -2751,8 +2763,7 @@ void dxlTask(void*) {
                         safety::ErrorSeverity::Error, now_ms);
             }
           }
-          ++arming_discovery_index;
-          if (arming_discovery_index >= config::kNumServos) {
+          if (!more) {
             arming_discovery_finished = true;
           }
           publishServoReadiness();
@@ -2827,7 +2838,7 @@ void dxlTask(void*) {
       arming_discovery_finished = false;
       arming_torque_off_verified = false;
       arming_hold_seeded = false;
-      arming_discovery_index = 0;
+      arming_discovery_cursor.reset();
       arming_status_checked_mask = 0;
       arming_event_noted = false;
       g_dxlArmingReady = false;

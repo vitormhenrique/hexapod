@@ -59,6 +59,9 @@ class DxlBus {
   // when DXL power dropped mid-stream; found on HIL, hexapod_src-2e8).
   static constexpr uint32_t kReadTimeoutMs = 20;
   static constexpr uint32_t kWriteTimeoutMs = 20;
+  // Discovery gets twice the library ping helper's fixed 10 ms budget,
+  // without increasing normal motion/status transaction timeouts.
+  static constexpr uint32_t kPingTimeoutMs = 20;
 
   // `dir_pin` drives the half-duplex transceiver's TX-enable (high = transmit)
   // on boards without automatic direction control (MicroMod carrier DXL_TXEN).
@@ -74,12 +77,13 @@ class DxlBus {
     cooperative_service_hook_ = hook;
   }
 
-  // Ping a single ID, trying Protocol 2.0 then 1.0, and classify it. Returns
+  // Ping a single ID, trying Protocol 1.0 then 2.0, and classify it. Returns
   // true and fills `out` on success. Maintenance-safe (no torque/goal writes).
   bool ping(uint8_t id, ServoProfile& out);
 
   // Incremental discovery used by RC arming. beginDiscovery() clears the
-  // profile table; each discoverId() call performs at most one servo ping. It
+  // profile table; each discoverId() call performs one bounded ping operation
+  // (up to two passes over both protocols, yielding between transactions). It
   // is also the only supported maintenance-scan primitive so the high-priority
   // DXL task can return to the scheduler between IDs.
   void beginDiscovery();

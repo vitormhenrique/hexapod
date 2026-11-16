@@ -87,6 +87,9 @@ void setRgbStatusLed(uint8_t r, uint8_t g, uint8_t b);
 bool hasDxlPowerControl();
 void setDxlPower(bool on);
 bool dxlPowerEnabled();
+// True only after the actual OFF->ON edge has settled for the servo boot
+// interval. Repeated enable requests do not restart it; power-off resets it.
+bool dxlPowerReady();
 // Number of actual ON/OFF state changes since boot. Redundant writes do not
 // increment it; useful for separating firmware rail cuts from bus brownouts.
 uint32_t dxlPowerTransitions();

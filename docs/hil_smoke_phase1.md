@@ -105,15 +105,44 @@ attempted operations. Do not run this mode with the normal `openrb150` image.
 
 ### Absent-ID watchdog regression
 
+Discovery now waits **1000 ms from the actual FET OFF-to-ON edge**, including
+when a maintenance power command is immediately followed by a scan. Repeated
+power-on requests do not restart this interval. A missed ID gets **three
+discovery attempts**, separated by at least **50 ms after a failed attempt**;
+successful IDs advance immediately. Each attempt tries both protocols in up
+to two passes, using an explicit **20 ms ping timeout** (previously the
+library helper fixed it at 10 ms). Model, firmware, and torque-state reads
+remain bounded at 20 ms, with a scheduler yield between discovery transactions.
+Normal motion read/write timeouts are unchanged. The RC arming deadline is
+**15 s** to accommodate settling, retries, and the existing all-servo safety
+checks; missing configured servos still prevent arming.
+
 With the expected 18-servo bus connected and torque off, request `DXL_SCAN`
 for IDs `1..30`. Poll `DXL_GET_RESULT` until it completes. Confirm:
 
-- [ ] The scan remains responsive while the 12 absent IDs time out one per DXL
-      task cycle.
+- [ ] The scan remains responsive while the 12 absent IDs exhaust bounded
+      retries, at most one discovery attempt per DXL task cycle.
 - [ ] `GET_STATUS` never reports a watchdog miss, `FaultHard`, or `ESTOP`.
 - [ ] The maintenance lock remains valid through the completed result.
 - [ ] The result contains the discovered servos and no stale pre-scan status
       values are reported while it is still running.
+
+Repeat at least 20 torque-off power-off/power-on/scan cycles, requesting the
+scan immediately after the power-on acknowledgement. Record the returned IDs,
+elapsed scan time, battery voltage, and watchdog counters. Require 18/18 on
+every healthy-bus run. Use a bus/rail probe to confirm no scan packet precedes
+the 1 s settling window. Repeat a scan without cycling power to confirm an
+already-settled bus does not wait another second. Broad ranges with many
+absent IDs take longer; keep heartbeats/maintenance lock alive and allow a
+longer host result-poll deadline (up to 120 s for IDs 1..252).
+
+On a supported robot with RC kill reachable, disconnect one configured servo
+while power is OFF and attempt RC arming. Confirm no transition to StandReady,
+no torque-enable packet, and a bounded ArmingTimeout (15 s); verify kill/estop
+still cuts power during settling or retry waits. Restore all servos with power
+OFF, then verify the normal position-read/torque-off/hold-seed/torque-on sequence
+still completes. These physical checks are required before ground testing;
+native timing tests and successful builds do not prove electrical reliability.
 
 ## 4. I2C topology (mux + sensors)
 

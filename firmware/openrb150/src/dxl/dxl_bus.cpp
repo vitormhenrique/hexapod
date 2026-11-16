@@ -61,13 +61,33 @@ bool DxlBus::ping(uint8_t id, ServoProfile& out) {
   for (uint8_t pass = 0; pass < kPingPasses; ++pass) {
     for (float proto : kProtoTryOrder) {
       dxl_.setPortProtocolVersion(proto);
-      if (!dxl_.ping(id)) {
+      // Use Master directly: the convenience ping hard-codes 10 ms and
+      // hides a separate legacy model read. Bound and check both steps so a
+      // lost model response is retried rather than cached as model 0xFFFF.
+      DYNAMIXEL::InfoFromPing_t info{};
+      const bool replied =
+          dxl_.DYNAMIXEL::Master::ping(id, &info, 1, kPingTimeoutMs) == 1 &&
+          info.id == id;
+      if (cooperative_service_hook_ != nullptr) cooperative_service_hook_();
+      if (!replied) {
         continue;
       }
 
-      const uint16_t model = dxl_.getModelNumber(id);
+      uint16_t model = info.model_number;
+      if (proto < 2.0f) {
+        uint8_t bytes[2] = {};
+        const bool model_ok =
+            dxl_.read(id, 0, sizeof(bytes), bytes, sizeof(bytes),
+                      kReadTimeoutMs) == static_cast<int32_t>(sizeof(bytes));
+        if (cooperative_service_hook_ != nullptr) cooperative_service_hook_();
+        if (!model_ok) continue;
+        model = static_cast<uint16_t>(bytes[0]) |
+                (static_cast<uint16_t>(bytes[1]) << 8);
+      }
+      if (!dxl_.setModelNumber(id, model)) continue;
       int32_t fw = 0;
       readItem(FIRMWARE_VERSION, id, fw);  // best-effort
+      if (cooperative_service_hook_ != nullptr) cooperative_service_hook_();
 
       fillProfileFromModel(out, model, static_cast<uint8_t>(fw));
       out.id = id;
@@ -75,8 +95,12 @@ bool DxlBus::ping(uint8_t id, ServoProfile& out) {
       // Record the protocol actually used to reach the servo, which can differ
       // from the table-implied default (e.g. a legacy MX flashed to Protocol 2).
       out.protocol_version = (proto >= 2.0f) ? 2 : 1;
-      out.torque_enabled = dxl_.getTorqueEnableStat(id);
+      // A failed torque-state read must not masquerade as confirmed OFF.
+      int32_t torque = 1;
+      const bool torque_ok = readItem(TORQUE_ENABLE, id, torque);
+      out.torque_enabled = !torque_ok || torque != 0;
       out.last_error = static_cast<uint8_t>(dxl_.getLastLibErrCode());
+      if (cooperative_service_hook_ != nullptr) cooperative_service_hook_();
 
       stats_.pings_ok++;
       return true;

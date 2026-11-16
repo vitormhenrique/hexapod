@@ -56,6 +56,70 @@ void test_scan_cursor_rejects_invalid_ranges_and_resets() {
   TEST_ASSERT_FALSE(cursor.active());
 }
 
+void test_scan_retries_missing_id_after_quiet_interval() {
+  dxl::ScanCursor cursor;
+  TEST_ASSERT_TRUE(cursor.begin(7, 8));
+  TEST_ASSERT_TRUE(cursor.ready(0));
+  TEST_ASSERT_TRUE(cursor.advanceAfterPing(false, 10));
+  TEST_ASSERT_EQUAL_UINT8(7, cursor.currentId());
+  TEST_ASSERT_FALSE(cursor.ready(10 + dxl::kDiscoveryRetryDelayMs - 1));
+  TEST_ASSERT_TRUE(cursor.ready(10 + dxl::kDiscoveryRetryDelayMs));
+  TEST_ASSERT_TRUE(cursor.advanceAfterPing(true, 60));
+  TEST_ASSERT_EQUAL_UINT8(8, cursor.currentId());
+  TEST_ASSERT_TRUE(cursor.ready(60));
+  TEST_ASSERT_FALSE(cursor.advanceAfterPing(true, 60));
+  TEST_ASSERT_FALSE(cursor.ready(1000));
+}
+
+void test_scan_exhausts_retries_and_resets_budget_for_next_id() {
+  dxl::ScanCursor cursor;
+  TEST_ASSERT_TRUE(cursor.begin(1, 2));
+  for (uint8_t id = 1; id <= 2; ++id) {
+    for (uint8_t attempt = 1; attempt <= dxl::kDiscoveryAttempts; ++attempt) {
+      TEST_ASSERT_EQUAL_UINT8(id, cursor.currentId());
+      TEST_ASSERT_EQUAL(id < 2 || attempt < dxl::kDiscoveryAttempts,
+                        cursor.advanceAfterPing(false, attempt * 100));
+    }
+  }
+  TEST_ASSERT_FALSE(cursor.active());
+  TEST_ASSERT_FALSE(cursor.advanceAfterPing(false, 999));
+}
+
+void test_scan_restart_clears_retry_wait_and_wraps_clock_safely() {
+  dxl::ScanCursor cursor;
+  TEST_ASSERT_TRUE(cursor.begin(18, 18));
+  TEST_ASSERT_TRUE(cursor.advanceAfterPing(false, UINT32_MAX - 20));
+  TEST_ASSERT_FALSE(cursor.ready(28));  // 49 ms across rollover
+  TEST_ASSERT_TRUE(cursor.ready(29));
+  cursor.reset();
+  TEST_ASSERT_FALSE(cursor.ready(1000));
+  TEST_ASSERT_TRUE(cursor.begin(252, 252));
+  TEST_ASSERT_TRUE(cursor.ready(0));
+  TEST_ASSERT_FALSE(cursor.advanceAfterPing());
+  TEST_ASSERT_FALSE(cursor.active());
+}
+
+void test_power_settles_from_real_enable_edge_not_redundant_request() {
+  dxl::PowerOnSettling power;
+  TEST_ASSERT_FALSE(power.ready(100000));
+  power.setPowered(true, 5000);
+  TEST_ASSERT_FALSE(power.ready(5000 + dxl::kPowerOnSettleMs - 1));
+  power.setPowered(true, 5500);
+  TEST_ASSERT_TRUE(power.ready(5000 + dxl::kPowerOnSettleMs));
+  power.setPowered(false, 6100);
+  TEST_ASSERT_FALSE(power.ready(100000));
+  power.setPowered(true, 100000);
+  TEST_ASSERT_FALSE(power.ready(100000));
+  TEST_ASSERT_TRUE(power.ready(100000 + dxl::kPowerOnSettleMs));
+}
+
+void test_power_settling_clock_rollover() {
+  dxl::PowerOnSettling power;
+  power.setPowered(true, UINT32_MAX - 499);
+  TEST_ASSERT_FALSE(power.ready(499));
+  TEST_ASSERT_TRUE(power.ready(500));
+}
+
 // --- DxlJobQueue ------------------------------------------------------------
 
 void test_queue_submit_claim_complete_poll_roundtrip() {
@@ -634,6 +698,11 @@ int main(int, char**) {
   UNITY_BEGIN();
   RUN_TEST(test_scan_cursor_advances_one_id_per_turn);
   RUN_TEST(test_scan_cursor_rejects_invalid_ranges_and_resets);
+  RUN_TEST(test_scan_retries_missing_id_after_quiet_interval);
+  RUN_TEST(test_scan_exhausts_retries_and_resets_budget_for_next_id);
+  RUN_TEST(test_scan_restart_clears_retry_wait_and_wraps_clock_safely);
+  RUN_TEST(test_power_settles_from_real_enable_edge_not_redundant_request);
+  RUN_TEST(test_power_settling_clock_rollover);
   RUN_TEST(test_queue_submit_claim_complete_poll_roundtrip);
   RUN_TEST(test_queue_busy_while_in_flight);
   RUN_TEST(test_queue_resubmit_overwrites_collected_result);

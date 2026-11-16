@@ -93,8 +93,9 @@ void test_arming_checks_timeout_reports_soft_fault() {
   m.update(in, 20);  // observe released arm switch
   in.rc_armed = true;
   TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 30));
-  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 10029));
-  TEST_ASSERT_EQUAL(State::FaultSoft, m.update(in, 10030));
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 10030));
+  TEST_ASSERT_EQUAL(State::ArmingChecks, m.update(in, 15029));
+  TEST_ASSERT_EQUAL(State::FaultSoft, m.update(in, 15030));
   TEST_ASSERT_EQUAL(FaultReason::ArmingTimeout, m.faultReason());
 }
 
